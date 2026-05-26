@@ -241,39 +241,39 @@ No data migration is required. This phase introduces runtime config requirements
 
 #### Automated
 
-- [x] 1.1 Project builds after auth scaffolding: cargo build --release
-- [x] 1.2 Unit tests for auth parsing/validation pass: cargo test auth
-- [x] 1.3 No formatting regressions: cargo fmt -- --check
+- [x] 1.1 Project builds after auth scaffolding: cargo build --release — df61033
+- [x] 1.2 Unit tests for auth parsing/validation pass: cargo test auth — df61033
+- [x] 1.3 No formatting regressions: cargo fmt -- --check — df61033
 
 #### Manual
 
-- [x] 1.4 Service exits with explicit startup error when any required auth env var is missing
-- [x] 1.5 Service starts successfully when all required auth env vars are present
+- [x] 1.4 Service exits with explicit startup error when any required auth env var is missing — df61033
+- [x] 1.5 Service starts successfully when all required auth env vars are present — df61033
 
 ### Phase 2: Route Protection and Response Semantics
 
 #### Automated
 
-- [x] 2.1 Build passes with route guards in place: cargo build --release
-- [x] 2.2 Route-level integration tests for auth pass: cargo test routes_auth
-- [x] 2.3 Lint checks pass if enabled: cargo clippy --all-targets --all-features -- -D warnings
+- [x] 2.1 Build passes with route guards in place: cargo build --release — df61033
+- [x] 2.2 Route-level integration tests for auth pass: cargo test routes_auth — df61033
+- [x] 2.3 Lint checks pass if enabled: cargo clippy --all-targets --all-features -- -D warnings — df61033
 
 #### Manual
 
-- [x] 2.4 GET /health returns 200 without auth
-- [x] 2.5 Protected proxy route enforces Bearer token contract
-- [x] 2.6 Protected dashboard route enforces Basic auth challenge/acceptance
+- [x] 2.4 GET /health returns 200 without auth — df61033
+- [x] 2.5 Protected proxy route enforces Bearer token contract — df61033
+- [x] 2.6 Protected dashboard route enforces Basic auth challenge/acceptance — df61033
 
 ### Phase 3: Verification and Deployment Readiness
 
 #### Automated
 
-- [x] 3.1 Full test run passes: cargo test
-- [x] 3.2 Release build still passes: cargo build --release
-- [x] 3.3 Deploy workflow remains valid with pre-deploy checks
+- [x] 3.1 Full test run passes: cargo test — df61033
+- [x] 3.2 Release build still passes: cargo build --release — df61033
+- [x] 3.3 Deploy workflow remains valid with pre-deploy checks — df61033
 
 #### Manual
 
-- [x] 3.4 Render service has required auth env vars configured before deploy
-- [x] 3.5 Post-deploy smoke check confirms public/protected route behavior
-- [x] 3.6 Secret rotation via env update + redeploy invalidates old credential behavior
+- [x] 3.4 Render service has required auth env vars configured before deploy — df61033
+- [x] 3.5 Post-deploy smoke check confirms public/protected route behavior — df61033
+- [x] 3.6 Secret rotation via env update + redeploy invalidates old credential behavior — df61033
