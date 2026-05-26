@@ -1,7 +1,7 @@
 ---
 change_id: auth-scaffold-access-keys
 title: Auth Scaffold Access Keys
-status: implemented
+status: plan_reviewed
 created: 2026-05-26
 updated: 2026-05-26
 archived_at: null
