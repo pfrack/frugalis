@@ -5,6 +5,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: render-production
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -12,25 +16,27 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Render CLI
-        run: |
-          brew update
-          brew install render
+      - name: Check out code
+        uses: actions/checkout@v4
 
-      - name: Trigger deploy and wait
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Trigger deploy via webhook
         env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
         run: |
-          if [ -z "$RENDER_API_KEY" ]; then
-            echo "Missing required secret: RENDER_API_KEY"
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "Missing required secret: RENDER_DEPLOY_HOOK"
             exit 1
           fi
 
-          if [ -z "$RENDER_SERVICE_ID" ]; then
-            echo "Missing required secret: RENDER_SERVICE_ID"
-            exit 1
-          fi
+          echo "Triggering Render deployment..."
+          curl -X POST "$RENDER_DEPLOY_HOOK" \
+            -H "Content-Type: application/json" \
+            -d "{\"ref\":\"$(git rev-parse HEAD)\"}"
 
-          echo "Deploying Render service: $RENDER_SERVICE_ID"
-          render deploys create "$RENDER_SERVICE_ID" --wait --confirm -o json
+          echo "Deploy hook triggered successfully"
