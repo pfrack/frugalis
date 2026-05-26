@@ -241,39 +241,39 @@ No data migration is required. This phase introduces runtime config requirements
 
 #### Automated
 
-- [ ] 1.1 Project builds after auth scaffolding: cargo build --release
-- [ ] 1.2 Unit tests for auth parsing/validation pass: cargo test auth
-- [ ] 1.3 No formatting regressions: cargo fmt -- --check
+- [x] 1.1 Project builds after auth scaffolding: cargo build --release
+- [x] 1.2 Unit tests for auth parsing/validation pass: cargo test auth
+- [x] 1.3 No formatting regressions: cargo fmt -- --check
 
 #### Manual
 
-- [ ] 1.4 Service exits with explicit startup error when any required auth env var is missing
-- [ ] 1.5 Service starts successfully when all required auth env vars are present
+- [x] 1.4 Service exits with explicit startup error when any required auth env var is missing
+- [x] 1.5 Service starts successfully when all required auth env vars are present
 
 ### Phase 2: Route Protection and Response Semantics
 
 #### Automated
 
-- [ ] 2.1 Build passes with route guards in place: cargo build --release
-- [ ] 2.2 Route-level integration tests for auth pass: cargo test routes_auth
-- [ ] 2.3 Lint checks pass if enabled: cargo clippy --all-targets --all-features -- -D warnings
+- [x] 2.1 Build passes with route guards in place: cargo build --release
+- [x] 2.2 Route-level integration tests for auth pass: cargo test routes_auth
+- [x] 2.3 Lint checks pass if enabled: cargo clippy --all-targets --all-features -- -D warnings
 
 #### Manual
 
-- [ ] 2.4 GET /health returns 200 without auth
-- [ ] 2.5 Protected proxy route enforces Bearer token contract
-- [ ] 2.6 Protected dashboard route enforces Basic auth challenge/acceptance
+- [x] 2.4 GET /health returns 200 without auth
+- [x] 2.5 Protected proxy route enforces Bearer token contract
+- [x] 2.6 Protected dashboard route enforces Basic auth challenge/acceptance
 
 ### Phase 3: Verification and Deployment Readiness
 
 #### Automated
 
-- [ ] 3.1 Full test run passes: cargo test
-- [ ] 3.2 Release build still passes: cargo build --release
-- [ ] 3.3 Deploy workflow remains valid with pre-deploy checks
+- [x] 3.1 Full test run passes: cargo test
+- [x] 3.2 Release build still passes: cargo build --release
+- [x] 3.3 Deploy workflow remains valid with pre-deploy checks
 
 #### Manual
 
-- [ ] 3.4 Render service has required auth env vars configured before deploy
-- [ ] 3.5 Post-deploy smoke check confirms public/protected route behavior
-- [ ] 3.6 Secret rotation via env update + redeploy invalidates old credential behavior
+- [x] 3.4 Render service has required auth env vars configured before deploy
+- [x] 3.5 Post-deploy smoke check confirms public/protected route behavior
+- [x] 3.6 Secret rotation via env update + redeploy invalidates old credential behavior

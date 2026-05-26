@@ -22,6 +22,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Run auth verification tests
+        run: |
+          cargo test auth
+          cargo test routes_auth
+
       - name: Build release binary
         run: cargo build --release
 
