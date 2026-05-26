@@ -1,0 +1,36 @@
+name: Deploy to Render
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Render CLI
+        run: |
+          brew update
+          brew install render
+
+      - name: Trigger deploy and wait
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          if [ -z "$RENDER_API_KEY" ]; then
+            echo "Missing required secret: RENDER_API_KEY"
+            exit 1
+          fi
+
+          if [ -z "$RENDER_SERVICE_ID" ]; then
+            echo "Missing required secret: RENDER_SERVICE_ID"
+            exit 1
+          fi
+
+          echo "Deploying Render service: $RENDER_SERVICE_ID"
+          render deploys create "$RENDER_SERVICE_ID" --wait --confirm -o json

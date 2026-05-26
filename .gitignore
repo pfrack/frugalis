@@ -1,0 +1,15 @@
+# === Rust / Cargo ===
+/target/
+
+# Backup files (rustfmt, editors)
+**/*.rs.bk
+
+# Debug symbols (Windows)
+*.pdb
+
+# Rust compiler crash logs
+rustc-ice-*.txt
+
+.idea/
+*.swp
+.DS_Store
