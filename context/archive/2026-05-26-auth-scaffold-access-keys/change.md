@@ -1,10 +1,10 @@
 ---
 change_id: auth-scaffold-access-keys
 title: Auth Scaffold Access Keys
-status: impl_reviewed
+status: archived
 created: 2026-05-26
-updated: 2026-05-29
-archived_at: null
+updated: 2026-06-01
+archived_at: 2026-06-01T20:37:16Z
 ---
 
 ## Notes

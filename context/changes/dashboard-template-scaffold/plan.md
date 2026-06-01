@@ -271,5 +271,5 @@ var additions, no Render configuration changes.
 
 #### Manual
 
-- [ ] 2.4 Browser: authenticated `GET /dashboard/` renders "Cerebrum Dashboard" HTML page
-- [ ] 2.5 `curl` without credentials returns `401`
+- [x] 2.4 Browser: authenticated `GET /dashboard/` renders "Cerebrum Dashboard" HTML page
+- [x] 2.5 `curl` without credentials returns `401`

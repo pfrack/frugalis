@@ -477,5 +477,5 @@ api_key_env = "OPENAI_API_KEY"
 
 #### Manual
 
-- [ ] 4.5 routing.toml.example demonstrates all three provider types
-- [ ] 4.6 All test RouteEntry constructors compile with new fields
+- [x] 4.5 routing.toml.example demonstrates all three provider types
+- [x] 4.6 All test RouteEntry constructors compile with new fields

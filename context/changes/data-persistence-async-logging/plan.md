@@ -280,12 +280,12 @@ Persistence path must stay off the synchronous response path. Runtime overhead t
 
 #### Manual
 
-- [ ] 3.4 Triggering protected completion route creates a new row in inference table with expected fields
-- [ ] 3.5 Stored snippet respects configured length and excludes full prompt body
-- [ ] 3.6 When DB is temporarily unreachable, client response remains successful and failure appears in service logs
+- [x] 3.4 Triggering protected completion route creates a new row in inference table with expected fields
+- [x] 3.5 Stored snippet respects configured length and excludes full prompt body
+- [x] 3.6 When DB is temporarily unreachable, client response remains successful and failure appears in service logs
 
 #### Manual
 
-- [ ] 3.4 Triggering protected completion route creates a new row in inference table with expected fields
-- [ ] 3.5 Stored snippet respects configured length and excludes full prompt
-- [ ] 3.6 When DB is temporarily unreachable, client response remains successful and failure appears in service logs
+- [x] 3.4 Triggering protected completion route creates a new row in inference table with expected fields
+- [x] 3.5 Stored snippet respects configured length and excludes full prompt
+- [x] 3.6 When DB is temporarily unreachable, client response remains successful and failure appears in service logs

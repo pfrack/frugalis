@@ -3,7 +3,7 @@ project: cerebrum
 version: 1
 status: draft
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-06-01
 prd_version: 1
 main_goal: speed
 top_blocker: time
@@ -29,7 +29,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 
 | ID | Change ID | Outcome (user can …) | Prerequisites | PRD refs | Status |
 |---|---|---|---|---|---|
-| F-01 | auth-scaffold-access-keys | (foundation) Access key/token validation + operator dashboard auth gates are in place | — | FR-001, Access Control | proposed |
+| F-01 | auth-scaffold-access-keys | (foundation) Access key/token validation + operator dashboard auth gates are in place | — | FR-001, Access Control | done |
 | F-02 | data-persistence-async-logging | (foundation) Async inference logging pipeline connected to Supabase PostgreSQL | — | FR-005, NFR (non-blocking logs) | proposed |
 | F-03 | dashboard-template-scaffold | (foundation) Askama HTML templating and server-side rendering wired into Axum | — | FR-006, Dashboard | proposed |
 | S-01 | proxy-intent-routing | send a chat-completion request through the gateway, which classifies intent, routes to an upstream model, and receives streamed response | F-01, F-02 | US-01, FR-001..FR-004 | proposed |
@@ -72,7 +72,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Blockers:** —
 - **Unknowns:** —
 - **Risk:** Simplest foundation to ship first; token-validation middleware is table-stakes before any proxy endpoint is exposed. Implementation is bounded (flat single-operator model, no role-based access control).
-- **Status:** proposed
+- **Status:** done
 
 ### F-02: Data persistence — async inference logging pipeline
 
@@ -182,7 +182,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 
 ## Done
 
-(Empty on first generation. `/10x-archive` appends an entry here when a change whose `Change ID` matches is archived.)
+- **F-01: (foundation) Access key/token validation middleware + basic HTTP auth for dashboard are in place; proxy routes require a valid key header; dashboard requires operator credentials.** — Archived 2026-06-01 → `context/archive/2026-05-26-auth-scaffold-access-keys/`. Lesson: —.
 
 ---
 
