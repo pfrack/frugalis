@@ -411,36 +411,36 @@ No schema changes needed. Phase 1 query method works with existing `inferences` 
 
 #### Manual
 
-- [ ] 1.7 Manual inspection confirms SQL query is syntactically valid and executes without errors
+- [x] 1.7 Manual inspection confirms SQL query is syntactically valid and executes without errors — 0a7041d
 
 ### Phase 2: Template & Handler
 
 #### Automated
 
-- [x] 2.1 `cargo build` succeeds (template macro generates no errors)
-- [x] 2.2 `cargo test test_inferences_authenticated_returns_html` passes
-- [x] 2.3 `cargo test test_inferences_empty_state` passes
-- [x] 2.4 `cargo test test_inferences_filter_by_category` passes
-- [x] 2.5 `cargo test test_inferences_pagination_offset` passes
-- [x] 2.6 `cargo test test_inferences_invalid_params` passes
-- [x] 2.7 `cargo test test_inferences_db_error` passes
+- [x] 2.1 `cargo build` succeeds (template macro generates no errors) — 1c459af
+- [x] 2.2 `cargo test test_inferences_authenticated_returns_html` passes — 1c459af
+- [x] 2.3 `cargo test test_inferences_empty_state` passes — 1c459af
+- [x] 2.4 `cargo test test_inferences_filter_by_category` passes — 1c459af
+- [x] 2.5 `cargo test test_inferences_pagination_offset` passes — 1c459af
+- [x] 2.6 `cargo test test_inferences_invalid_params` passes — 1c459af
+- [x] 2.7 `cargo test test_inferences_db_error` passes — 1c459af
 
 #### Manual
 
-- [x] 2.8 Browser: `/dashboard/inferences` with auth renders table or empty message
-- [x] 2.9 Browser: Filter controls work correctly
-- [x] 2.10 Browser: Pagination works
-- [x] 2.11 Browser: Invalid params handled gracefully
+- [x] 2.8 Browser: `/dashboard/inferences` with auth renders table or empty message — 1c459af
+- [x] 2.9 Browser: Filter controls work correctly — 1c459af
+- [x] 2.10 Browser: Pagination works — 1c459af
+- [x] 2.11 Browser: Invalid params handled gracefully — 1c459af
 
 ### Phase 3: Integration & Testing
 
 #### Automated
 
-- [x] 3.1 `cargo build` succeeds
-- [x] 3.2 `cargo test` passes all tests (no regressions from F-01, F-02, F-03)
-- [x] 3.3 `cargo test inferences` passes (all inferences-specific tests)
+- [x] 3.1 `cargo build` succeeds — 1c459af
+- [x] 3.2 `cargo test` passes all tests (no regressions from F-01, F-02, F-03) — 1c459af
+- [x] 3.3 `cargo test inferences` passes (all inferences-specific tests) — 1c459af
 
 #### Manual
 
-- [x] 3.4 All three dashboard routes work: `/dashboard`, `/dashboard/inferences`; auth gates both
-- [x] 3.5 Error handling is graceful (no crashes, friendly messages on DB errors)
+- [x] 3.4 All three dashboard routes work: `/dashboard`, `/dashboard/inferences`; auth gates both — 1c459af
+- [x] 3.5 Error handling is graceful (no crashes, friendly messages on DB errors) — 1c459af
