@@ -208,13 +208,16 @@ impl PersistenceConfig {
     }
 }
 
-/// Extract a privacy-safe snippet from an OpenAI-compatible request body.
+/// Extract the full last user message from an OpenAI-compatible request body.
 ///
 /// Parses `body` as `{"messages": [...]}`, finds the last message whose `role`
-/// is `"user"`, and returns the first 200 chars of its `content` string.
+/// is `"user"`, and returns its `content` string capped at 10,000 characters.
 /// On any parse failure or missing user message, returns `""` and emits a WARN
-/// log. Never panics, never blocks the response path.
-pub fn extract_snippet(body: &str) -> String {
+/// log. Never panics.
+///
+/// This is the shared utility used by both snippet extraction (`extract_snippet`)
+/// and the intent classifier for full-text intent analysis.
+pub fn extract_last_user_message(body: &str) -> String {
     let result: Option<String> = (|| {
         let v: serde_json::Value = serde_json::from_str(body).ok()?;
         let messages = v.get("messages")?.as_array()?;
@@ -231,19 +234,29 @@ pub fn extract_snippet(body: &str) -> String {
             .rev()
             .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))?;
         let content = last_user.get("content")?.as_str()?;
-        Some(content.chars().take(200).collect())
+        Some(content.chars().take(10_000).collect())
     })();
 
     match result {
         Some(s) => s,
         None => {
             eprintln!(
-                "WARN persistence: could not extract user snippet from request body; \
-                 storing empty snippet"
+                "WARN persistence: could not extract user message from request body; \
+                 storing empty prompt"
             );
             String::new()
         }
     }
+}
+
+/// Extract a 200-char privacy-safe snippet from an OpenAI-compatible request body.
+///
+/// Delegates to [`extract_last_user_message`] for JSON parsing and last-user-message
+/// logic, then truncates to 200 characters. On any parse failure returns `""`.
+/// Never panics, never blocks the response path.
+pub fn extract_snippet(body: &str) -> String {
+    let full = extract_last_user_message(body);
+    full.chars().take(200).collect()
 }
 
 /// Enqueue an inference record for async persistence.

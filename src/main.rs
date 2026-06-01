@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 mod auth;
 mod persistence;
+mod intent_classificator;
 
 #[derive(Template, WebTemplate)]
 #[template(path = "dashboard/index.html")]

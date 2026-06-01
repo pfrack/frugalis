@@ -1,0 +1,412 @@
+use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::OnceLock;
+
+use regex::Regex;
+use regex::RegexSet;
+
+// ── Public Types ──
+
+pub struct RouteEntry {
+    pub model: String,
+    pub endpoint: String,
+}
+
+pub struct ClassificationResult {
+    pub category: String,
+    pub model: String,
+    pub endpoint: String,
+    pub tier: ClassificationTier,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassificationTier {
+    Regex,
+    Fallback,
+}
+
+pub struct IntentClassifier {
+    pub set: RegexSet,
+    pub metadata: Vec<PatternMeta>,
+    pub negative_idx: Range<usize>,
+    pub routing: HashMap<String, RouteEntry>,
+    pub fallback_entry: RouteEntry,
+}
+
+// ── Internal Types ──
+
+pub struct PatternMeta {
+    pub category: &'static str,
+    pub weight: u8,
+}
+
+struct NegativeMeta {
+    suppressed: &'static str,
+    penalty: u8,
+}
+
+// ── Pattern Constants ──
+// Section 8 from research.md — 44 positive + 4 negative = 48 patterns
+
+const FILE_READING: &[&str] = &[
+    r"(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b",
+    r"(?i)\b(?:show|display|print|cat)\s+(?:me\s+)?(?:the\s+)?(?:content|output)(?:\s+of)?",
+    r"(?i)\b(?:[a-zA-Z0-9_\-./\\]+\.(?:rs|py|js|ts|go|java|c|cpp|h|to?ml|ya?ml|json|md|sql|sh|html))",
+    r"(?i)\b(?:line|lines)\s+\d+",
+    r"(?i)\b(?:what(?:\s+is|'s)\s+(?:in|inside))\s+(?:the\s+)?(?:file|directory|folder)",
+    r"(?i)\b(?:look|go|navigate)\s+(?:at|through|to|into)\s+(?:the\s+)?(?:file|directory|code|source)",
+    r"(?i)\b(?:list|ls|dir|tree)\s+(?:files|directories|contents|all|the)",
+    r"(?i)\b(?:find|search|grep|locate|where\s+is)\s+(?:in|through|within|the)\s+(?:the\s+)?(?:file|code|project|source)",
+    r"(?i)\b(?:where\s+is|locate\s+the|find\s+the)\s+(?:file|definition|function|class|module|struct|trait|impl)",
+    r"(?i)\b(?:what\s+does\s+this\s+file|show\s+me\s+the\s+code|view\s+the\s+source|check\s+the\s+file)",
+    r"(?i)\b(?:see|check|inspect|examine)\s+(?:the\s+)?(?:file|code|content|output|log)",
+    r"(?i)\b(?:around\s+line|near\s+line|before\s+line|after\s+line)",
+];
+
+const COMPLEX_REASONING: &[&str] = &[
+    r"(?i)\b(?:architect|design\s+pattern|system\s+design|trade.?off|refactor|restructure|rearchitect)",
+    r"(?i)\b(?:how\s+would\s+you\s+(?:design|architect|structure|build|implement|approach|solve))",
+    r"(?i)\b(?:multi.?step|concurr|distributed|pipeline|scal(?:e|ing|able)|optimiz|bottleneck)",
+    r"(?i)\b(?:redesign\s+the|rewrite\s+(?:the\s+)?(?:entire|whole)|audit\s+the\s+codebase|rearchitect)",
+    r"(?i)\b(?:deep\s+dive|analy(?:ze|sis)|evaluat|compare\s+and\s+contrast|trade.?off|pros?\s+and\s+cons?\b)",
+    r"(?i)\b(?:best\s+(?:practice|approach|way|pattern)|design\s+(?:a|the)\s+(?:system|architecture|api|database|schema|service))",
+    r"(?i)\b(?:reason\s+about|explain\s+why|what(?:\s+is|'s)\s+the\s+(?:best|optimal|right|correct)\s+way)",
+    r"(?i)\b(?:multi.?thread|async|event.?driven|microservice|rate\s+limit|load\s+balanc)",
+    r"(?i)\b(?:integrat(?:e|ion)\s+(?:with|into|between)|migrat(?:e|ion)\s+(?:from|to|strategy)|orchestrat)",
+    r"(?i)\b(?:performance\s+(?:bottleneck|issue|problem|analysis|tuning|profiling|regression)|memory\s+leak|race\s+condition|deadlock)",
+    r"(?i)\b(?:can\s+you\s+(?:help\s+me\s+)?(?:design|plan|architect|think\s+(?:through|about)|reason\s+about))",
+    r"(?i)\b(?:strategy|blueprint|roadmap|plan\s+(?:out|for)|approach\s+to)",
+    r"(?i)\b(?:security\s+(?:audit|review|analysis)|threat\s+model)",
+    r"(?i)\b(?:state\s+machine|algorithm\s+(?:design|complexity|analysis))",
+    r"(?i)\b(?:dependenc(?:y|ies)\s+(?:graph|tree|injection|management)|coupling|cohesion)",
+    r"(?i)\b(?:resilien(?:t|ce)|fault\s+toleran|circuit\s+breaker|retry\s+strategy)",
+];
+
+const SYNTAX_FIX: &[&str] = &[
+    r"(?i)\b(?:fix|correct|repair|patch)\s+(?:this|the|my|a)\s+(?:bug|error|issue|typo|problem|mistake|warning)",
+    r"(?i)\b(?:doesn't\s+compile|won't\s+compile|doesn't\s+build|won't\s+build|compilation\s+error|syntax\s+error|build\s+error)",
+    r"(?i)\b(?:type\s+error|linter?\s+(?:error|warning)|runtime\s+error|segfault|null\s+pointer|borrow\s+check)",
+    r"(?i)\b(?:why\s+doesn't\s+this\s+work|what(?:\s+is|'s)\s+wrong\s+with|this\s+(?:is|seems)\s+broken)",
+    r"(?i)\b(?:stack\s+trace|backtrace|panic|exception|traceback|\.unwrap)",
+    r"(?i)\b(?:missing\s+(?:semicolon|import|parenthesis|brace|bracket|quote|comma|colon|use\s+statement|dependency|argument|parameter))",
+    r"(?i)\b(?:undefined\s+(?:variable|function|symbol|reference|type|method)|not\s+found\s+in\s+this\s+scope|unresolved\s+reference)",
+    r"(?i)\b(?:typo|misspell(?:ed|ing)?|copy.?paste\s+error|fat\s+finger)",
+    r"(?i)\b(?:doesn't\s+work|is\s+broken|stopped\s+working|broke|isn't\s+working|not\s+working)",
+    r"(?i)\b(?:here(?:'s|\s+is)\s+(?:the|an|my)\s+error|getting\s+(?:this|an)\s+error|seeing\s+(?:this|an)\s+error)",
+    r"(?i)\b(?:error[:;].{0,40}\b(?:\d+|E\d{4}|0x[0-9a-fA-F]+)\b)",
+];
+
+const CASUAL: &[&str] = &[
+    r"(?i)^\s*(?:hi|hey|hello|greetings|good\s+morning|good\s+afternoon|good\s+evening|howdy)(?:\s+there)?[\s!.,]*$",
+    r"(?i)^\s*(?:thanks|thank\s+you|thx|ty|appreciate\s+it|cheers|thanks\s+a\s+lot)[\s!.,]*$",
+    r"(?i)^\s*(?:what\s+is|what\s+are|what's|what\s+does|define|definition\s+of)\s+\w+(?:\s+\w+){0,2}\s*\??$",
+    r"(?i)^\s*(?:how\s+(?:do|can|should)\s+I\s+\w+)(?:\s+\w+){0,4}\s*\??$",
+    r"(?i)^\s*(?:ok|okay|got\s+it|understood|alright|cool|nice|good|great|sure|yes|no|maybe|idk)[\s!.,]*$",
+];
+
+const NEGATIVE: &[&str] = &[
+    r"(?i)\b(?:read|show|display|cat|view|open)\s+(?:the|this|my|a)\s+\w*(?:architecture|design|system|pattern|refactor)",
+    r"(?i)\b(?:fix|correct|repair)\s+(?:the|this|my)\s+(?:compile|syntax|typo|lint|warning|error)",
+    r"(?i)\b(?:design|architect|refactor|rearchitect|restructure)\s+(?:a|the|an)\s+(?:fix|solution|remedy|patch|workaround)",
+    r"(?i)\b(?:explain|describe|tell\s+me\s+about|what\s+do\s+you\s+think\s+about)\s+(?:the|this|that)\s+(?:file|code|class|module)",
+];
+
+// ── Negative suppression metadata (parallel to NEGATIVE patterns) ──
+
+const NEGATIVE_META: &[NegativeMeta] = &[
+    NegativeMeta { suppressed: "CR", penalty: 2 },
+    NegativeMeta { suppressed: "CR", penalty: 2 },
+    NegativeMeta { suppressed: "SF", penalty: 2 },
+    NegativeMeta { suppressed: "FR", penalty: 2 },
+];
+
+// ── Hardcoded routing defaults ──
+
+fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
+    let mut routing = HashMap::new();
+    routing.insert(
+        "COMPLEX_REASONING".to_string(),
+        RouteEntry {
+            model: "claude-3.5-sonnet".to_string(),
+            endpoint: String::new(),
+        },
+    );
+    routing.insert(
+        "FILE_READING".to_string(),
+        RouteEntry {
+            model: "deepseek-chat".to_string(),
+            endpoint: String::new(),
+        },
+    );
+    routing.insert(
+        "SYNTAX_FIX".to_string(),
+        RouteEntry {
+            model: "gpt-4o-mini".to_string(),
+            endpoint: String::new(),
+        },
+    );
+    routing.insert(
+        "CASUAL".to_string(),
+        RouteEntry {
+            model: "gpt-4o-mini".to_string(),
+            endpoint: String::new(),
+        },
+    );
+    let fallback = RouteEntry {
+        model: "gpt-4o-mini".to_string(),
+        endpoint: String::new(),
+    };
+    (routing, fallback)
+}
+
+// ── Code-block regex (lazily compiled once) ──
+
+fn code_block_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?s)```[^`]*```").unwrap())
+}
+
+// ── Prompt Sanitization ──
+
+fn sanitize(text: &str) -> String {
+    let lower = text.to_lowercase();
+    let no_blocks = code_block_re().replace_all(&lower, " ");
+    let collapsed: Vec<&str> = no_blocks.split_whitespace().collect();
+    collapsed.join(" ")
+}
+
+// ── Pattern assembly ──
+
+fn build_all_patterns() -> (Vec<&'static str>, Vec<PatternMeta>) {
+    let mut patterns = Vec::new();
+    let mut metadata = Vec::new();
+
+    // FILE_READING (weight 3 for FR01-FR04, 2 for FR05-FR09, 1 for FR10-FR12)
+    let fr_weights: &[u8] = &[3, 3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1];
+    for (i, p) in FILE_READING.iter().enumerate() {
+        patterns.push(*p);
+        metadata.push(PatternMeta {
+            category: "FR",
+            weight: fr_weights[i],
+        });
+    }
+
+    // COMPLEX_REASONING (weight 3 for CR01-CR04, 2 for CR05-CR10, 1 for CR11-CR16)
+    let cr_weights: &[u8] = &[3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1];
+    for (i, p) in COMPLEX_REASONING.iter().enumerate() {
+        patterns.push(*p);
+        metadata.push(PatternMeta {
+            category: "CR",
+            weight: cr_weights[i],
+        });
+    }
+
+    // SYNTAX_FIX (weight 3 for SF01-SF03, 2 for SF04-SF08, 1 for SF09-SF11)
+    let sf_weights: &[u8] = &[3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1];
+    for (i, p) in SYNTAX_FIX.iter().enumerate() {
+        patterns.push(*p);
+        metadata.push(PatternMeta {
+            category: "SF",
+            weight: sf_weights[i],
+        });
+    }
+
+    // CASUAL (weight 3 for CA01, 2 for CA02, 1 for CA03-CA05)
+    let ca_weights: &[u8] = &[3, 2, 1, 1, 1];
+    for (i, p) in CASUAL.iter().enumerate() {
+        patterns.push(*p);
+        metadata.push(PatternMeta {
+            category: "CA",
+            weight: ca_weights[i],
+        });
+    }
+
+    // NEGATIVE — category field stores the suppressed category (used in classify)
+    for p in NEGATIVE.iter() {
+        patterns.push(*p);
+        metadata.push(PatternMeta {
+            category: "NEG",
+            weight: 0,
+        });
+    }
+
+    (patterns, metadata)
+}
+
+// ── TOML Routing Loader ──
+
+fn load_routing_from_file(path: &str) -> Result<HashMap<String, RouteEntry>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("Cannot read {}: {}", path, e))?;
+    let root: toml::Value = toml::from_str(&content)
+        .map_err(|e| format!("Invalid TOML in {}: {}", path, e))?;
+    let table = root.as_table()
+        .ok_or_else(|| format!("Root must be a table in {}", path))?;
+    let mut routing = HashMap::new();
+    for (key, value) in table {
+        if key == "fallback" {
+            continue;
+        }
+        let model = value.get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("gpt-4o-mini")
+            .to_string();
+        let endpoint = value.get("endpoint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        routing.insert(key.to_uppercase(), RouteEntry { model, endpoint });
+    }
+    Ok(routing)
+}
+
+fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
+    let path = std::env::var("ROUTING_CONFIG_PATH")
+        .unwrap_or_else(|_| "routing.toml".to_string());
+    let mut routing = match load_routing_from_file(&path) {
+        Ok(r) => r,
+        Err(_) => {
+            return hardcoded_routing();
+        }
+    };
+    let fallback_entry = routing.remove("FALLBACK").unwrap_or_else(|| RouteEntry {
+        model: "gpt-4o-mini".to_string(),
+        endpoint: String::new(),
+    });
+    (routing, fallback_entry)
+}
+
+// ── Implementations ──
+
+impl ClassificationResult {
+    /// Creates a CASUAL fallback result with Fallback tier.
+    /// Used when the classifier is `None` (graceful degradation).
+    pub fn fallback() -> Self {
+        ClassificationResult {
+            category: "CASUAL".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            endpoint: String::new(),
+            tier: ClassificationTier::Fallback,
+        }
+    }
+}
+
+impl IntentClassifier {
+    /// Build the classifier from built-in patterns and environment configuration.
+    /// Always succeeds — regex compilation errors are the only failure mode.
+    /// When routing.toml is missing, hardcoded defaults are used.
+    pub fn from_env() -> Result<Self, String> {
+        let (patterns, metadata) = build_all_patterns();
+        let set = RegexSet::new(&patterns)
+            .map_err(|e| format!("regex compilation failed: {e}"))?;
+        let negative_start = 12 + 16 + 11 + 5; // FR + CR + SF + CA
+        let negative_idx = negative_start..(negative_start + 4);
+        let (routing, fallback_entry) = load_routing();
+        Ok(IntentClassifier {
+            set,
+            metadata,
+            negative_idx,
+            routing,
+            fallback_entry,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn from_values(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry) -> Self {
+        let (patterns, metadata) = build_all_patterns();
+        let set = RegexSet::new(&patterns)
+            .expect("built-in patterns should always compile");
+        let negative_start = 12 + 16 + 11 + 5;
+        let negative_idx = negative_start..(negative_start + 4);
+        IntentClassifier {
+            set,
+            metadata,
+            negative_idx,
+            routing,
+            fallback_entry,
+        }
+    }
+
+    /// Classify a prompt string into one of the 4 intent categories.
+    /// Never fails — returns Fallback tier for unmatched or ambiguous prompts.
+    pub fn classify(&self, prompt: &str) -> ClassificationResult {
+        let sanitized = sanitize(prompt);
+        let matches: Vec<usize> = self.set.matches(&sanitized).into_iter().collect();
+
+        // Tally scores by category (FR, CR, SF, CA)
+        let mut scores: HashMap<&str, u32> = HashMap::new();
+        for &i in &matches {
+            if i < self.negative_idx.start {
+                let meta = &self.metadata[i];
+                *scores.entry(meta.category).or_insert(0) += meta.weight as u32;
+            }
+        }
+
+        // Apply negative suppression
+        for &i in &matches {
+            if self.negative_idx.contains(&i) {
+                let neg_idx = i - self.negative_idx.start;
+                if neg_idx < NEGATIVE_META.len() {
+                    let neg = &NEGATIVE_META[neg_idx];
+                    if let Some(score) = scores.get_mut(neg.suppressed) {
+                        *score = score.saturating_sub(neg.penalty as u32);
+                    }
+                }
+            }
+        }
+
+        // Short prompts (<30 chars, no matches) → CASUAL
+        let all_zero = scores.values().all(|&s| s == 0);
+        if sanitized.len() < 30 && all_zero {
+            return self.route_fallback("CASUAL");
+        }
+
+        // Check thresholds per Section 9 algorithm
+        let fr = *scores.get("FR").unwrap_or(&0) >= 3;
+        let sf = *scores.get("SF").unwrap_or(&0) >= 4
+            || (*scores.get("SF").unwrap_or(&0) >= 3 && *scores.get("FR").unwrap_or(&0) == 0);
+        let cr = *scores.get("CR").unwrap_or(&0) >= 3;
+        let ca = *scores.get("CA").unwrap_or(&0) >= 1;
+
+        let met = [fr, sf, cr, ca].iter().filter(|&&b| b).count();
+
+        if met == 0 {
+            return self.route_fallback("CASUAL");
+        }
+        if met >= 2 {
+            // Ambiguous → fallback to CASUAL (no ONNX Tier 2 yet)
+            return self.route_fallback("CASUAL");
+        }
+
+        // Cascade priority: FR > SF > CR > CA
+        if fr {
+            return self.route_match("FILE_READING");
+        }
+        if sf {
+            return self.route_match("SYNTAX_FIX");
+        }
+        if cr {
+            return self.route_match("COMPLEX_REASONING");
+        }
+        self.route_match("CASUAL")
+    }
+
+    fn route_match(&self, category: &str) -> ClassificationResult {
+        let route = self.routing.get(category).unwrap_or(&self.fallback_entry);
+        ClassificationResult {
+            category: category.to_string(),
+            model: route.model.clone(),
+            endpoint: route.endpoint.clone(),
+            tier: ClassificationTier::Regex,
+        }
+    }
+
+    fn route_fallback(&self, category: &str) -> ClassificationResult {
+        ClassificationResult {
+            category: category.to_string(),
+            model: self.fallback_entry.model.clone(),
+            endpoint: self.fallback_entry.endpoint.clone(),
+            tier: ClassificationTier::Fallback,
+        }
+    }
+}
