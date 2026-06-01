@@ -453,10 +453,10 @@ api_key_env = "OPENAI_API_KEY"
 
 #### Automated
 
-- [x] 3.1 Project compiles: `cargo build`
-- [x] 3.2 All existing tests pass: `cargo test`
-- [x] 3.3 Auth tests pass: `cargo test auth`
-- [x] 3.4 Route auth tests pass: `cargo test routes_auth`
+- [x] 3.1 Project compiles: `cargo build` — 309622e
+- [x] 3.2 All existing tests pass: `cargo test` — 309622e
+- [x] 3.3 Auth tests pass: `cargo test auth` — 309622e
+- [x] 3.4 Route auth tests pass: `cargo test routes_auth` — 309622e
 
 #### Manual
 
@@ -470,10 +470,10 @@ api_key_env = "OPENAI_API_KEY"
 
 #### Automated
 
-- [x] 4.1 Project compiles: `cargo build`
-- [x] 4.2 All tests pass: `cargo test`
-- [x] 4.3 Auth tests pass: `cargo test auth`
-- [x] 4.4 Route auth tests pass: `cargo test routes_auth`
+- [x] 4.1 Project compiles: `cargo build` — 309622e
+- [x] 4.2 All tests pass: `cargo test` — 309622e
+- [x] 4.3 Auth tests pass: `cargo test auth` — 309622e
+- [x] 4.4 Route auth tests pass: `cargo test routes_auth` — 309622e
 
 #### Manual
 
