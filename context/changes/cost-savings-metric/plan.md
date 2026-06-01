@@ -342,14 +342,14 @@ Follows the same visual patterns as `templates/dashboard/latency.html` (stat-row
 
 #### Automated
 
-- [x] 2.1 `fetch_savings_estimate` returns a `SavingsEstimate` with correct counts for test data
-- [x] 2.2 Query filters NULL categories and NULL models correctly
-- [x] 2.3 Records with unknown model cost are counted in `unknown_cost_count` and excluded from savings total
-- [x] 2.4 Handler returns HTTP 200 with HTML content for authenticated requests
-- [x] 2.5 Handler returns HTTP 401 for unauthenticated requests
-- [x] 2.6 Handler gracefully handles `state.classifier == None` (no panic)
-- [x] 2.7 `cargo test` — all existing and new tests pass
-- [x] 2.8 `cargo build --release` — compiles without warnings
+- [x] 2.1 `fetch_savings_estimate` returns a `SavingsEstimate` with correct counts for test data — d84f2a0
+- [x] 2.2 Query filters NULL categories and NULL models correctly — d84f2a0
+- [x] 2.3 Records with unknown model cost are counted in `unknown_cost_count` and excluded from savings total — d84f2a0
+- [x] 2.4 Handler returns HTTP 200 with HTML content for authenticated requests — d84f2a0
+- [x] 2.5 Handler returns HTTP 401 for unauthenticated requests — d84f2a0
+- [x] 2.6 Handler gracefully handles `state.classifier == None` (no panic) — d84f2a0
+- [x] 2.7 `cargo test` — all existing and new tests pass — d84f2a0
+- [x] 2.8 `cargo build --release` — compiles without warnings — d84f2a0
 
 #### Manual
 
@@ -361,8 +361,8 @@ Follows the same visual patterns as `templates/dashboard/latency.html` (stat-row
 
 #### Automated
 
-- [ ] 3.1 `cargo build --release` compiles template without Askama parsing errors
-- [ ] 3.2 Template renders without panic when `estimate` is `Some`, `None`, or when `error` is set
+- [x] 3.1 `cargo build --release` compiles template without Askama parsing errors
+- [x] 3.2 Template renders without panic when `estimate` is `Some`, `None`, or when `error` is set
 
 #### Manual
 
