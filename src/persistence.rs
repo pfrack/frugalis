@@ -42,6 +42,17 @@ pub struct LatencySummaryRow {
     pub p99_duration_ms: Option<i32>,
 }
 
+/// Result of a cost-savings estimate computation for the dashboard.
+#[derive(Debug, Clone)]
+pub struct SavingsEstimate {
+    pub savings_usd: f64,
+    pub savings_usd_formatted: String,
+    pub baseline_model: String,
+    pub classified_count: i64,
+    pub unknown_cost_count: i64,
+    pub has_historical_fallback: bool,
+}
+
 /// Container for the full latency aggregation result.
 #[derive(Debug, Clone)]
 pub struct LatencySummary {
@@ -296,6 +307,92 @@ impl PersistenceConfig {
             unclassified_count,
             total_classified_count,
             hours,
+        })
+    }
+
+    /// Fetch a cost-savings estimate for the given time window.
+    ///
+    /// Groups inference records by model, computes actual vs. baseline cost,
+    /// and returns a [`SavingsEstimate`]. Records with NULL category or NULL
+    /// model are excluded. Records with an unknown model cost are counted in
+    /// `unknown_cost_count` and excluded from the savings total.
+    pub async fn fetch_savings_estimate(
+        &self,
+        hours: u32,
+        model_costs: &super::intent_classificator::ModelCosts,
+        baseline_model: &str,
+    ) -> Result<SavingsEstimate, QueryError> {
+        let rows = sqlx::query(
+            "SELECT \
+             upstream_model, \
+             COUNT(*)::BIGINT AS count, \
+             COALESCE(SUM(prompt_char_count), 0)::BIGINT AS total_chars, \
+             COALESCE(SUM(LENGTH(prompt_snippet)), 0)::BIGINT AS total_fallback_chars, \
+             COALESCE(SUM(CASE WHEN prompt_char_count IS NULL THEN 1 ELSE 0 END), 0)::BIGINT \
+             AS fallback_count \
+             FROM inferences \
+             WHERE created_at >= NOW() - interval '1 hour' * $1 \
+             AND category IS NOT NULL \
+             AND upstream_model IS NOT NULL \
+             GROUP BY upstream_model",
+        )
+        .bind(hours as i64)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(|e| QueryError::Database(e.to_string()))?;
+
+        let mut total_actual_cost: f64 = 0.0;
+        let mut total_chars_all: i64 = 0;
+        let mut classified_count: i64 = 0;
+        let mut unknown_cost_count: i64 = 0;
+        let mut has_historical_fallback = false;
+
+        for row in &rows {
+            let model: String = row.try_get("upstream_model").unwrap_or_default();
+            let count: i64 = row.try_get("count").unwrap_or(0);
+            let total_chars: i64 = row.try_get("total_chars").unwrap_or(0);
+            let total_fallback_chars: i64 = row.try_get("total_fallback_chars").unwrap_or(0);
+            let fallback_count: i64 = row.try_get("fallback_count").unwrap_or(0);
+
+            if fallback_count > 0 {
+                has_historical_fallback = true;
+            }
+
+            classified_count += count;
+
+            // Use actual prompt_char_count when available, fall back to snippet length.
+            let effective_chars = if total_chars > 0 { total_chars } else { total_fallback_chars };
+            total_chars_all += effective_chars;
+
+            if let Some(cost) = model_costs.get(&model) {
+                total_actual_cost += prompt_chars_to_cost(effective_chars as i32, cost);
+            } else {
+                unknown_cost_count += count;
+            }
+        }
+
+        let baseline_cost = model_costs.get(baseline_model)
+            .map(|cost_per_1m| {
+                let tokens = total_chars_all as f64 / 4.0;
+                tokens * cost_per_1m / 1_000_000.0
+            })
+            .unwrap_or(0.0);
+
+        let savings_usd = baseline_cost - total_actual_cost;
+
+        let savings_usd_formatted = if savings_usd > 0.0 {
+            format!("{:.4}", savings_usd)
+        } else {
+            String::new()
+        };
+
+        Ok(SavingsEstimate {
+            savings_usd,
+            savings_usd_formatted,
+            baseline_model: baseline_model.to_string(),
+            classified_count,
+            unknown_cost_count,
+            has_historical_fallback,
         })
     }
 }
@@ -998,6 +1095,224 @@ mod tests {
         assert!(result.rows.is_empty(), "no classified rows expected");
         assert_eq!(result.unclassified_count, 2, "expected 2 unclassified records");
         assert_eq!(result.total_classified_count, 0, "expected 0 classified total");
+    }
+
+    // ── fetch_savings_estimate ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_fetch_savings_estimate_empty() {
+        let pool = match test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP test_fetch_savings_estimate_empty: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pc = make_persistence(pool);
+        let mc = super::super::intent_classificator::ModelCosts::from_costs(super::super::intent_classificator::hardcoded_model_costs());
+        let result = pc
+            .fetch_savings_estimate(1, &mc, "claude-3.5-sonnet")
+            .await
+            .expect("fetch should succeed");
+        assert_eq!(result.classified_count, 0);
+        assert_eq!(result.unknown_cost_count, 0);
+        assert!(!result.has_historical_fallback);
+        assert_eq!(result.savings_usd, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_savings_estimate_with_data() {
+        let pool = match test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP test_fetch_savings_estimate_with_data: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pc = make_persistence(pool.clone());
+        let id1 = uuid::Uuid::new_v4();
+        let id2 = uuid::Uuid::new_v4();
+        let ids = vec![id1, id2];
+
+        // Insert a record with gpt-4o-mini (cheap) and 1000 chars
+        sqlx::query(
+            "INSERT INTO inferences (request_id, status, category, upstream_model, prompt_snippet, prompt_char_count) \
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(id1)
+        .bind("ok")
+        .bind("CASUAL")
+        .bind("gpt-4o-mini")
+        .bind("cheap prompt")
+        .bind(1000i32)
+        .execute(pool.as_ref())
+        .await
+        .ok();
+
+        // Insert a record with claude-3.5-sonnet (expensive) and 2000 chars
+        sqlx::query(
+            "INSERT INTO inferences (request_id, status, category, upstream_model, prompt_snippet, prompt_char_count) \
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(id2)
+        .bind("ok")
+        .bind("COMPLEX_REASONING")
+        .bind("claude-3.5-sonnet")
+        .bind("complex prompt with more content")
+        .bind(2000i32)
+        .execute(pool.as_ref())
+        .await
+        .ok();
+
+        let mc = super::super::intent_classificator::ModelCosts::from_costs(super::super::intent_classificator::hardcoded_model_costs());
+        let result = pc
+            .fetch_savings_estimate(24, &mc, "claude-3.5-sonnet")
+            .await
+            .expect("fetch should succeed");
+
+        // Cleanup.
+        sqlx::query("DELETE FROM inferences WHERE request_id = ANY($1)")
+            .bind(ids)
+            .execute(pool.as_ref())
+            .await
+            .ok();
+
+        assert_eq!(result.classified_count, 2);
+        assert_eq!(result.unknown_cost_count, 0);
+        assert!(!result.has_historical_fallback);
+        // baseline claude-3.5-sonnet: 3000 chars total → 750 tokens → $0.00225
+        // actual: gpt-4o-mini 1000 chars → 250 tokens → $0.0000375,
+        //         claude-3.5-sonnet 2000 chars → 500 tokens → $0.0015
+        // total actual: $0.0015375
+        // savings: $0.00225 - $0.0015375 = $0.0007125
+        assert!(result.savings_usd > 0.0, "savings should be positive, got {}", result.savings_usd);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_savings_estimate_unknown_cost_model() {
+        let pool = match test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP test_fetch_savings_estimate_unknown_cost_model: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pc = make_persistence(pool.clone());
+        let id = uuid::Uuid::new_v4();
+
+        // Insert a record with a model not in the cost table.
+        sqlx::query(
+            "INSERT INTO inferences (request_id, status, category, upstream_model, prompt_snippet, prompt_char_count) \
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(id)
+        .bind("ok")
+        .bind("CASUAL")
+        .bind("unknown-model-v42")
+        .bind("some prompt")
+        .bind(500i32)
+        .execute(pool.as_ref())
+        .await
+        .ok();
+
+        let mc = super::super::intent_classificator::ModelCosts::from_costs(super::super::intent_classificator::hardcoded_model_costs());
+        let result = pc
+            .fetch_savings_estimate(24, &mc, "claude-3.5-sonnet")
+            .await
+            .expect("fetch should succeed");
+
+        sqlx::query("DELETE FROM inferences WHERE request_id = $1")
+            .bind(id)
+            .execute(pool.as_ref())
+            .await
+            .ok();
+
+        assert_eq!(result.classified_count, 1);
+        assert_eq!(result.unknown_cost_count, 1, "unknown model should be counted");
+        assert_eq!(result.savings_usd, 0.0, "no known-cost records → savings=0");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_savings_estimate_filters_null_category() {
+        let pool = match test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP test_fetch_savings_estimate_filters_null_category: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pc = make_persistence(pool.clone());
+        let id = uuid::Uuid::new_v4();
+
+        // Insert a record with NULL category — should be excluded.
+        sqlx::query(
+            "INSERT INTO inferences (request_id, status, upstream_model, prompt_snippet, prompt_char_count) \
+             VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(id)
+        .bind("ok")
+        .bind("gpt-4o-mini")
+        .bind("uncategorized")
+        .bind(100i32)
+        .execute(pool.as_ref())
+        .await
+        .ok();
+
+        let mc = super::super::intent_classificator::ModelCosts::from_costs(super::super::intent_classificator::hardcoded_model_costs());
+        let result = pc
+            .fetch_savings_estimate(24, &mc, "claude-3.5-sonnet")
+            .await
+            .expect("fetch should succeed");
+
+        sqlx::query("DELETE FROM inferences WHERE request_id = $1")
+            .bind(id)
+            .execute(pool.as_ref())
+            .await
+            .ok();
+
+        assert_eq!(result.classified_count, 0, "NULL category should be excluded");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_savings_estimate_historical_fallback() {
+        let pool = match test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP test_fetch_savings_estimate_historical_fallback: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pc = make_persistence(pool.clone());
+        let id = uuid::Uuid::new_v4();
+
+        // Insert a record with NULL prompt_char_count (historical record).
+        sqlx::query(
+            "INSERT INTO inferences (request_id, status, category, upstream_model, prompt_snippet) \
+             VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(id)
+        .bind("ok")
+        .bind("CASUAL")
+        .bind("gpt-4o-mini")
+        .bind("older record with no char count")
+        .execute(pool.as_ref())
+        .await
+        .ok();
+
+        let mc = super::super::intent_classificator::ModelCosts::from_costs(super::super::intent_classificator::hardcoded_model_costs());
+        let result = pc
+            .fetch_savings_estimate(24, &mc, "claude-3.5-sonnet")
+            .await
+            .expect("fetch should succeed");
+
+        sqlx::query("DELETE FROM inferences WHERE request_id = $1")
+            .bind(id)
+            .execute(pool.as_ref())
+            .await
+            .ok();
+
+        assert!(result.has_historical_fallback, "should detect fallback usage");
+        assert_eq!(result.classified_count, 1);
     }
 
     #[tokio::test]

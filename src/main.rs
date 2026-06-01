@@ -43,6 +43,14 @@ struct LatencyTemplate {
     error: Option<String>,
 }
 
+#[derive(Template, WebTemplate)]
+#[template(path = "dashboard/savings.html")]
+struct SavingsTemplate {
+    estimate: Option<persistence::SavingsEstimate>,
+    error: Option<String>,
+    baseline_model: String,
+}
+
 /// Shared application state injected into handlers via Axum's `State` extractor.
 /// `persistence` is `None` when `DATABASE_URL` is absent (persistence gracefully disabled).
 #[derive(Clone)]
@@ -292,6 +300,45 @@ async fn latency(
     }
 }
 
+async fn savings(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let persistence = match &state.persistence {
+        Some(p) => p,
+        None => {
+            return SavingsTemplate {
+                estimate: None,
+                error: Some("Database not configured".to_string()),
+                baseline_model: "unknown".to_string(),
+            };
+        }
+    };
+
+    let (model_costs, baseline_model) = match &state.classifier {
+        Some(c) => (c.model_costs(), &c.baseline_model),
+        None => {
+            return SavingsTemplate {
+                estimate: None,
+                error: Some("Cost configuration not available".to_string()),
+                baseline_model: "unknown".to_string(),
+            };
+        }
+    };
+
+    match persistence.fetch_savings_estimate(24, model_costs, baseline_model).await {
+        Ok(est) => SavingsTemplate {
+            estimate: Some(est),
+            error: None,
+            baseline_model: baseline_model.clone(),
+        },
+        Err(e) => SavingsTemplate {
+            estimate: None,
+            error: Some(e.to_string()),
+            baseline_model: baseline_model.clone(),
+        },
+    }
+}
+
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
     let proxy_routes = Router::new()
         .route("/chat/completions", post(completion_handler))
@@ -305,6 +352,7 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
             .route("/", get(dashboard))
             .route("/inferences", get(inferences))
             .route("/latency", get(latency))
+            .route("/savings", get(savings))
             .layer(middleware::from_fn_with_state(
                 auth_config,
                 auth::require_dashboard_basic,
@@ -839,5 +887,67 @@ mod tests {
             .await
             .expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ── Savings page ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_savings_unauthenticated_returns_401() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/savings")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_savings_authenticated_returns_html() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/savings")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(content_type.starts_with("text/html"), "expected HTML response");
+    }
+
+    #[tokio::test]
+    async fn test_savings_no_persistence_shows_error() {
+        // test_app() has persistence=None + classifier=None
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/savings")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // With both persistence and classifier None, DB-not-configured fires first.
+        assert!(
+            body.contains("Database not configured") || body.contains("Cost configuration not available"),
+            "expected error state, got: {body}"
+        );
     }
 }

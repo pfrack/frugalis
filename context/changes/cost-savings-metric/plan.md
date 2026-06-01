@@ -325,13 +325,13 @@ Follows the same visual patterns as `templates/dashboard/latency.html` (stat-row
 
 #### Automated
 
-- [x] 1.1 Migration applies cleanly against a test DB: column exists with type INTEGER
-- [x] 1.2 `insert_once` correctly binds 7 parameters (no SQL error on insert)
-- [x] 1.3 `prompt_char_count` is stored and retrievable after insert
-- [x] 1.4 Hardcoded model costs are accessible via `classifier.model_costs().get("gpt-4o-mini") == Some(0.15)`
-- [x] 1.5 `BASELINE_MODEL=claude-3.5-sonnet` is read and stored; unset falls back to default
-- [x] 1.6 `routing.toml` with `[COMPLEX_REASONING].cost_per_1m_input_tokens = 5.0` overrides the hardcoded value
-- [x] 1.7 Existing tests continue to pass: `cargo test`
+- [x] 1.1 Migration applies cleanly against a test DB: column exists with type INTEGER — 01241bb
+- [x] 1.2 `insert_once` correctly binds 7 parameters (no SQL error on insert) — 01241bb
+- [x] 1.3 `prompt_char_count` is stored and retrievable after insert — 01241bb
+- [x] 1.4 Hardcoded model costs are accessible via `classifier.model_costs().get("gpt-4o-mini") == Some(0.15)` — 01241bb
+- [x] 1.5 `BASELINE_MODEL=claude-3.5-sonnet` is read and stored; unset falls back to default — 01241bb
+- [x] 1.6 `routing.toml` with `[COMPLEX_REASONING].cost_per_1m_input_tokens = 5.0` overrides the hardcoded value — 01241bb
+- [x] 1.7 Existing tests continue to pass: `cargo test` — 01241bb
 
 #### Manual
 
@@ -342,14 +342,14 @@ Follows the same visual patterns as `templates/dashboard/latency.html` (stat-row
 
 #### Automated
 
-- [ ] 2.1 `fetch_savings_estimate` returns a `SavingsEstimate` with correct counts for test data
-- [ ] 2.2 Query filters NULL categories and NULL models correctly
-- [ ] 2.3 Records with unknown model cost are counted in `unknown_cost_count` and excluded from savings total
-- [ ] 2.4 Handler returns HTTP 200 with HTML content for authenticated requests
-- [ ] 2.5 Handler returns HTTP 401 for unauthenticated requests
-- [ ] 2.6 Handler gracefully handles `state.classifier == None` (no panic)
-- [ ] 2.7 `cargo test` — all existing and new tests pass
-- [ ] 2.8 `cargo build --release` — compiles without warnings
+- [x] 2.1 `fetch_savings_estimate` returns a `SavingsEstimate` with correct counts for test data
+- [x] 2.2 Query filters NULL categories and NULL models correctly
+- [x] 2.3 Records with unknown model cost are counted in `unknown_cost_count` and excluded from savings total
+- [x] 2.4 Handler returns HTTP 200 with HTML content for authenticated requests
+- [x] 2.5 Handler returns HTTP 401 for unauthenticated requests
+- [x] 2.6 Handler gracefully handles `state.classifier == None` (no panic)
+- [x] 2.7 `cargo test` — all existing and new tests pass
+- [x] 2.8 `cargo build --release` — compiles without warnings
 
 #### Manual
 

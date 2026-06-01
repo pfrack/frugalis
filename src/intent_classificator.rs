@@ -24,10 +24,15 @@ impl ModelCosts {
     pub fn get(&self, model: &str) -> Option<f64> {
         self.costs.get(model).copied()
     }
+
+    #[cfg(test)]
+    pub fn from_costs(costs: HashMap<String, f64>) -> Self {
+        ModelCosts { costs }
+    }
 }
 
 /// Hardcoded default costs per 1M input tokens for known models.
-fn hardcoded_model_costs() -> HashMap<String, f64> {
+pub(crate) fn hardcoded_model_costs() -> HashMap<String, f64> {
     let mut m = HashMap::new();
     m.insert("claude-3.5-sonnet".to_string(), 3.00);
     m.insert("gpt-4o".to_string(), 2.50);

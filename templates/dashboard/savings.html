@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block nav %}
+<a href="/dashboard">Dashboard</a>
+<a href="/dashboard/inferences">Inference Logs</a>
+<a href="/dashboard/latency">Latency</a>
+<a href="/dashboard/savings" class="active">Savings</a>
+{% endblock %}
+
+{% block content %}
+<h2 style="font-size:20px;font-weight:700;letter-spacing:-0.02em;margin-bottom:0.25rem;">Estimated Cost Savings</h2>
+<p class="muted" style="font-size:13px;margin-bottom:1.5rem;">Last 24 hours &middot; compared to {{ baseline_model|e }}</p>
+
+{% if let Some(err) = error %}
+<div class="error-banner">{{ err|e }}</div>
+{% endif %}
+
+<div class="card">
+  {% if let Some(est) = estimate %}
+    <div class="stat-row">
+      <div class="stat">
+        <div class="stat-label">Estimated Savings</div>
+        <div class="stat-value">
+          {% if est.savings_usd > 0.0 %}
+            ${{ est.savings_usd_formatted|e }}
+          {% else %}
+            $0.00 <span class="muted" style="font-size:12px;">(no savings &mdash; baseline costs less)</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Classified Requests</div>
+        <div class="stat-value">{{ est.classified_count }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Baseline Model</div>
+        <div class="stat-value" style="font-size:14px;">{{ est.baseline_model|e }}</div>
+      </div>
+    </div>
+
+    {% if est.unknown_cost_count > 0 %}
+    <p class="muted" style="font-size:12px;margin-top:0.75rem;">
+      {{ est.unknown_cost_count }} record(s) excluded &mdash; unknown model cost
+    </p>
+    {% endif %}
+
+    {% if est.has_historical_fallback %}
+    <p class="muted" style="font-size:12px;margin-top:0.5rem;">
+      Includes older records estimated from snippet length (less accurate).
+    </p>
+    {% endif %}
+  {% else %}
+    <div class="empty-state">
+      <p>No inference data yet</p>
+      <small>Send requests through the proxy to see cost savings here.</small>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}
