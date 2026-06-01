@@ -355,11 +355,11 @@ Add unit tests for the classifier's `classify()` method, verify existing handler
 
 #### Automated
 
-- [x] 2.1 `cargo build` compiles with handler changes
-- [x] 2.2 `cargo test auth` — all auth tests pass
-- [x] 2.3 `cargo test routes_auth` — all route authorization tests pass
-- [x] 2.4 `cargo test` — all existing tests pass with no regressions
-- [x] 2.5 `openapi/completions.yaml` — valid OpenAPI 3.0 spec
+- [x] 2.1 `cargo build` compiles with handler changes — 6585c1f
+- [x] 2.2 `cargo test auth` — all auth tests pass — 6585c1f
+- [x] 2.3 `cargo test routes_auth` — all route authorization tests pass — 6585c1f
+- [x] 2.4 `cargo test` — all existing tests pass with no regressions — 6585c1f
+- [x] 2.5 `openapi/completions.yaml` — valid OpenAPI 3.0 spec — 6585c1f
 
 #### Manual
 

@@ -262,6 +262,73 @@ mod tests {
         build_app(auth_config, app_state)
     }
 
+    fn test_app_with_classifier() -> Router {
+        use std::collections::HashMap;
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let mut routing = HashMap::new();
+        routing.insert(
+            "SYNTAX_FIX".to_string(),
+            intent_classificator::RouteEntry {
+                model: "sf-model".to_string(),
+                endpoint: String::new(),
+            },
+        );
+        routing.insert(
+            "CASUAL".to_string(),
+            intent_classificator::RouteEntry {
+                model: "ca-model".to_string(),
+                endpoint: String::new(),
+            },
+        );
+        let fallback = intent_classificator::RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+        };
+        let classifier = Some(Arc::new(
+            intent_classificator::IntentClassifier::from_values(routing, fallback),
+        ));
+        let app_state = Arc::new(AppState {
+            persistence: None,
+            classifier,
+        });
+        build_app(auth_config, app_state)
+    }
+
+    #[tokio::test]
+    async fn test_completion_handler_returns_classification_json() {
+        let response = test_app_with_classifier()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(
+            body.contains(r#""category":"SYNTAX_FIX""#),
+            "expected SYNTAX_FIX category, got: {body}"
+        );
+        assert!(body.contains(r#""status":"classified""#), "expected classified status");
+        assert!(body.contains(r#""tier":"Regex""#), "expected Regex tier");
+    }
+
     #[tokio::test]
     async fn routes_auth_health_is_public() {
         let response = test_app()

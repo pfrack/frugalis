@@ -264,9 +264,12 @@ fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
     let path = std::env::var("ROUTING_CONFIG_PATH")
         .unwrap_or_else(|_| "routing.toml".to_string());
     let mut routing = match load_routing_from_file(&path) {
-        Ok(r) => r,
+        Ok(r) => {
+            println!("Routing: loaded from {path}");
+            r
+        }
         Err(e) => {
-            eprintln!("WARN intent_classificator: {e}; using hardcoded routing defaults");
+            eprintln!("WARN intent_classificator: {e}; using hardcoded routing defaults (no routing.toml)");
             return hardcoded_routing();
         }
     };
@@ -409,5 +412,88 @@ impl IntentClassifier {
             endpoint: self.fallback_entry.endpoint.clone(),
             tier: ClassificationTier::Fallback,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_classifier() -> IntentClassifier {
+        let mut routing = HashMap::new();
+        routing.insert(
+            "FILE_READING".to_string(),
+            RouteEntry { model: "fr-model".to_string(), endpoint: String::new() },
+        );
+        routing.insert(
+            "COMPLEX_REASONING".to_string(),
+            RouteEntry { model: "cr-model".to_string(), endpoint: String::new() },
+        );
+        routing.insert(
+            "SYNTAX_FIX".to_string(),
+            RouteEntry { model: "sf-model".to_string(), endpoint: String::new() },
+        );
+        routing.insert(
+            "CASUAL".to_string(),
+            RouteEntry { model: "ca-model".to_string(), endpoint: String::new() },
+        );
+        let fallback = RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+        };
+        IntentClassifier::from_values(routing, fallback)
+    }
+
+    #[test]
+    fn test_classify_file_reading() {
+        let c = test_classifier();
+        let result = c.classify("please read the file src/main.rs");
+        assert_eq!(result.category, "FILE_READING");
+        assert_eq!(result.tier, ClassificationTier::Regex);
+    }
+
+    #[test]
+    fn test_classify_complex_reasoning() {
+        let c = test_classifier();
+        let result = c.classify("architect a distributed rate limiter");
+        assert_eq!(result.category, "COMPLEX_REASONING");
+        assert_eq!(result.tier, ClassificationTier::Regex);
+    }
+
+    #[test]
+    fn test_classify_syntax_fix() {
+        let c = test_classifier();
+        let result = c.classify("fix this bug please");
+        assert_eq!(result.category, "SYNTAX_FIX");
+        assert_eq!(result.tier, ClassificationTier::Regex);
+    }
+
+    #[test]
+    fn test_classify_casual() {
+        let c = test_classifier();
+        assert_eq!(c.classify("hello").category, "CASUAL");
+    }
+
+    #[test]
+    fn test_classify_empty_prompt() {
+        let c = test_classifier();
+        let result = c.classify("");
+        assert_eq!(result.category, "CASUAL");
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+    }
+
+    #[test]
+    fn test_classify_fallback_on_ambiguous() {
+        let c = test_classifier();
+        let result = c.classify("please read this file and fix this bug and compilation error");
+        assert_eq!(result.category, "CASUAL");
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+    }
+
+    #[test]
+    fn test_classify_negative_suppression() {
+        let c = test_classifier();
+        let result = c.classify("read the architecture document");
+        assert_ne!(result.category, "COMPLEX_REASONING");
     }
 }
