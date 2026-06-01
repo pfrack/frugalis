@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
@@ -11,6 +11,7 @@ use axum::{
 };
 use askama::Template;
 use askama_web::WebTemplate;
+use std::collections::HashMap;
 
 mod auth;
 mod persistence;
@@ -18,6 +19,17 @@ mod persistence;
 #[derive(Template, WebTemplate)]
 #[template(path = "dashboard/index.html")]
 struct DashboardIndex {}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "dashboard/inferences.html")]
+struct InferencesTemplate {
+    records: Vec<persistence::InferenceLog>,
+    page: u32,
+    total_pages: u32,
+    error: Option<String>,
+    filter_category: Option<String>,
+    filter_model: Option<String>,
+}
 
 /// Shared application state injected into handlers via Axum's `State` extractor.
 /// `persistence` is `None` when `DATABASE_URL` is absent (persistence gracefully disabled).
@@ -112,6 +124,72 @@ async fn dashboard() -> impl IntoResponse {
     DashboardIndex {}
 }
 
+async fn inferences(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let offset = params
+        .get("offset")
+        .and_then(|o| o.parse::<u32>().ok())
+        .unwrap_or(0);
+    let limit = params
+        .get("limit")
+        .and_then(|l| l.parse::<u32>().ok())
+        .map(|l| l.min(100))
+        .unwrap_or(20);
+    let filter_category = params.get("filter_category").cloned();
+    let filter_model = params.get("filter_model").cloned();
+
+    let persistence = match &state.persistence {
+        Some(p) => p,
+        None => {
+            return InferencesTemplate {
+                records: vec![],
+                page: 0,
+                total_pages: 0,
+                error: Some("Database not configured".to_string()),
+                filter_category,
+                filter_model,
+            };
+        }
+    };
+
+    match persistence
+        .fetch_inferences(
+            offset,
+            limit,
+            filter_category.as_deref(),
+            filter_model.as_deref(),
+        )
+        .await
+    {
+        Ok((records, total_count)) => {
+            let page = if limit > 0 { offset / limit } else { 0 };
+            let total_pages = if limit > 0 {
+                ((total_count as u32).saturating_add(limit - 1)) / limit
+            } else {
+                0
+            };
+            InferencesTemplate {
+                records,
+                page,
+                total_pages,
+                error: None,
+                filter_category,
+                filter_model,
+            }
+        }
+        Err(e) => InferencesTemplate {
+            records: vec![],
+            page: 0,
+            total_pages: 0,
+            error: Some(e.to_string()),
+            filter_category,
+            filter_model,
+        },
+    }
+}
+
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
     let proxy_routes = Router::new()
         .route("/chat/completions", post(completion_handler))
@@ -123,6 +201,7 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
     let dashboard_routes =
         Router::new()
             .route("/", get(dashboard))
+            .route("/inferences", get(inferences))
             .layer(middleware::from_fn_with_state(
                 auth_config,
                 auth::require_dashboard_basic,
@@ -312,5 +391,138 @@ mod tests {
             body.contains("Cerebrum Dashboard"),
             "body should contain 'Cerebrum Dashboard'"
         );
+    }
+
+    #[tokio::test]
+    async fn test_inferences_unauthenticated_returns_401() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/inferences")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_inferences_authenticated_returns_html() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/inferences")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(content_type.starts_with("text/html"), "expected HTML response");
+    }
+
+    #[tokio::test]
+    async fn test_inferences_empty_state() {
+        // test_app() has persistence=None → "Database not configured" error message
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/inferences")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // When persistence is None, handler returns error template; no crash.
+        assert!(
+            body.contains("Database not configured")
+                || body.contains("No inference records yet"),
+            "expected empty/error state message, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inferences_invalid_params() {
+        // offset=abc, limit=999999 → should apply defaults, return 200
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/inferences?offset=abc&limit=999999")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_inferences_db_error() {
+        // With persistence=None, handler catches missing DB gracefully and returns 200
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/inferences")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(
+            body.contains("Database not configured"),
+            "expected error message in response, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inferences_filter_by_category() {
+        // Without a real DB this just verifies the route accepts filter params without crashing.
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/inferences?filter_category=COMPLEX_REASONING")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_inferences_pagination_offset() {
+        // Without a real DB this verifies offset/limit params are accepted without crashing.
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/inferences?offset=20&limit=10")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

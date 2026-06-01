@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+
+{% block nav %}
+<a href="/dashboard">Dashboard</a>
+<a href="/dashboard/inferences">Inference Logs</a>
+{% endblock %}
+
+{% block content %}
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+  <div>
+    <h2 style="font-size:18px;font-weight:600;">Inference Logs</h2>
+    <p style="font-size:12px;color:#6e6e73;margin-top:2px;">Recent requests routed through the proxy</p>
+  </div>
+  <a href="/dashboard/inferences{% if let Some(cat) = filter_category %}?filter_category={{ cat|e }}{% endif %}" class="btn btn-ghost">↻ Refresh</a>
+</div>
+
+{% if let Some(err) = error %}
+<div class="error-banner">⚠ {{ err|e }}</div>
+{% endif %}
+
+<div class="card" style="margin-bottom:1rem;padding:1rem 1.25rem;">
+  <form method="get" action="/dashboard/inferences" class="filters">
+    <label>Category
+      <input type="text" name="filter_category" placeholder="e.g. COMPLEX_REASONING"
+        value="{% if let Some(cat) = filter_category %}{{ cat|e }}{% endif %}" />
+    </label>
+    <label>Model
+      <input type="text" name="filter_model" placeholder="e.g. gpt-4o"
+        value="{% if let Some(mdl) = filter_model %}{{ mdl|e }}{% endif %}" />
+    </label>
+    <button type="submit" class="btn btn-primary">Filter</button>
+    <a href="/dashboard/inferences" class="btn btn-ghost">Clear</a>
+  </form>
+</div>
+
+<div class="card" style="padding:0;overflow:hidden;">
+{% if records.is_empty() %}
+<div class="empty-state">
+  <p>No inference records yet</p>
+  <small>Send requests through the proxy to start seeing data here.</small>
+</div>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Timestamp</th>
+      <th>Prompt</th>
+      <th>Category</th>
+      <th>Model</th>
+      <th style="text-align:right;">Duration</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for record in records %}
+    <tr>
+      <td class="muted" style="white-space:nowrap;font-size:12px;">{{ record.timestamp|e }}</td>
+      <td>
+        <details>
+          <summary>{{ record.prompt_snippet|e|truncate(80) }}</summary>
+          <pre>{{ record.prompt_snippet|e }}</pre>
+        </details>
+      </td>
+      <td>
+        {% if let Some(cat) = record.category %}<span class="badge">{{ cat|e }}</span>{% else %}<span class="muted">—</span>{% endif %}
+      </td>
+      <td>
+        {% if let Some(mdl) = record.upstream_model %}<span class="muted" style="font-size:12px;">{{ mdl|e }}</span>{% else %}<span class="muted">—</span>{% endif %}
+      </td>
+      <td style="text-align:right;white-space:nowrap;">
+        {% if let Some(dur) = record.duration_ms %}<span class="muted" style="font-size:12px;">{{ dur }} ms</span>{% else %}<span class="muted">—</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="pagination" style="padding:0.75rem 1rem;border-top:1px solid #f2f2f7;">
+  <span>Page {{ page + 1 }} of {{ total_pages }}</span>
+  {% if page > 0 %}
+  <a href="/dashboard/inferences?offset={{ (page - 1) * 20 }}&limit=20{% if let Some(cat) = filter_category %}&filter_category={{ cat|e }}{% endif %}{% if let Some(mdl) = filter_model %}&filter_model={{ mdl|e }}{% endif %}" class="btn btn-ghost">← Prev</a>
+  {% endif %}
+  {% if page + 1 < total_pages %}
+  <a href="/dashboard/inferences?offset={{ (page + 1) * 20 }}&limit=20{% if let Some(cat) = filter_category %}&filter_category={{ cat|e }}{% endif %}{% if let Some(mdl) = filter_model %}&filter_model={{ mdl|e }}{% endif %}" class="btn btn-ghost">Next →</a>
+  {% endif %}
+</div>
+{% endif %}
+</div>
+{% endblock %}

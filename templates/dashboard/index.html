@@ -1,6 +1,14 @@
 {% extends "base.html" %}
 
+{% block nav %}
+<a href="/dashboard">Dashboard</a>
+<a href="/dashboard/inferences">Inference Logs</a>
+{% endblock %}
+
 {% block content %}
-<h1>Cerebrum Dashboard</h1>
-<p>Coming soon — inference logs will appear here.</p>
+<h2 style="font-size:18px;font-weight:600;margin-bottom:1rem;">Dashboard</h2>
+<div class="card">
+  <p style="margin-bottom:0.75rem;">Welcome to Cerebrum. Use the navigation above to explore your data.</p>
+  <a href="/dashboard/inferences" class="btn btn-primary">View Inference Logs →</a>
+</div>
 {% endblock %}
