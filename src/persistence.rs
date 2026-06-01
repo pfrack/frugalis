@@ -242,7 +242,7 @@ impl PersistenceConfig {
              ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY duration_ms))::INTEGER \
              AS p99_duration_ms \
              FROM inferences \
-             WHERE created_at >= NOW() - ($1 || ' hours')::INTERVAL \
+             WHERE created_at >= NOW() - interval '1 hour' * $1 \
              AND category IS NOT NULL \
              GROUP BY category \
              ORDER BY count DESC",
@@ -274,7 +274,7 @@ impl PersistenceConfig {
         let unclassified_row = sqlx::query(
             "SELECT COUNT(*) \
              FROM inferences \
-             WHERE created_at >= NOW() - ($1 || ' hours')::INTERVAL \
+             WHERE created_at >= NOW() - interval '1 hour' * $1 \
              AND category IS NULL",
         )
         .bind(hours as i64)
@@ -877,6 +877,7 @@ mod tests {
             .expect("LATENCY_CAT_A should appear");
         assert_eq!(row_a.request_count, 3);
         assert_eq!(row_a.avg_duration_ms, Some(200));
+        assert_eq!(row_a.p99_duration_ms, Some(298));
 
         let row_b = result
             .rows
@@ -885,6 +886,7 @@ mod tests {
             .expect("LATENCY_CAT_B should appear");
         assert_eq!(row_b.request_count, 2);
         assert_eq!(row_b.avg_duration_ms, Some(100));
+        assert_eq!(row_b.p99_duration_ms, Some(149));
 
         let row_c = result
             .rows
@@ -893,6 +895,7 @@ mod tests {
             .expect("LATENCY_CAT_C should appear");
         assert_eq!(row_c.request_count, 1);
         assert_eq!(row_c.avg_duration_ms, Some(500));
+        assert_eq!(row_c.p99_duration_ms, Some(500));
 
         // Category A (3 records) should be first (ORDER BY count DESC).
         assert_eq!(

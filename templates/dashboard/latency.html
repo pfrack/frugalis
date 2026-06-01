@@ -19,7 +19,7 @@
 </form>
 
 {% if let Some(err) = error %}
-<div class="error-banner">{{ err }}</div>
+<div class="error-banner">{{ err|e }}</div>
 {% endif %}
 
 {% if let Some(s) = summary %}
@@ -34,7 +34,7 @@
       </tr>
       {% for row in s.rows %}
       <tr>
-        <td><span class="badge">{{ row.category }}</span></td>
+        <td><span class="badge">{{ row.category|e }}</span></td>
         <td>{{ row.request_count }}</td>
         <td>{{ row.avg_duration_ms.unwrap_or(0) }}</td>
         <td>{{ row.p99_duration_ms.unwrap_or(0) }}</td>
