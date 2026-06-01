@@ -187,16 +187,16 @@ No migration needed. The classify endpoint is additive — zero changes to exist
 
 #### Manual
 
-- [x] 1.6 curl POST `/v1/classify` with valid auth → 200 with classification JSON
-- [x] 1.7 curl POST `/v1/classify` without auth → 401
-- [x] 1.8 curl POST `/v1/classify` without Content-Type → 415
-- [x] 1.9 Dashboard shows classify records with status "classified"
-- [x] 1.10 `/v1/chat/completions` behavior unchanged
+- [x] 1.6 curl POST `/v1/classify` with valid auth → 200 with classification JSON — 44ac33e
+- [x] 1.7 curl POST `/v1/classify` without auth → 401 — 44ac33e
+- [x] 1.8 curl POST `/v1/classify` without Content-Type → 415 — 44ac33e
+- [x] 1.9 Dashboard shows classify records with status "classified" — 44ac33e
+- [x] 1.10 `/v1/chat/completions` behavior unchanged — 44ac33e
 
 ### Phase 2: Tests
 
 #### Automated
 
-- [x] 2.1 `cargo test test_classify_handler_returns_classification_json` — test passes
-- [x] 2.2 `cargo test` — full suite passes, no regressions
+- [x] 2.1 `cargo test test_classify_handler_returns_classification_json` — test passes — 44ac33e
+- [x] 2.2 `cargo test` — full suite passes, no regressions — 44ac33e
 
