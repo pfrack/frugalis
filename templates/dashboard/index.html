@@ -7,38 +7,53 @@
 {% endblock %}
 
 {% block content %}
-<h2 style="font-size:18px;font-weight:600;margin-bottom:1rem;">Dashboard</h2>
-<div class="card">
-  <p style="margin-bottom:0.75rem;">Welcome to Cerebrum. Use the navigation above to explore your data.</p>
-  <a href="/dashboard/inferences" class="btn btn-primary">View Inference Logs →</a>
-</div>
+<h2 style="font-size:20px;font-weight:700;letter-spacing:-0.02em;margin-bottom:0.25rem;">Dashboard</h2>
+<p class="muted" style="font-size:13px;margin-bottom:1.5rem;">Overview of recent proxy activity</p>
 
 {% if let Some(err) = error %}
 <div class="error-banner">{{ err }}</div>
 {% endif %}
 
-{% if let Some(s) = summary %}
 <div class="card">
-  <h3 style="font-size:15px;font-weight:600;margin-bottom:0.75rem;">Latency Summary — Last 24 hours</h3>
-  <p style="margin-bottom:0.5rem;">Total classified inferences: {{ s.total_classified_count }}</p>
-  {% if s.rows.len() > 0 %}
-  <table>
-    <tr><th>Category</th><th>Count</th><th>Avg Duration (ms)</th></tr>
-    {% for row in s.rows %}
-    <tr>
-      <td><span class="badge">{{ row.category }}</span></td>
-      <td>{{ row.request_count }}</td>
-      <td>{{ row.avg_duration_ms.unwrap_or(0) }}</td>
-    </tr>
-    {% endfor %}
-  </table>
+  {% if let Some(s) = summary %}
+    <p class="section-title">Latency Summary — Last 24 hours</p>
+
+    <div class="stat-row">
+      <div class="stat">
+        <div class="stat-label">Total Classified</div>
+        <div class="stat-value">{{ s.total_classified_count }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Categories</div>
+        <div class="stat-value">{{ s.rows.len() }}</div>
+      </div>
+      {% if s.unclassified_count > 0 %}
+      <div class="stat">
+        <div class="stat-label">Unclassified</div>
+        <div class="stat-value">{{ s.unclassified_count }}</div>
+      </div>
+      {% endif %}
+    </div>
+
+    {% if s.rows.len() > 0 %}
+    <table>
+      <tr><th>Category</th><th>Count</th><th>Avg Duration (ms)</th></tr>
+      {% for row in s.rows %}
+      <tr>
+        <td><span class="badge">{{ row.category }}</span></td>
+        <td>{{ row.request_count }}</td>
+        <td>{{ row.avg_duration_ms.unwrap_or(0) }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <div class="empty-state"><p>No inference data yet</p><small>Send requests through the proxy to see results here.</small></div>
+    {% endif %}
   {% else %}
-  <div class="empty-state"><p>No inference data yet</p></div>
+    <div class="empty-state">
+      <p style="font-size:15px;font-weight:500;color:#1d1d1f;">Welcome to Cerebrum</p>
+      <small>Your intent-aware routing gateway. Use the navigation above to explore inference logs and latency data.</small>
+    </div>
   {% endif %}
-  {% if s.unclassified_count > 0 %}
-  <p class="muted" style="font-size:12px;margin-top:0.5rem;">{{ s.unclassified_count }} unclassified records excluded.</p>
-  {% endif %}
-  <a href="/dashboard/latency?hours=24" class="btn btn-ghost" style="margin-top:0.75rem;">View full latency breakdown →</a>
 </div>
-{% endif %}
 {% endblock %}

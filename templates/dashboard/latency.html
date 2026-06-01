@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block nav %}
+<a href="/dashboard">Dashboard</a>
+<a href="/dashboard/inferences">Inference Logs</a>
+<a href="/dashboard/latency">Latency</a>
+{% endblock %}
+
+{% block content %}
+<h2 style="font-size:20px;font-weight:700;letter-spacing:-0.02em;margin-bottom:0.25rem;">Latency Breakdown</h2>
+<p class="muted" style="font-size:13px;margin-bottom:1.5rem;">Per-category response time analysis</p>
+
+<form class="filters" method="get" action="/dashboard/latency" style="margin-bottom:1rem;">
+  <label>
+    Time window (hours)
+    <input type="number" name="hours" value="{{ hours }}" min="1" max="720" style="width:100px;">
+  </label>
+  <button type="submit" class="btn btn-primary">Update</button>
+</form>
+
+{% if let Some(err) = error %}
+<div class="error-banner">{{ err }}</div>
+{% endif %}
+
+{% if let Some(s) = summary %}
+  {% if s.rows.len() > 0 %}
+  <div class="card" style="padding:0;">
+    <table>
+      <tr>
+        <th>Category</th>
+        <th>Count</th>
+        <th>Avg Duration (ms)</th>
+        <th>P99 Duration (ms)</th>
+      </tr>
+      {% for row in s.rows %}
+      <tr>
+        <td><span class="badge">{{ row.category }}</span></td>
+        <td>{{ row.request_count }}</td>
+        <td>{{ row.avg_duration_ms.unwrap_or(0) }}</td>
+        <td>{{ row.p99_duration_ms.unwrap_or(0) }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <div style="display:flex;gap:1rem;margin-top:0.75rem;">
+    <p class="muted" style="font-size:12px;">{{ s.total_classified_count }} total classified inferences</p>
+    {% if s.unclassified_count > 0 %}
+    <p class="muted" style="font-size:12px;">{{ s.unclassified_count }} unclassified records excluded</p>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="card">
+    <div class="empty-state">
+      <p>No inference data in the selected window</p>
+      <small>Try a larger time window, or send some test requests.</small>
+    </div>
+  </div>
+  {% endif %}
+{% endif %}
+{% endblock %}

@@ -375,9 +375,9 @@ No schema changes required. The `inferences` table already has `category TEXT`, 
 
 #### Automated
 
-- [x] 2.1 `cargo build` compiles updated handler and template
-- [x] 2.2 Existing `test_dashboard_authenticated_returns_html` still passes
-- [x] 2.3 New test: dashboard index with persistence=None returns 200, no crash
+- [x] 2.1 `cargo build` compiles updated handler and template — b92acc8
+- [x] 2.2 Existing `test_dashboard_authenticated_returns_html` still passes — b92acc8
+- [x] 2.3 New test: dashboard index with persistence=None returns 200, no crash — b92acc8
 
 #### Manual
 
@@ -390,11 +390,11 @@ No schema changes required. The `inferences` table already has `category TEXT`, 
 
 #### Automated
 
-- [ ] 3.1 `cargo build` compiles new route, handler, and template
-- [ ] 3.2 `test_latency_unauthenticated_returns_401` passes
-- [ ] 3.3 `test_latency_authenticated_returns_html` passes
-- [ ] 3.4 `test_latency_invalid_hours_defaults` and out-of-range clamping pass
-- [ ] 3.5 `test_latency_empty_state` passes (no crash with persistence=None)
+- [x] 3.1 `cargo build` compiles new route, handler, and template
+- [x] 3.2 `test_latency_unauthenticated_returns_401` passes
+- [x] 3.3 `test_latency_authenticated_returns_html` passes
+- [x] 3.4 `test_latency_invalid_hours_defaults` and out-of-range clamping pass
+- [x] 3.5 `test_latency_empty_state` passes (no crash with persistence=None)
 
 #### Manual
 

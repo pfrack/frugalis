@@ -35,6 +35,14 @@ struct InferencesTemplate {
     filter_model: Option<String>,
 }
 
+#[derive(Template, WebTemplate)]
+#[template(path = "dashboard/latency.html")]
+struct LatencyTemplate {
+    summary: Option<persistence::LatencySummary>,
+    hours: u32,
+    error: Option<String>,
+}
+
 /// Shared application state injected into handlers via Axum's `State` extractor.
 /// `persistence` is `None` when `DATABASE_URL` is absent (persistence gracefully disabled).
 #[derive(Clone)]
@@ -243,6 +251,41 @@ async fn inferences(
     }
 }
 
+async fn latency(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let hours: u32 = params
+        .get("hours")
+        .and_then(|h| h.parse::<u32>().ok())
+        .map(|h| h.clamp(1, 720))
+        .unwrap_or(24);
+
+    let persistence = match &state.persistence {
+        Some(p) => p,
+        None => {
+            return LatencyTemplate {
+                summary: None,
+                hours,
+                error: Some("Database not configured".to_string()),
+            };
+        }
+    };
+
+    match persistence.fetch_latency_summary(hours).await {
+        Ok(s) => LatencyTemplate {
+            summary: Some(s),
+            hours,
+            error: None,
+        },
+        Err(e) => LatencyTemplate {
+            summary: None,
+            hours,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
     let proxy_routes = Router::new()
         .route("/chat/completions", post(completion_handler))
@@ -255,6 +298,7 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
         Router::new()
             .route("/", get(dashboard))
             .route("/inferences", get(inferences))
+            .route("/latency", get(latency))
             .layer(middleware::from_fn_with_state(
                 auth_config,
                 auth::require_dashboard_basic,
@@ -641,6 +685,111 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/dashboard/inferences?offset=20&limit=10")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ── Latency page ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_latency_unauthenticated_returns_401() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/latency")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_latency_authenticated_returns_html() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/latency")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(content_type.starts_with("text/html"), "expected HTML response");
+    }
+
+    #[tokio::test]
+    async fn test_latency_empty_state() {
+        // test_app() has persistence=None → "Database not configured" error message
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/latency")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(
+            body.contains("Database not configured"),
+            "expected 'Database not configured' in response, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_latency_invalid_hours_defaults() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/latency?hours=abc")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // hours=0 should clamp to default 24 (below min 1)
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/latency?hours=0")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_latency_out_of_range_clamped() {
+        // hours=99999 should clamp to 720
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/latency?hours=99999")
                     .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
                     .body(Body::empty())
                     .expect("request should be valid"),
