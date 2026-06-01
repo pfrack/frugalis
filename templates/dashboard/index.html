@@ -3,6 +3,7 @@
 {% block nav %}
 <a href="/dashboard">Dashboard</a>
 <a href="/dashboard/inferences">Inference Logs</a>
+<a href="/dashboard/latency">Latency</a>
 {% endblock %}
 
 {% block content %}
@@ -11,4 +12,33 @@
   <p style="margin-bottom:0.75rem;">Welcome to Cerebrum. Use the navigation above to explore your data.</p>
   <a href="/dashboard/inferences" class="btn btn-primary">View Inference Logs →</a>
 </div>
+
+{% if let Some(err) = error %}
+<div class="error-banner">{{ err }}</div>
+{% endif %}
+
+{% if let Some(s) = summary %}
+<div class="card">
+  <h3 style="font-size:15px;font-weight:600;margin-bottom:0.75rem;">Latency Summary — Last 24 hours</h3>
+  <p style="margin-bottom:0.5rem;">Total classified inferences: {{ s.total_classified_count }}</p>
+  {% if s.rows.len() > 0 %}
+  <table>
+    <tr><th>Category</th><th>Count</th><th>Avg Duration (ms)</th></tr>
+    {% for row in s.rows %}
+    <tr>
+      <td><span class="badge">{{ row.category }}</span></td>
+      <td>{{ row.request_count }}</td>
+      <td>{{ row.avg_duration_ms.unwrap_or(0) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <div class="empty-state"><p>No inference data yet</p></div>
+  {% endif %}
+  {% if s.unclassified_count > 0 %}
+  <p class="muted" style="font-size:12px;margin-top:0.5rem;">{{ s.unclassified_count }} unclassified records excluded.</p>
+  {% endif %}
+  <a href="/dashboard/latency?hours=24" class="btn btn-ghost" style="margin-top:0.75rem;">View full latency breakdown →</a>
+</div>
+{% endif %}
 {% endblock %}

@@ -364,8 +364,8 @@ No schema changes required. The `inferences` table already has `category TEXT`, 
 
 #### Automated
 
-- [x] 1.1 `cargo build` compiles new structs and method
-- [x] 1.2 DB integration tests pass for fetch_latency_summary
+- [x] 1.1 `cargo build` compiles new structs and method — a1b16eb
+- [x] 1.2 DB integration tests pass for fetch_latency_summary — a1b16eb
 
 #### Manual
 
@@ -375,9 +375,9 @@ No schema changes required. The `inferences` table already has `category TEXT`, 
 
 #### Automated
 
-- [ ] 2.1 `cargo build` compiles updated handler and template
-- [ ] 2.2 Existing `test_dashboard_authenticated_returns_html` still passes
-- [ ] 2.3 New test: dashboard index with persistence=None returns 200, no crash
+- [x] 2.1 `cargo build` compiles updated handler and template
+- [x] 2.2 Existing `test_dashboard_authenticated_returns_html` still passes
+- [x] 2.3 New test: dashboard index with persistence=None returns 200, no crash
 
 #### Manual
 

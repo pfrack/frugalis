@@ -19,7 +19,10 @@ mod intent_classificator;
 
 #[derive(Template, WebTemplate)]
 #[template(path = "dashboard/index.html")]
-struct DashboardIndex {}
+struct DashboardIndex {
+    summary: Option<persistence::LatencySummary>,
+    error: Option<String>,
+}
 
 #[derive(Template, WebTemplate)]
 #[template(path = "dashboard/inferences.html")]
@@ -149,8 +152,29 @@ async fn completion_handler(
     response
 }
 
-async fn dashboard() -> impl IntoResponse {
-    DashboardIndex {}
+async fn dashboard(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let persistence = match &state.persistence {
+        Some(p) => p,
+        None => {
+            return DashboardIndex {
+                summary: None,
+                error: None,
+            };
+        }
+    };
+
+    match persistence.fetch_latency_summary(24).await {
+        Ok(s) => DashboardIndex {
+            summary: Some(s),
+            error: None,
+        },
+        Err(e) => DashboardIndex {
+            summary: None,
+            error: Some(e.to_string()),
+        },
+    }
 }
 
 async fn inferences(
