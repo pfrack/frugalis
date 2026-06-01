@@ -315,17 +315,11 @@ async fn savings(
     };
 
     let (model_costs, baseline_model) = match &state.classifier {
-        Some(c) => (c.model_costs(), &c.baseline_model),
-        None => {
-            return SavingsTemplate {
-                estimate: None,
-                error: Some("Cost configuration not available".to_string()),
-                baseline_model: "unknown".to_string(),
-            };
-        }
+        Some(c) => (c.model_costs().clone(), c.baseline_model.clone()),
+        None => (intent_classificator::ModelCosts::empty(), "unknown".to_string()),
     };
 
-    match persistence.fetch_savings_estimate(24, model_costs, baseline_model).await {
+    match persistence.fetch_savings_estimate(24, &model_costs, &baseline_model).await {
         Ok(est) => SavingsTemplate {
             estimate: Some(est),
             error: None,

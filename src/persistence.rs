@@ -6,6 +6,12 @@ use sqlx::Row;
 use uuid::Uuid;
 use tokio::sync::Semaphore;
 
+/// Trait for looking up model costs by name.
+/// Allows persistence to query costs without depending on the classification module directly.
+pub trait CostProvider {
+    fn get_cost(&self, model: &str) -> Option<f64>;
+}
+
 /// Custom error type for inference query failures.
 #[derive(Debug, Clone)]
 pub enum QueryError {
@@ -46,11 +52,12 @@ pub struct LatencySummaryRow {
 #[derive(Debug, Clone)]
 pub struct SavingsEstimate {
     pub savings_usd: f64,
-    pub savings_usd_formatted: String,
+    pub formatted_savings_usd: String,
     pub baseline_model: String,
     pub classified_count: i64,
     pub unknown_cost_count: i64,
     pub has_historical_fallback: bool,
+    pub baseline_model_unknown: bool,
 }
 
 /// Container for the full latency aggregation result.
@@ -101,15 +108,13 @@ impl PersistenceConfig {
 
         // Idempotent schema migration: add the prompt_char_count column if absent.
         let pool_for_migration = pool.clone();
-        match sqlx::query(
+        sqlx::query(
             "ALTER TABLE inferences ADD COLUMN IF NOT EXISTS prompt_char_count INTEGER"
         )
         .execute(&pool_for_migration)
         .await
-        {
-            Ok(_) => eprintln!("Schema migration: prompt_char_count column ensured"),
-            Err(e) => eprintln!("WARN persistence: schema migration skipped ({e})"),
-        }
+        .map_err(|e| format!("Schema migration failed: {e}"))?;
+        println!("Schema migration: prompt_char_count column ensured");
 
         Ok(Self {
             pool: Arc::new(pool),
@@ -319,7 +324,7 @@ impl PersistenceConfig {
     pub async fn fetch_savings_estimate(
         &self,
         hours: u32,
-        model_costs: &super::intent_classificator::ModelCosts,
+        model_costs: &impl CostProvider,
         baseline_model: &str,
     ) -> Result<SavingsEstimate, QueryError> {
         let rows = sqlx::query(
@@ -364,23 +369,25 @@ impl PersistenceConfig {
             let effective_chars = if total_chars > 0 { total_chars } else { total_fallback_chars };
             total_chars_all += effective_chars;
 
-            if let Some(cost) = model_costs.get(&model) {
+            if let Some(cost) = model_costs.get_cost(&model) {
                 total_actual_cost += prompt_chars_to_cost(effective_chars as i32, cost);
             } else {
                 unknown_cost_count += count;
             }
         }
 
-        let baseline_cost = model_costs.get(baseline_model)
+        let baseline_cost = model_costs.get_cost(baseline_model)
             .map(|cost_per_1m| {
                 let tokens = total_chars_all as f64 / 4.0;
                 tokens * cost_per_1m / 1_000_000.0
             })
             .unwrap_or(0.0);
 
-        let savings_usd = baseline_cost - total_actual_cost;
+        let baseline_cost_rounded = (baseline_cost * 10_000.0).round() / 10_000.0;
+        let savings_usd = baseline_cost_rounded - total_actual_cost;
+        let baseline_model_unknown = model_costs.get_cost(baseline_model).is_none();
 
-        let savings_usd_formatted = if savings_usd > 0.0 {
+        let formatted_savings_usd = if savings_usd > 0.0 {
             format!("{:.4}", savings_usd)
         } else {
             String::new()
@@ -388,11 +395,12 @@ impl PersistenceConfig {
 
         Ok(SavingsEstimate {
             savings_usd,
-            savings_usd_formatted,
+            formatted_savings_usd,
             baseline_model: baseline_model.to_string(),
             classified_count,
             unknown_cost_count,
             has_historical_fallback,
+            baseline_model_unknown,
         })
     }
 }
@@ -450,11 +458,11 @@ pub fn extract_snippet(body: &str) -> String {
 
 /// Convert character count to estimated dollar cost.
 ///
-/// Uses a simple 4-characters-to-1-token heuristic. Rounds to 4 decimal places.
+/// Uses a simple 4-characters-to-1-token heuristic. Rounds to 6 decimal places.
 pub fn prompt_chars_to_cost(char_count: i32, cost_per_1m_input_tokens: f64) -> f64 {
     let tokens = char_count as f64 / 4.0;
     let cost = tokens * cost_per_1m_input_tokens / 1_000_000.0;
-    (cost * 10_000.0).round() / 10_000.0
+    (cost * 1_000_000.0).round() / 1_000_000.0
 }
 
 /// Enqueue an inference record for async persistence.
@@ -887,12 +895,11 @@ mod tests {
     #[test]
     fn persistence_prompt_chars_to_cost_known_values() {
         // 10000 chars → 2500 tokens → $0.000375 for gpt-4o-mini ($0.15/1M)
-        // → rounds to $0.0004
         let cost = prompt_chars_to_cost(10000, 0.15);
-        assert!((cost - 0.0004).abs() < 0.0001, "got {cost}");
+        assert!((cost - 0.000375).abs() < 0.000001, "got {cost}");
         // 4000 chars → 1000 tokens → $0.0025 for gpt-4o ($2.50/1M)
         let cost = prompt_chars_to_cost(4000, 2.50);
-        assert!((cost - 0.0025).abs() < 0.0001, "got {cost}");
+        assert!((cost - 0.0025).abs() < 0.000001, "got {cost}");
     }
 
     #[test]
@@ -901,9 +908,10 @@ mod tests {
     }
 
     #[test]
-    fn persistence_prompt_chars_to_cost_rounds_to_4_decimals() {
-        let cost = prompt_chars_to_cost(1, 3.00); // ~0.00000075 → rounds to 0.0
-        assert_eq!(cost, 0.0);
+    fn persistence_prompt_chars_to_cost_rounds_to_6_decimals() {
+        // 1 char → 0.25 tokens → $0.00000075 → rounds to $0.000001 at 6 decimals
+        let cost = prompt_chars_to_cost(1, 3.00);
+        assert!((cost - 0.000001).abs() < 0.0000001, "got {cost}");
     }
 
     // ── fetch_latency_summary ────────────────────────────────────────────────

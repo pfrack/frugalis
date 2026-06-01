@@ -22,7 +22,7 @@
         <div class="stat-label">Estimated Savings</div>
         <div class="stat-value">
           {% if est.savings_usd > 0.0 %}
-            ${{ est.savings_usd_formatted|e }}
+            ${{ est.formatted_savings_usd|e }}
           {% else %}
             $0.00 <span class="muted" style="font-size:12px;">(no savings &mdash; baseline costs less)</span>
           {% endif %}
@@ -37,6 +37,12 @@
         <div class="stat-value" style="font-size:14px;">{{ est.baseline_model|e }}</div>
       </div>
     </div>
+
+    {% if est.baseline_model_unknown %}
+    <p class="warning" style="font-size:12px;margin-top:0.75rem;color:#d29922;">
+      Baseline model &ldquo;{{ est.baseline_model|e }}&rdquo; has no configured cost. Savings cannot be estimated.
+    </p>
+    {% endif %}
 
     {% if est.unknown_cost_count > 0 %}
     <p class="muted" style="font-size:12px;margin-top:0.75rem;">

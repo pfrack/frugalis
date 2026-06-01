@@ -15,14 +15,26 @@ pub struct RouteEntry {
 
 /// Maps model names to their cost per 1M input tokens.
 /// Defaults are hardcoded; routing.toml entries can override.
+#[derive(Clone)]
 pub struct ModelCosts {
     costs: HashMap<String, f64>,
+}
+
+impl crate::persistence::CostProvider for ModelCosts {
+    fn get_cost(&self, model: &str) -> Option<f64> {
+        self.get(model)
+    }
 }
 
 impl ModelCosts {
     /// Look up a model's cost per 1M input tokens.
     pub fn get(&self, model: &str) -> Option<f64> {
         self.costs.get(model).copied()
+    }
+
+    /// An empty cost table — all model lookups return None.
+    pub fn empty() -> Self {
+        ModelCosts { costs: HashMap::new() }
     }
 
     #[cfg(test)]
