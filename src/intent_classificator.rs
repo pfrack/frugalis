@@ -114,10 +114,10 @@ const NEGATIVE: &[&str] = &[
 // ── Negative suppression metadata (parallel to NEGATIVE patterns) ──
 
 const NEGATIVE_META: &[NegativeMeta] = &[
-    NegativeMeta { suppressed: "CR", penalty: 2 },
-    NegativeMeta { suppressed: "CR", penalty: 2 },
-    NegativeMeta { suppressed: "SF", penalty: 2 },
-    NegativeMeta { suppressed: "FR", penalty: 2 },
+    NegativeMeta { suppressed: "COMPLEX_REASONING", penalty: 2 },
+    NegativeMeta { suppressed: "COMPLEX_REASONING", penalty: 2 },
+    NegativeMeta { suppressed: "SYNTAX_FIX", penalty: 2 },
+    NegativeMeta { suppressed: "FILE_READING", penalty: 2 },
 ];
 
 // ── Hardcoded routing defaults ──
@@ -186,7 +186,7 @@ fn build_all_patterns() -> (Vec<&'static str>, Vec<PatternMeta>) {
     for (i, p) in FILE_READING.iter().enumerate() {
         patterns.push(*p);
         metadata.push(PatternMeta {
-            category: "FR",
+            category: "FILE_READING",
             weight: fr_weights[i],
         });
     }
@@ -196,7 +196,7 @@ fn build_all_patterns() -> (Vec<&'static str>, Vec<PatternMeta>) {
     for (i, p) in COMPLEX_REASONING.iter().enumerate() {
         patterns.push(*p);
         metadata.push(PatternMeta {
-            category: "CR",
+            category: "COMPLEX_REASONING",
             weight: cr_weights[i],
         });
     }
@@ -206,7 +206,7 @@ fn build_all_patterns() -> (Vec<&'static str>, Vec<PatternMeta>) {
     for (i, p) in SYNTAX_FIX.iter().enumerate() {
         patterns.push(*p);
         metadata.push(PatternMeta {
-            category: "SF",
+            category: "SYNTAX_FIX",
             weight: sf_weights[i],
         });
     }
@@ -216,7 +216,7 @@ fn build_all_patterns() -> (Vec<&'static str>, Vec<PatternMeta>) {
     for (i, p) in CASUAL.iter().enumerate() {
         patterns.push(*p);
         metadata.push(PatternMeta {
-            category: "CA",
+            category: "CASUAL",
             weight: ca_weights[i],
         });
     }
@@ -366,11 +366,11 @@ impl IntentClassifier {
         }
 
         // Check thresholds per Section 9 algorithm
-        let fr = *scores.get("FR").unwrap_or(&0) >= 3;
-        let sf = *scores.get("SF").unwrap_or(&0) >= 4
-            || (*scores.get("SF").unwrap_or(&0) >= 3 && *scores.get("FR").unwrap_or(&0) == 0);
-        let cr = *scores.get("CR").unwrap_or(&0) >= 3;
-        let ca = *scores.get("CA").unwrap_or(&0) >= 1;
+        let fr = *scores.get("FILE_READING").unwrap_or(&0) >= 3;
+        let sf = *scores.get("SYNTAX_FIX").unwrap_or(&0) >= 4
+            || (*scores.get("SYNTAX_FIX").unwrap_or(&0) >= 3 && *scores.get("FILE_READING").unwrap_or(&0) == 0);
+        let cr = *scores.get("COMPLEX_REASONING").unwrap_or(&0) >= 3;
+        let ca = *scores.get("CASUAL").unwrap_or(&0) >= 1;
 
         let met = [fr, sf, cr, ca].iter().filter(|&&b| b).count();
 
@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_file_reading() {
+    fn intent_classify_file_reading() {
         let c = test_classifier();
         let result = c.classify("please read the file src/main.rs");
         assert_eq!(result.category, "FILE_READING");
@@ -453,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_complex_reasoning() {
+    fn intent_classify_complex_reasoning() {
         let c = test_classifier();
         let result = c.classify("architect a distributed rate limiter");
         assert_eq!(result.category, "COMPLEX_REASONING");
@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_syntax_fix() {
+    fn intent_classify_syntax_fix() {
         let c = test_classifier();
         let result = c.classify("fix this bug please");
         assert_eq!(result.category, "SYNTAX_FIX");
@@ -469,13 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_casual() {
+    fn intent_classify_casual() {
         let c = test_classifier();
         assert_eq!(c.classify("hello").category, "CASUAL");
     }
 
     #[test]
-    fn test_classify_empty_prompt() {
+    fn intent_classify_empty_prompt() {
         let c = test_classifier();
         let result = c.classify("");
         assert_eq!(result.category, "CASUAL");
@@ -483,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_fallback_on_ambiguous() {
+    fn intent_classify_fallback_on_ambiguous() {
         let c = test_classifier();
         let result = c.classify("please read this file and fix this bug and compilation error");
         assert_eq!(result.category, "CASUAL");
@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_negative_suppression() {
+    fn intent_classify_negative_suppression() {
         let c = test_classifier();
         let result = c.classify("read the architecture document");
         assert_ne!(result.category, "COMPLEX_REASONING");

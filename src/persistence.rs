@@ -275,6 +275,8 @@ pub fn log_inference(
     record: InferenceRecord,
 ) -> tokio::task::JoinHandle<()> {
     let semaphore = semaphore.clone();
+    // Intentional fire-and-forget: JoinHandle is dropped — tokio's default
+    // panic handler prints any panic in the spawned task to stderr.
     tokio::spawn(async move {
         let request_id = record.request_id;
         let _permit = match semaphore.acquire().await {
@@ -397,6 +399,47 @@ mod tests {
         }
         let body = format!(r#"{{"messages":[{}]}}"#, messages.join(","));
         assert_eq!(extract_snippet(&body), "");
+    }
+
+    // ── extract_last_user_message ──────────────────────────────────────────────
+
+    #[test]
+    fn persistence_extract_last_user_message_returns_full_content() {
+        let body = r#"{"messages":[{"role":"user","content":"hello world"}]}"#;
+        assert_eq!(extract_last_user_message(body), "hello world");
+    }
+
+    #[test]
+    fn persistence_extract_last_user_message_returns_empty_on_invalid_json() {
+        assert_eq!(extract_last_user_message("not json"), "");
+    }
+
+    #[test]
+    fn persistence_extract_last_user_message_returns_empty_on_empty_body() {
+        assert_eq!(extract_last_user_message(""), "");
+    }
+
+    #[test]
+    fn persistence_extract_last_user_message_returns_empty_when_no_user_message() {
+        let body = r#"{"messages":[{"role":"system","content":"sys"}]}"#;
+        assert_eq!(extract_last_user_message(body), "");
+    }
+
+    #[test]
+    fn persistence_extract_last_user_message_caps_at_10000_chars() {
+        let long = "x".repeat(15000);
+        let body = format!(r#"{{"messages":[{{"role":"user","content":"{long}"}}]}}"#);
+        assert_eq!(extract_last_user_message(&body).len(), 10000);
+    }
+
+    #[test]
+    fn persistence_extract_last_user_message_returns_empty_on_oversized_array() {
+        let mut messages = vec![];
+        for i in 0..1001 {
+            messages.push(format!(r#"{{"role":"user","content":"msg {}"}}"#, i));
+        }
+        let body = format!(r#"{{"messages":[{}]}}"#, messages.join(","));
+        assert_eq!(extract_last_user_message(&body), "");
     }
 
     // ── Retry behavior ────────────────────────────────────────────────────────

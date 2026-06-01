@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     body::Bytes,
     extract::{Query, State},
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     middleware,
     response::IntoResponse,
     routing::{get, post},
@@ -99,8 +99,17 @@ async fn health() -> (StatusCode, &'static str) {
 /// enqueues a non-blocking inference logging event.
 async fn completion_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> (StatusCode, String) {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !content_type.starts_with("application/json") {
+        return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected application/json".to_string());
+    }
+
     let start = std::time::Instant::now();
 
     let body_str = std::str::from_utf8(&body).unwrap_or("");
@@ -117,11 +126,6 @@ async fn completion_handler(
         "tier": format!("{:?}", classification.tier),
     }).to_string();
     let response = (StatusCode::OK, response_body);
-
-    println!(
-        "DEBUG: wpadło zapytanie. persistence is Some? {}",
-        state.persistence.is_some()
-    );
 
     // Fire-and-forget: enqueue after response is assembled, never awaited.
     if let Some(persistence) = &state.persistence {
@@ -364,6 +368,7 @@ mod tests {
                     .method("POST")
                     .uri("/v1/chat/completions")
                     .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::empty())
                     .expect("request should be valid"),
             )
