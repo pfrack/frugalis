@@ -13,3 +13,5 @@ serde_json = "1.0"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "uuid", "chrono"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+askama = "0.16.0"
+askama_web = { version = "0.16.0", features = ["axum-0.8"] }
