@@ -1,6 +1,6 @@
 ---
 id: per-intent-latency-summary
-status: implementing
+status: implemented
 created: 2026-06-01
 updated: 2026-06-02
 user: pfrack

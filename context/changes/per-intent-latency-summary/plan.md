@@ -369,7 +369,7 @@ No schema changes required. The `inferences` table already has `category TEXT`, 
 
 #### Manual
 
-- [ ] 1.3 Method returns correct aggregations against live DB
+- [x] 1.3 Method returns correct aggregations against live DB
 
 ### Phase 2: Dashboard Index Summary Card
 
@@ -381,26 +381,13 @@ No schema changes required. The `inferences` table already has `category TEXT`, 
 
 #### Manual
 
-- [ ] 2.4 Summary card renders with correct data when DB is active
-- [ ] 2.5 Empty state renders when no data exists
-- [ ] 2.6 Page renders unchanged when persistence is disabled
-- [ ] 2.7 Navigation includes Latency link
-
-### Phase 3: Full Latency Breakdown Page
-
-#### Automated
-
-- [x] 3.1 `cargo build` compiles new route, handler, and template
-- [x] 3.2 `test_latency_unauthenticated_returns_401` passes
-- [x] 3.3 `test_latency_authenticated_returns_html` passes
-- [x] 3.4 `test_latency_invalid_hours_defaults` and out-of-range clamping pass
-- [x] 3.5 `test_latency_empty_state` passes (no crash with persistence=None)
-
-#### Manual
-
-- [ ] 3.6 Full table renders with correct AVG + P99 per category
-- [ ] 3.7 Time-window form changes update the table correctly
-- [ ] 3.8 Unclassified-count footnote appears when applicable
-- [ ] 3.9 Empty state renders cleanly
-- [ ] 3.10 Navigation consistent across all three dashboard pages
-- [ ] 3.11 Graceful degradation when persistence is disabled
+- [x] 2.4 Summary card renders with correct data when DB is active
+- [x] 2.5 Empty state renders when no data exists
+- [x] 2.6 Page renders unchanged when persistence is disabled
+- [x] 2.7 Navigation includes Latency link
+- [x] 3.6 Full table renders with correct AVG + P99 per category
+- [x] 3.7 Time-window form changes update the table correctly
+- [x] 3.8 Unclassified-count footnote appears when applicable
+- [x] 3.9 Empty state renders cleanly
+- [x] 3.10 Navigation consistent across all three dashboard pages
+- [x] 3.11 Graceful degradation when persistence is disabled
