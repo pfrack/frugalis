@@ -255,19 +255,19 @@ var additions, no Render configuration changes.
 
 #### Automated
 
-- [x] 1.1 `cargo build` succeeds with new Askama dependencies
+- [x] 1.1 `cargo build` succeeds with new Askama dependencies — d510ae4
 
 #### Manual
 
-- [x] 1.2 `templates/base.html` and `templates/dashboard/index.html` exist at crate root
+- [x] 1.2 `templates/base.html` and `templates/dashboard/index.html` exist at crate root — d510ae4
 
 ### Phase 2: Handler Wiring and Integration Test
 
 #### Automated
 
-- [ ] 2.1 `cargo build --release` succeeds (template compilation clean)
-- [ ] 2.2 `cargo test` passes including `test_dashboard_authenticated_returns_html`
-- [ ] 2.3 `cargo test auth` passes with no regressions
+- [x] 2.1 `cargo build --release` succeeds (template compilation clean)
+- [x] 2.2 `cargo test` passes including `test_dashboard_authenticated_returns_html`
+- [x] 2.3 `cargo test auth` passes with no regressions
 
 #### Manual
 

@@ -5,13 +5,19 @@ use axum::{
     extract::State,
     http::StatusCode,
     middleware,
-    response::Html,
+    response::IntoResponse,
     routing::{get, post},
     Router,
 };
+use askama::Template;
+use askama_web::WebTemplate;
 
 mod auth;
 mod persistence;
+
+#[derive(Template, WebTemplate)]
+#[template(path = "dashboard/index.html")]
+struct DashboardIndex {}
 
 /// Shared application state injected into handlers via Axum's `State` extractor.
 /// `persistence` is `None` when `DATABASE_URL` is absent (persistence gracefully disabled).
@@ -102,8 +108,8 @@ async fn completion_handler(
     response
 }
 
-async fn dashboard_placeholder() -> Html<&'static str> {
-    Html("<h1>Dashboard route is protected</h1>")
+async fn dashboard() -> impl IntoResponse {
+    DashboardIndex {}
 }
 
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
@@ -116,7 +122,7 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
 
     let dashboard_routes =
         Router::new()
-            .route("/", get(dashboard_placeholder))
+            .route("/", get(dashboard))
             .layer(middleware::from_fn_with_state(
                 auth_config,
                 auth::require_dashboard_basic,
@@ -270,6 +276,41 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("integration test snippet")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_authenticated_returns_html() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("dashboard request should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .expect("response should have Content-Type");
+        assert!(
+            content_type.starts_with("text/html"),
+            "expected text/html, got {content_type}"
+        );
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(
+            body.contains("Cerebrum Dashboard"),
+            "body should contain 'Cerebrum Dashboard'"
         );
     }
 }
