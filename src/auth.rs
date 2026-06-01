@@ -135,9 +135,11 @@ fn constant_time_eq_str(left: &str, right: &str) -> bool {
 }
 
 fn api_unauthorized_response(message: &str) -> Response<Body> {
-    let payload = format!(
-        "{{\"error\":\"unauthorized\",\"message\":\"{message}\"}}"
-    );
+    let payload = serde_json::json!({
+        "error": "unauthorized",
+        "message": message,
+    })
+    .to_string();
 
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
@@ -149,7 +151,10 @@ fn api_unauthorized_response(message: &str) -> Response<Body> {
 fn dashboard_unauthorized_response() -> Response<Body> {
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
-        .header(header::WWW_AUTHENTICATE, "Basic realm=\"cerebrum-dashboard\"")
+        .header(
+            header::WWW_AUTHENTICATE,
+            "Basic realm=\"cerebrum-dashboard\"",
+        )
         .body(Body::from("unauthorized"))
         .expect("dashboard unauthorized response should be valid")
 }

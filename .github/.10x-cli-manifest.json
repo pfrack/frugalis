@@ -2,7 +2,7 @@
   "package": "@przeprogramowani/10x-cli",
   "version": "1.7.0",
   "manifestVersion": 3,
-  "lastApplied": "2026-05-30T13:58:58.464Z",
+  "lastApplied": "2026-05-31T18:53:36.440Z",
   "lessonId": "m2l5",
   "course": "10xdevs3",
   "tool": "copilot",
@@ -223,7 +223,7 @@
   },
   "lessons": {
     "m1l1": {
-      "appliedAt": "2026-05-30T13:58:48.561Z",
+      "appliedAt": "2026-05-31T18:53:25.944Z",
       "skills": {
         "10x-init": {
           "files": [
@@ -246,7 +246,7 @@
       "configs": []
     },
     "m1l2": {
-      "appliedAt": "2026-05-30T13:58:50.446Z",
+      "appliedAt": "2026-05-31T18:53:27.174Z",
       "skills": {
         "10x-init": {
           "files": [
@@ -288,7 +288,7 @@
       "configs": []
     },
     "m1l3": {
-      "appliedAt": "2026-05-30T13:58:51.398Z",
+      "appliedAt": "2026-05-31T18:53:28.085Z",
       "skills": {
         "10x-init": {
           "files": [
@@ -348,7 +348,7 @@
       "configs": []
     },
     "m1l4": {
-      "appliedAt": "2026-05-30T13:58:52.178Z",
+      "appliedAt": "2026-05-31T18:53:29.135Z",
       "skills": {
         "10x-init": {
           "files": [
@@ -423,7 +423,7 @@
       "configs": []
     },
     "m1l5": {
-      "appliedAt": "2026-05-30T13:58:53.063Z",
+      "appliedAt": "2026-05-31T18:53:30.168Z",
       "skills": {
         "10x-init": {
           "files": [
@@ -508,7 +508,7 @@
       "configs": []
     },
     "m2l1": {
-      "appliedAt": "2026-05-30T13:58:54.727Z",
+      "appliedAt": "2026-05-31T18:53:32.133Z",
       "skills": {
         "10x-init": {
           "files": [
@@ -598,7 +598,7 @@
       "configs": []
     },
     "m2l2": {
-      "appliedAt": "2026-05-30T13:58:55.844Z",
+      "appliedAt": "2026-05-31T18:53:33.274Z",
       "skills": {
         "10x-init": {
           "files": [
@@ -714,7 +714,7 @@
       "configs": []
     },
     "m2l3": {
-      "appliedAt": "2026-05-30T13:58:56.692Z",
+      "appliedAt": "2026-05-31T18:53:34.387Z",
       "skills": {
         "10x-init": {
           "files": [
@@ -835,7 +835,7 @@
       "configs": []
     },
     "m2l4": {
-      "appliedAt": "2026-05-30T13:58:57.581Z",
+      "appliedAt": "2026-05-31T18:53:35.343Z",
       "skills": {
         "10x-init": {
           "files": [
@@ -966,7 +966,7 @@
       "configs": []
     },
     "m2l5": {
-      "appliedAt": "2026-05-30T13:58:58.464Z",
+      "appliedAt": "2026-05-31T18:53:36.439Z",
       "skills": {
         "10x-init": {
           "files": [

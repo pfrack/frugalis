@@ -18,9 +18,10 @@ Tests are co-located in source modules using `#[cfg(test)]` blocks (see [src/mai
 
 ## Naming & File Layout
 
-Source files: two main modules under `src/`:
+Source files under `src/`:
 - `main.rs` — Axum router setup, route definitions, health endpoint, test harness
 - `auth.rs` — `AuthConfig` struct, middleware implementations (`require_proxy_bearer`, `require_dashboard_basic`), token/credential validation, utility helpers
+- `persistence.rs` — `PersistenceConfig` (pool + bounded task semaphore), `InferenceRecord`, async logging API (`log_inference`), snippet extraction. A separate module is justified: persistence is a distinct cross-cutting concern with its own lifecycle, retry policy, and DB driver dependency.
 
 Add new authentication schemes or routes to existing modules rather than creating separate files. Keep middleware functions near the config they read.
 

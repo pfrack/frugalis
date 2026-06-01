@@ -27,7 +27,21 @@ jobs:
           cargo test auth
           cargo test routes_auth
 
+      - name: Run persistence contract tests
+        env:
+          SQLX_OFFLINE: "true"
+        run: |
+          cargo test persistence
+          if [ -n "$DATABASE_URL" ]; then
+            sqlx migrate run
+            cargo test persistence_integration
+          else
+            echo "DATABASE_URL not set — skipping DB integration tests"
+          fi
+
       - name: Build release binary
+        env:
+          SQLX_OFFLINE: "true"
         run: cargo build --release
 
       - name: Trigger deploy via webhook
