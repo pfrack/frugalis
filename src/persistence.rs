@@ -227,10 +227,9 @@ impl PersistenceConfig {
 
     /// Fetch a per-category latency summary for the given time window.
     ///
-    /// Runs two queries: a GROUP BY aggregation for classified records, and a
-    /// separate COUNT for NULL-category (unclassified) records. Returns a
-    /// [`LatencySummary`] with per-category rows, unclassified count, and the
-    /// sum of all classified row counts.
+    /// Runs a single GROUP BY aggregation over all records in the window.
+    /// Rows with a non-NULL category become the [`LatencySummaryRow`] list;
+    /// the NULL-category row (if any) populates [`LatencySummary::unclassified_count`].
     pub async fn fetch_latency_summary(
         &self,
         hours: u32,
@@ -243,7 +242,6 @@ impl PersistenceConfig {
              AS p99_duration_ms \
              FROM inferences \
              WHERE created_at >= NOW() - interval '1 hour' * $1 \
-             AND category IS NOT NULL \
              GROUP BY category \
              ORDER BY count DESC",
         )
@@ -252,39 +250,33 @@ impl PersistenceConfig {
         .await
         .map_err(|e| QueryError::Database(e.to_string()))?;
 
-        let summary_rows: Vec<LatencySummaryRow> = rows
-            .iter()
-            .map(|row| {
-                let category: String = row.try_get("category").unwrap_or_default();
-                let request_count: i64 = row.try_get("count").unwrap_or(0);
-                let avg_duration_ms: Option<i32> = row.try_get("avg_duration_ms").unwrap_or(None);
-                let p99_duration_ms: Option<i32> = row.try_get("p99_duration_ms").unwrap_or(None);
+        let mut summary_rows = Vec::<LatencySummaryRow>::new();
+        let mut unclassified_count: i64 = 0;
 
-                LatencySummaryRow {
-                    category,
-                    request_count,
-                    avg_duration_ms,
-                    p99_duration_ms,
+        for row in &rows {
+            let category: Option<String> = row.try_get("category").unwrap_or(None);
+            let request_count: i64 = row.try_get("count").unwrap_or(0);
+
+            match category {
+                Some(cat) => {
+                    let avg_duration_ms: Option<i32> =
+                        row.try_get("avg_duration_ms").unwrap_or(None);
+                    let p99_duration_ms: Option<i32> =
+                        row.try_get("p99_duration_ms").unwrap_or(None);
+                    summary_rows.push(LatencySummaryRow {
+                        category: cat,
+                        request_count,
+                        avg_duration_ms,
+                        p99_duration_ms,
+                    });
                 }
-            })
-            .collect();
+                None => {
+                    unclassified_count = request_count;
+                }
+            }
+        }
 
         let total_classified_count: i64 = summary_rows.iter().map(|r| r.request_count).sum();
-
-        let unclassified_row = sqlx::query(
-            "SELECT COUNT(*) \
-             FROM inferences \
-             WHERE created_at >= NOW() - interval '1 hour' * $1 \
-             AND category IS NULL",
-        )
-        .bind(hours as i64)
-        .fetch_one(self.pool.as_ref())
-        .await
-        .map_err(|e| QueryError::Database(e.to_string()))?;
-
-        let unclassified_count: i64 = unclassified_row
-            .try_get(0)
-            .map_err(|e| QueryError::Database(e.to_string()))?;
 
         Ok(LatencySummary {
             rows: summary_rows,
