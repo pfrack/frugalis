@@ -45,6 +45,49 @@ struct NegativeMeta {
     penalty: u8,
 }
 
+// ── Defaults ──
+
+const DEFAULT_MODEL: &str = "gpt-4o-mini";
+const DEFAULT_MODEL_COMPLEX: &str = "claude-3.5-sonnet";
+const DEFAULT_MODEL_READING: &str = "deepseek-chat";
+const DEFAULT_ENDPOINT: &str = "";
+
+// ── Category Name Constants ──
+
+const CAT_FILE_READING: &str = "FILE_READING";
+const CAT_COMPLEX_REASONING: &str = "COMPLEX_REASONING";
+const CAT_SYNTAX_FIX: &str = "SYNTAX_FIX";
+const CAT_CASUAL: &str = "CASUAL";
+const CAT_NEG: &str = "NEG";
+
+// ── Pattern Counts ──
+
+const FR_COUNT: usize = 12;
+const CR_COUNT: usize = 16;
+const SF_COUNT: usize = 11;
+const CA_COUNT: usize = 5;
+const NEG_COUNT: usize = 4;
+
+// ── Weight Arrays ──
+
+const FR_WEIGHTS: &[u8] = &[3, 3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1];
+const CR_WEIGHTS: &[u8] = &[3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1];
+const SF_WEIGHTS: &[u8] = &[3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1];
+const CA_WEIGHTS: &[u8] = &[3, 2, 1, 1, 1];
+
+// ── Classification Thresholds ──
+
+const SHORT_PROMPT_LEN: usize = 30;
+const FR_THRESHOLD: u32 = 3;
+const SF_THRESHOLD_HIGH: u32 = 4;
+const SF_THRESHOLD_LOW: u32 = 3;
+const CR_THRESHOLD: u32 = 3;
+const CA_THRESHOLD: u32 = 1;
+
+// ── Config Defaults ──
+
+const ROUTING_CONFIG_DEFAULT: &str = "routing.toml";
+
 // ── Pattern Constants ──
 // Section 8 from research.md — 44 positive + 4 negative = 48 patterns
 
@@ -114,46 +157,52 @@ const NEGATIVE: &[&str] = &[
 // ── Negative suppression metadata (parallel to NEGATIVE patterns) ──
 
 const NEGATIVE_META: &[NegativeMeta] = &[
-    NegativeMeta { suppressed: "COMPLEX_REASONING", penalty: 2 },
-    NegativeMeta { suppressed: "COMPLEX_REASONING", penalty: 2 },
-    NegativeMeta { suppressed: "SYNTAX_FIX", penalty: 2 },
-    NegativeMeta { suppressed: "FILE_READING", penalty: 2 },
+    NegativeMeta { suppressed: CAT_COMPLEX_REASONING, penalty: 2 },
+    NegativeMeta { suppressed: CAT_COMPLEX_REASONING, penalty: 2 },
+    NegativeMeta { suppressed: CAT_SYNTAX_FIX, penalty: 2 },
+    NegativeMeta { suppressed: CAT_FILE_READING, penalty: 2 },
 ];
+
+// ── Env-or-default helper ──
+
+fn env_or_default(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
 
 // ── Hardcoded routing defaults ──
 
 fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
     let mut routing = HashMap::new();
     routing.insert(
-        "COMPLEX_REASONING".to_string(),
+        CAT_COMPLEX_REASONING.to_string(),
         RouteEntry {
-            model: "claude-3.5-sonnet".to_string(),
+            model: env_or_default("DEFAULT_MODEL_COMPLEX", DEFAULT_MODEL_COMPLEX),
             endpoint: String::new(),
         },
     );
     routing.insert(
-        "FILE_READING".to_string(),
+        CAT_FILE_READING.to_string(),
         RouteEntry {
-            model: "deepseek-chat".to_string(),
+            model: env_or_default("DEFAULT_MODEL_READING", DEFAULT_MODEL_READING),
             endpoint: String::new(),
         },
     );
     routing.insert(
-        "SYNTAX_FIX".to_string(),
+        CAT_SYNTAX_FIX.to_string(),
         RouteEntry {
-            model: "gpt-4o-mini".to_string(),
+            model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
             endpoint: String::new(),
         },
     );
     routing.insert(
-        "CASUAL".to_string(),
+        CAT_CASUAL.to_string(),
         RouteEntry {
-            model: "gpt-4o-mini".to_string(),
+            model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
             endpoint: String::new(),
         },
     );
     let fallback = RouteEntry {
-        model: "gpt-4o-mini".to_string(),
+        model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
         endpoint: String::new(),
     };
     (routing, fallback)
@@ -181,51 +230,42 @@ fn build_all_patterns() -> (Vec<&'static str>, Vec<PatternMeta>) {
     let mut patterns = Vec::new();
     let mut metadata = Vec::new();
 
-    // FILE_READING (weight 3 for FR01-FR04, 2 for FR05-FR09, 1 for FR10-FR12)
-    let fr_weights: &[u8] = &[3, 3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1];
     for (i, p) in FILE_READING.iter().enumerate() {
         patterns.push(*p);
         metadata.push(PatternMeta {
-            category: "FILE_READING",
-            weight: fr_weights[i],
+            category: CAT_FILE_READING,
+            weight: FR_WEIGHTS[i],
         });
     }
 
-    // COMPLEX_REASONING (weight 3 for CR01-CR04, 2 for CR05-CR10, 1 for CR11-CR16)
-    let cr_weights: &[u8] = &[3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1];
     for (i, p) in COMPLEX_REASONING.iter().enumerate() {
         patterns.push(*p);
         metadata.push(PatternMeta {
-            category: "COMPLEX_REASONING",
-            weight: cr_weights[i],
+            category: CAT_COMPLEX_REASONING,
+            weight: CR_WEIGHTS[i],
         });
     }
 
-    // SYNTAX_FIX (weight 3 for SF01-SF03, 2 for SF04-SF08, 1 for SF09-SF11)
-    let sf_weights: &[u8] = &[3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1];
     for (i, p) in SYNTAX_FIX.iter().enumerate() {
         patterns.push(*p);
         metadata.push(PatternMeta {
-            category: "SYNTAX_FIX",
-            weight: sf_weights[i],
+            category: CAT_SYNTAX_FIX,
+            weight: SF_WEIGHTS[i],
         });
     }
 
-    // CASUAL (weight 3 for CA01, 2 for CA02, 1 for CA03-CA05)
-    let ca_weights: &[u8] = &[3, 2, 1, 1, 1];
     for (i, p) in CASUAL.iter().enumerate() {
         patterns.push(*p);
         metadata.push(PatternMeta {
-            category: "CASUAL",
-            weight: ca_weights[i],
+            category: CAT_CASUAL,
+            weight: CA_WEIGHTS[i],
         });
     }
 
-    // NEGATIVE — category field stores the suppressed category (used in classify)
     for p in NEGATIVE.iter() {
         patterns.push(*p);
         metadata.push(PatternMeta {
-            category: "NEG",
+            category: CAT_NEG,
             weight: 0,
         });
     }
@@ -249,11 +289,11 @@ fn load_routing_from_file(path: &str) -> Result<HashMap<String, RouteEntry>, Str
         }
         let model = value.get("model")
             .and_then(|v| v.as_str())
-            .unwrap_or("gpt-4o-mini")
-            .to_string();
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| env_or_default("DEFAULT_MODEL", DEFAULT_MODEL));
         let endpoint = value.get("endpoint")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
+            .unwrap_or(DEFAULT_ENDPOINT)
             .to_string();
         routing.insert(key.to_uppercase(), RouteEntry { model, endpoint });
     }
@@ -262,7 +302,7 @@ fn load_routing_from_file(path: &str) -> Result<HashMap<String, RouteEntry>, Str
 
 fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
     let path = std::env::var("ROUTING_CONFIG_PATH")
-        .unwrap_or_else(|_| "routing.toml".to_string());
+        .unwrap_or_else(|_| ROUTING_CONFIG_DEFAULT.to_string());
     let mut routing = match load_routing_from_file(&path) {
         Ok(r) => {
             println!("Routing: loaded from {path}");
@@ -274,7 +314,7 @@ fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
         }
     };
     let fallback_entry = routing.remove("FALLBACK").unwrap_or_else(|| RouteEntry {
-        model: "gpt-4o-mini".to_string(),
+        model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
         endpoint: String::new(),
     });
     (routing, fallback_entry)
@@ -287,8 +327,8 @@ impl ClassificationResult {
     /// Used when the classifier is `None` (graceful degradation).
     pub fn fallback() -> Self {
         ClassificationResult {
-            category: "CASUAL".to_string(),
-            model: "gpt-4o-mini".to_string(),
+            category: CAT_CASUAL.to_string(),
+            model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
             endpoint: String::new(),
             tier: ClassificationTier::Fallback,
         }
@@ -303,8 +343,8 @@ impl IntentClassifier {
         let (patterns, metadata) = build_all_patterns();
         let set = RegexSet::new(&patterns)
             .map_err(|e| format!("regex compilation failed: {e}"))?;
-        let negative_start = 12 + 16 + 11 + 5; // FR + CR + SF + CA
-        let negative_idx = negative_start..(negative_start + 4);
+        let negative_start = FR_COUNT + CR_COUNT + SF_COUNT + CA_COUNT;
+        let negative_idx = negative_start..(negative_start + NEG_COUNT);
         let (routing, fallback_entry) = load_routing();
         Ok(IntentClassifier {
             set,
@@ -320,8 +360,8 @@ impl IntentClassifier {
         let (patterns, metadata) = build_all_patterns();
         let set = RegexSet::new(&patterns)
             .expect("built-in patterns should always compile");
-        let negative_start = 12 + 16 + 11 + 5;
-        let negative_idx = negative_start..(negative_start + 4);
+        let negative_start = FR_COUNT + CR_COUNT + SF_COUNT + CA_COUNT;
+        let negative_idx = negative_start..(negative_start + NEG_COUNT);
         IntentClassifier {
             set,
             metadata,
@@ -361,38 +401,36 @@ impl IntentClassifier {
 
         // Short prompts (<30 chars, no matches) → CASUAL
         let all_zero = scores.values().all(|&s| s == 0);
-        if sanitized.len() < 30 && all_zero {
-            return self.route_fallback("CASUAL");
+        if sanitized.len() < SHORT_PROMPT_LEN && all_zero {
+            return self.route_fallback(CAT_CASUAL);
         }
 
         // Check thresholds per Section 9 algorithm
-        let fr = *scores.get("FILE_READING").unwrap_or(&0) >= 3;
-        let sf = *scores.get("SYNTAX_FIX").unwrap_or(&0) >= 4
-            || (*scores.get("SYNTAX_FIX").unwrap_or(&0) >= 3 && *scores.get("FILE_READING").unwrap_or(&0) == 0);
-        let cr = *scores.get("COMPLEX_REASONING").unwrap_or(&0) >= 3;
-        let ca = *scores.get("CASUAL").unwrap_or(&0) >= 1;
+        let fr = *scores.get(CAT_FILE_READING).unwrap_or(&0) >= FR_THRESHOLD;
+        let sf = *scores.get(CAT_SYNTAX_FIX).unwrap_or(&0) >= SF_THRESHOLD_HIGH
+            || (*scores.get(CAT_SYNTAX_FIX).unwrap_or(&0) >= SF_THRESHOLD_LOW && *scores.get(CAT_FILE_READING).unwrap_or(&0) == 0);
+        let cr = *scores.get(CAT_COMPLEX_REASONING).unwrap_or(&0) >= CR_THRESHOLD;
+        let ca = *scores.get(CAT_CASUAL).unwrap_or(&0) >= CA_THRESHOLD;
 
         let met = [fr, sf, cr, ca].iter().filter(|&&b| b).count();
 
         if met == 0 {
-            return self.route_fallback("CASUAL");
+            return self.route_fallback(CAT_CASUAL);
         }
         if met >= 2 {
-            // Ambiguous → fallback to CASUAL (no ONNX Tier 2 yet)
-            return self.route_fallback("CASUAL");
+            return self.route_fallback(CAT_CASUAL);
         }
 
-        // Cascade priority: FR > SF > CR > CA
         if fr {
-            return self.route_match("FILE_READING");
+            return self.route_match(CAT_FILE_READING);
         }
         if sf {
-            return self.route_match("SYNTAX_FIX");
+            return self.route_match(CAT_SYNTAX_FIX);
         }
         if cr {
-            return self.route_match("COMPLEX_REASONING");
+            return self.route_match(CAT_COMPLEX_REASONING);
         }
-        self.route_match("CASUAL")
+        self.route_match(CAT_CASUAL)
     }
 
     fn route_match(&self, category: &str) -> ClassificationResult {
