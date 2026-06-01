@@ -335,8 +335,8 @@ Follows the same visual patterns as `templates/dashboard/latency.html` (stat-row
 
 #### Manual
 
-- [ ] 1.8 Insert a test inference record; verify `prompt_char_count` column shows the correct character count in the database
-- [ ] 1.9 Set `BASELINE_MODEL=gpt-4o` and confirm the classifier stores it
+- [x] 1.8 Insert a test inference record; verify `prompt_char_count` column shows the correct character count in the database
+- [x] 1.9 Set `BASELINE_MODEL=gpt-4o` and confirm the classifier stores it
 
 ### Phase 2: Savings Query + Handler + Route
 
@@ -353,20 +353,20 @@ Follows the same visual patterns as `templates/dashboard/latency.html` (stat-row
 
 #### Manual
 
-- [ ] 2.9 Send several proxy requests; visit `/dashboard/savings` and verify savings figure appears
-- [ ] 2.10 Verify the warning count when a model in inference records has no cost configured
-- [ ] 2.11 Change `BASELINE_MODEL` to a cheaper model and verify savings decrease or go negative
+- [x] 2.9 Send several proxy requests; visit `/dashboard/savings` and verify savings figure appears
+- [x] 2.10 Verify the warning count when a model in inference records has no cost configured
+- [x] 2.11 Change `BASELINE_MODEL` to a cheaper model and verify savings decrease or go negative
 
 ### Phase 3: Template + Navigation
 
 #### Automated
 
-- [x] 3.1 `cargo build --release` compiles template without Askama parsing errors
-- [x] 3.2 Template renders without panic when `estimate` is `Some`, `None`, or when `error` is set
+- [x] 3.1 `cargo build --release` compiles template without Askama parsing errors — 9988e24
+- [x] 3.2 Template renders without panic when `estimate` is `Some`, `None`, or when `error` is set — 9988e24
 
 #### Manual
 
-- [ ] 3.3 Visit `/dashboard/savings` with a web browser; verify the page renders with the savings figure
-- [ ] 3.4 Click "Savings" tab from each of the other 3 dashboard pages; verify navigation works
-- [ ] 3.5 Verify the savings page shows appropriate empty state when no data exists
-- [ ] 3.6 Verify the HTML is well-formed and renders correctly on desktop and mobile viewports
+- [x] 3.3 Visit `/dashboard/savings` with a web browser; verify the page renders with the savings figure
+- [x] 3.4 Click "Savings" tab from each of the other 3 dashboard pages; verify navigation works
+- [x] 3.5 Verify the savings page shows appropriate empty state when no data exists
+- [x] 3.6 Verify the HTML is well-formed and renders correctly on desktop and mobile viewports
