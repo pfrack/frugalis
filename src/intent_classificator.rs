@@ -11,6 +11,8 @@ pub struct RouteEntry {
     pub model: String,
     pub endpoint: String,
     pub cost_per_1m_input_tokens: Option<f64>,
+    pub provider_type: String,
+    pub api_key_env: Option<String>,
 }
 
 /// Maps model names to their cost per 1M input tokens.
@@ -58,6 +60,8 @@ pub struct ClassificationResult {
     pub model: String,
     pub endpoint: String,
     pub tier: ClassificationTier,
+    pub provider_type: String,
+    pub api_key_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +226,8 @@ fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
             model: env_or_default("DEFAULT_MODEL_COMPLEX", DEFAULT_MODEL_COMPLEX),
             endpoint: String::new(),
             cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
         },
     );
     routing.insert(
@@ -230,6 +236,8 @@ fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
             model: env_or_default("DEFAULT_MODEL_READING", DEFAULT_MODEL_READING),
             endpoint: String::new(),
             cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
         },
     );
     routing.insert(
@@ -238,6 +246,8 @@ fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
             model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
             endpoint: String::new(),
             cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
         },
     );
     routing.insert(
@@ -246,14 +256,36 @@ fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
             model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
             endpoint: String::new(),
             cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
         },
     );
     let fallback = RouteEntry {
         model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
         endpoint: String::new(),
         cost_per_1m_input_tokens: None,
+        provider_type: String::new(),
+        api_key_env: None,
     };
     (routing, fallback)
+}
+
+// ── Auth Header Lookup ──
+
+/// Maps a provider_type string and resolved API key to HTTP auth header tuples.
+/// Called by the upstream proxy (Change 4) to attach the correct auth header
+/// before forwarding the request to the provider.
+pub fn auth_headers_for(provider_type: &str, api_key: &str) -> Vec<(String, String)> {
+    match provider_type {
+        "openai_compatible" | "" =>
+            vec![("authorization".into(), format!("Bearer {api_key}"))],
+        "anthropic" =>
+            vec![("x-api-key".into(), api_key.to_string())],
+        "ollama" | "local" =>
+            vec![],
+        _ =>
+            vec![("authorization".into(), format!("Bearer {api_key}"))],
+    }
 }
 
 // ── Code-block regex (lazily compiled once) ──
@@ -345,9 +377,16 @@ fn load_routing_from_file(path: &str) -> Result<HashMap<String, RouteEntry>, Str
             .to_string();
         let cost_per_1m_input_tokens = value.get("cost_per_1m_input_tokens")
             .and_then(|v| v.as_float());
+        let provider_type = value.get("provider_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let api_key_env = value.get("api_key_env")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         routing.insert(
             key.to_uppercase(),
-            RouteEntry { model, endpoint, cost_per_1m_input_tokens },
+            RouteEntry { model, endpoint, cost_per_1m_input_tokens, provider_type, api_key_env },
         );
     }
     Ok(routing)
@@ -370,6 +409,8 @@ fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
         model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
         endpoint: String::new(),
         cost_per_1m_input_tokens: None,
+        provider_type: String::new(),
+        api_key_env: None,
     });
     (routing, fallback_entry)
 }
@@ -385,6 +426,8 @@ impl ClassificationResult {
             model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
             endpoint: String::new(),
             tier: ClassificationTier::Fallback,
+            provider_type: String::new(),
+            api_key_env: None,
         }
     }
 }
@@ -520,6 +563,8 @@ impl IntentClassifier {
             model: route.model.clone(),
             endpoint: route.endpoint.clone(),
             tier: ClassificationTier::Regex,
+            provider_type: route.provider_type.clone(),
+            api_key_env: route.api_key_env.clone(),
         }
     }
 
@@ -529,6 +574,8 @@ impl IntentClassifier {
             model: self.fallback_entry.model.clone(),
             endpoint: self.fallback_entry.endpoint.clone(),
             tier: ClassificationTier::Fallback,
+            provider_type: self.fallback_entry.provider_type.clone(),
+            api_key_env: self.fallback_entry.api_key_env.clone(),
         }
     }
 }
@@ -541,24 +588,26 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             "FILE_READING".to_string(),
-            RouteEntry { model: "fr-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None },
+            RouteEntry { model: "fr-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None },
         );
         routing.insert(
             "COMPLEX_REASONING".to_string(),
-            RouteEntry { model: "cr-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None },
+            RouteEntry { model: "cr-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None },
         );
         routing.insert(
             "SYNTAX_FIX".to_string(),
-            RouteEntry { model: "sf-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None },
+            RouteEntry { model: "sf-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None },
         );
         routing.insert(
             "CASUAL".to_string(),
-            RouteEntry { model: "ca-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None },
+            RouteEntry { model: "ca-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None },
         );
         let fallback = RouteEntry {
             model: "fallback-model".to_string(),
             endpoint: String::new(),
             cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
         };
         IntentClassifier::from_values(routing, fallback)
     }
@@ -642,6 +691,8 @@ mod tests {
                 model: "claude-3.5-sonnet".to_string(),
                 endpoint: String::new(),
                 cost_per_1m_input_tokens: Some(5.0),
+                provider_type: String::new(),
+                api_key_env: None,
             },
         );
         routing.insert(
@@ -650,12 +701,16 @@ mod tests {
                 model: "ca-model".to_string(),
                 endpoint: String::new(),
                 cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
             },
         );
         let fallback = RouteEntry {
             model: "fallback-model".to_string(),
             endpoint: String::new(),
             cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
         };
         let classifier = IntentClassifier::from_values(routing, fallback);
         // claude-3.5-sonnet should be 5.0 (override), not 3.00 (hardcoded)

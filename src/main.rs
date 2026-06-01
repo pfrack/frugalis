@@ -431,6 +431,8 @@ mod tests {
                 model: "sf-model".to_string(),
                 endpoint: String::new(),
                 cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
             },
         );
         routing.insert(
@@ -439,12 +441,16 @@ mod tests {
                 model: "ca-model".to_string(),
                 endpoint: String::new(),
                 cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
             },
         );
         let fallback = intent_classificator::RouteEntry {
             model: "fallback-model".to_string(),
             endpoint: String::new(),
             cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
         };
         let classifier = Some(Arc::new(
             intent_classificator::IntentClassifier::from_values(routing, fallback),
