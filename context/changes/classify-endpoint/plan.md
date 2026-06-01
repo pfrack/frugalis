@@ -179,11 +179,11 @@ No migration needed. The classify endpoint is additive — zero changes to exist
 
 #### Automated
 
-- [ ] 1.1 `cargo build` compiles with new handler and route
-- [ ] 1.2 `cargo test auth` — all auth tests pass
-- [ ] 1.3 `cargo test routes_auth` — all route authorization tests pass
-- [ ] 1.4 `cargo test` — full suite passes, no regressions
-- [ ] 1.5 `openapi/completions.yaml` — valid OpenAPI 3.0.3
+- [x] 1.1 `cargo build` compiles with new handler and route
+- [x] 1.2 `cargo test auth` — all auth tests pass
+- [x] 1.3 `cargo test routes_auth` — all route authorization tests pass
+- [x] 1.4 `cargo test` — full suite passes, no regressions
+- [x] 1.5 `openapi/completions.yaml` — valid OpenAPI 3.0.3
 
 #### Manual
 

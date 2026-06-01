@@ -1,9 +1,69 @@
 openapi: "3.0.3"
 info:
-  title: Cerebrum Proxy — Chat Completions
-  description: Intent-aware request routing for autonomous agent workflows
+  title: Cerebrum Proxy API
+  description: Intent-aware request routing for autonomous agent workflows. Provides classify and chat completion endpoints.
   version: "0.1.0"
 paths:
+  /v1/classify:
+    post:
+      summary: Classify intent from a user message
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      role:
+                        type: string
+                        enum: [system, user, assistant]
+                      content:
+                        type: string
+                    required: [role, content]
+              required: [messages]
+      responses:
+        "200":
+          description: Intent classified successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [classified]
+                  category:
+                    type: string
+                    enum: [COMPLEX_REASONING, FILE_READING, SYNTAX_FIX, CASUAL]
+                  model:
+                    type: string
+                    description: Model selected for this category
+                  tier:
+                    type: string
+                    enum: [Regex, Fallback]
+                required: [status, category, model, tier]
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+        "415":
+          description: Unsupported media type
+          content:
+            text/plain:
+              schema:
+                type: string
   /v1/chat/completions:
     post:
       summary: Classify intent and route to upstream model
@@ -52,9 +112,12 @@ paths:
         "401":
           description: Missing or invalid bearer token
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
+                type: object
+                properties:
+                  error:
+                    type: string
 components:
   securitySchemes:
     bearerAuth:

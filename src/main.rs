@@ -174,6 +174,65 @@ async fn completion_handler(
     response
 }
 
+/// Classify handler: extracts prompt, classifies intent, logs a lightweight
+/// classification record with status "classified", and returns classification JSON.
+async fn classify_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, String) {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !content_type.starts_with("application/json") {
+        return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected application/json".to_string());
+    }
+
+    let start = std::time::Instant::now();
+
+    let body_str = std::str::from_utf8(&body).unwrap_or("");
+    let prompt = persistence::extract_last_user_message(body_str);
+
+    let classification = state.classifier.as_ref()
+        .map(|c| c.classify(&prompt))
+        .unwrap_or_else(intent_classificator::ClassificationResult::fallback);
+
+    let response_body = serde_json::json!({
+        "status": "classified",
+        "category": classification.category,
+        "model": classification.model,
+        "tier": format!("{:?}", classification.tier),
+    }).to_string();
+    let response = (StatusCode::OK, response_body);
+
+    if let Some(persistence) = &state.persistence {
+        let duration_ms = start.elapsed().as_millis() as i32;
+        let snippet = persistence::extract_snippet(body_str);
+        let prompt_char_count = if prompt.is_empty() {
+            None
+        } else {
+            Some(prompt.chars().count() as i32)
+        };
+        let record = persistence::InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "classified".to_string(),
+            category: Some(classification.category.clone()),
+            upstream_model: Some(classification.model.clone()),
+            duration_ms: Some(duration_ms),
+            prompt_snippet: snippet,
+            prompt_char_count,
+        };
+        persistence::log_inference(
+            persistence.pool.clone(),
+            persistence.task_semaphore.clone(),
+            record,
+        );
+    }
+
+    response
+}
+
 async fn dashboard(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -336,6 +395,7 @@ async fn savings(
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
     let proxy_routes = Router::new()
         .route("/chat/completions", post(completion_handler))
+        .route("/classify", post(classify_handler))
         .layer(middleware::from_fn_with_state(
             auth_config.clone(),
             auth::require_proxy_bearer,
