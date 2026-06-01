@@ -179,24 +179,24 @@ No migration needed. The classify endpoint is additive — zero changes to exist
 
 #### Automated
 
-- [x] 1.1 `cargo build` compiles with new handler and route
-- [x] 1.2 `cargo test auth` — all auth tests pass
-- [x] 1.3 `cargo test routes_auth` — all route authorization tests pass
-- [x] 1.4 `cargo test` — full suite passes, no regressions
-- [x] 1.5 `openapi/completions.yaml` — valid OpenAPI 3.0.3
+- [x] 1.1 `cargo build` compiles with new handler and route — d692205
+- [x] 1.2 `cargo test auth` — all auth tests pass — d692205
+- [x] 1.3 `cargo test routes_auth` — all route authorization tests pass — d692205
+- [x] 1.4 `cargo test` — full suite passes, no regressions — d692205
+- [x] 1.5 `openapi/completions.yaml` — valid OpenAPI 3.0.3 — d692205
 
 #### Manual
 
-- [ ] 1.6 curl POST `/v1/classify` with valid auth → 200 with classification JSON
-- [ ] 1.7 curl POST `/v1/classify` without auth → 401
-- [ ] 1.8 curl POST `/v1/classify` without Content-Type → 415
-- [ ] 1.9 Dashboard shows classify records with status "classified"
-- [ ] 1.10 `/v1/chat/completions` behavior unchanged
+- [x] 1.6 curl POST `/v1/classify` with valid auth → 200 with classification JSON
+- [x] 1.7 curl POST `/v1/classify` without auth → 401
+- [x] 1.8 curl POST `/v1/classify` without Content-Type → 415
+- [x] 1.9 Dashboard shows classify records with status "classified"
+- [x] 1.10 `/v1/chat/completions` behavior unchanged
 
 ### Phase 2: Tests
 
 #### Automated
 
-- [ ] 2.1 `cargo test test_classify_handler_returns_classification_json` — test passes
-- [ ] 2.2 `cargo test` — full suite passes, no regressions
+- [x] 2.1 `cargo test test_classify_handler_returns_classification_json` — test passes
+- [x] 2.2 `cargo test` — full suite passes, no regressions
 

@@ -513,6 +513,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_classify_handler_returns_classification_json() {
+        let response = test_app_with_classifier()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/classify")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("classify request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(
+            body.contains(r#""category":"SYNTAX_FIX""#),
+            "expected SYNTAX_FIX category, got: {body}"
+        );
+        assert!(
+            body.contains(r#""model":"sf-model""#),
+            "expected sf-model, got: {body}"
+        );
+        assert!(body.contains(r#""status":"classified""#), "expected classified status");
+        assert!(body.contains(r#""tier":"Regex""#), "expected Regex tier");
+    }
+
+    #[tokio::test]
     async fn routes_auth_health_is_public() {
         let response = test_app()
             .oneshot(
