@@ -37,6 +37,7 @@ struct InferencesTemplate {
 #[derive(Clone)]
 struct AppState {
     persistence: Option<persistence::PersistenceConfig>,
+    classifier: Option<Arc<intent_classificator::IntentClassifier>>,
 }
 
 #[tokio::main]
@@ -56,8 +57,19 @@ async fn main() {
             None
         }
     };
+    let classifier = match intent_classificator::IntentClassifier::from_env() {
+        Ok(c) => {
+            println!("Intent classifier initialized");
+            Some(Arc::new(c))
+        }
+        Err(e) => {
+            eprintln!("WARN: intent classification disabled: {e}");
+            None
+        }
+    };
     let app_state = Arc::new(AppState {
         persistence: persistence_state,
+        classifier,
     });
 
     let port: u16 = std::env::var("PORT")
@@ -83,16 +95,28 @@ async fn health() -> (StatusCode, &'static str) {
     (StatusCode::OK, "ok")
 }
 
-/// Completion handler: assembles response then enqueues a non-blocking inference
-/// logging event. DB latency and retries are fully isolated to a background task.
+/// Completion handler: classifies intent, returns JSON metadata, and
+/// enqueues a non-blocking inference logging event.
 async fn completion_handler(
     State(state): State<Arc<AppState>>,
     body: Bytes,
-) -> (StatusCode, &'static str) {
+) -> (StatusCode, String) {
     let start = std::time::Instant::now();
 
-    // Placeholder response — future: proxy to upstream model.
-    let response = (StatusCode::OK, "proxy route is protected");
+    let body_str = std::str::from_utf8(&body).unwrap_or("");
+    let prompt = persistence::extract_last_user_message(body_str);
+
+    let classification = state.classifier.as_ref()
+        .map(|c| c.classify(&prompt))
+        .unwrap_or_else(intent_classificator::ClassificationResult::fallback);
+
+    let response_body = serde_json::json!({
+        "status": "classified",
+        "category": classification.category,
+        "model": classification.model,
+        "tier": format!("{:?}", classification.tier),
+    }).to_string();
+    let response = (StatusCode::OK, response_body);
 
     println!(
         "DEBUG: wpadło zapytanie. persistence is Some? {}",
@@ -102,12 +126,12 @@ async fn completion_handler(
     // Fire-and-forget: enqueue after response is assembled, never awaited.
     if let Some(persistence) = &state.persistence {
         let duration_ms = start.elapsed().as_millis() as i32;
-        let snippet = persistence::extract_snippet(std::str::from_utf8(&body).unwrap_or(""));
+        let snippet = persistence::extract_snippet(body_str);
         let record = persistence::InferenceRecord {
             request_id: uuid::Uuid::new_v4(),
             status: "ok".to_string(),
-            category: None,
-            upstream_model: None,
+            category: Some(classification.category.clone()),
+            upstream_model: Some(classification.model.clone()),
             duration_ms: Some(duration_ms),
             prompt_snippet: snippet,
         };
@@ -231,7 +255,10 @@ mod tests {
             "password",
         ));
         // No-op persistence: persistence is None, so completion_handler skips logging.
-        let app_state = Arc::new(AppState { persistence: None });
+        let app_state = Arc::new(AppState {
+            persistence: None,
+            classifier: None,
+        });
         build_app(auth_config, app_state)
     }
 

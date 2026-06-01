@@ -1,0 +1,63 @@
+openapi: "3.0.3"
+info:
+  title: Cerebrum Proxy — Chat Completions
+  description: Intent-aware request routing for autonomous agent workflows
+  version: "0.1.0"
+paths:
+  /v1/chat/completions:
+    post:
+      summary: Classify intent and route to upstream model
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      role:
+                        type: string
+                        enum: [system, user, assistant]
+                      content:
+                        type: string
+                    required: [role, content]
+              required: [messages]
+      responses:
+        "200":
+          description: Intent classified successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [classified]
+                  category:
+                    type: string
+                    enum: [COMPLEX_REASONING, FILE_READING, SYNTAX_FIX, CASUAL]
+                  model:
+                    type: string
+                    description: Upstream model selected for this category
+                  tier:
+                    type: string
+                    enum: [Regex, Fallback]
+                required: [status, category, model, tier]
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            text/plain:
+              schema:
+                type: string
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: "PROXY_API_BEARER_TOKEN"

@@ -342,9 +342,9 @@ Add unit tests for the classifier's `classify()` method, verify existing handler
 
 #### Automated
 
-- [x] 1.1 `cargo build` compiles with new deps and module
-- [x] 1.2 `cargo test intent_classificator` — module tests pass
-- [x] 1.3 `cargo test persistence` — persistence tests pass (extract_snippet unchanged behavior)
+- [x] 1.1 `cargo build` compiles with new deps and module — a06ad2b
+- [x] 1.2 `cargo test intent_classificator` — module tests pass — a06ad2b
+- [x] 1.3 `cargo test persistence` — persistence tests pass (extract_snippet unchanged behavior) — a06ad2b
 
 #### Manual
 
@@ -355,11 +355,11 @@ Add unit tests for the classifier's `classify()` method, verify existing handler
 
 #### Automated
 
-- [ ] 2.1 `cargo build` compiles with handler changes
-- [ ] 2.2 `cargo test auth` — all auth tests pass
-- [ ] 2.3 `cargo test routes_auth` — all route authorization tests pass
-- [ ] 2.4 `cargo test` — all existing tests pass with no regressions
-- [ ] 2.5 `openapi/completions.yaml` — valid OpenAPI 3.0 spec
+- [x] 2.1 `cargo build` compiles with handler changes
+- [x] 2.2 `cargo test auth` — all auth tests pass
+- [x] 2.3 `cargo test routes_auth` — all route authorization tests pass
+- [x] 2.4 `cargo test` — all existing tests pass with no regressions
+- [x] 2.5 `openapi/completions.yaml` — valid OpenAPI 3.0 spec
 
 #### Manual
 

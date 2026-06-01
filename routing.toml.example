@@ -1,0 +1,23 @@
+# Cerebrum routing configuration
+# Maps each classified intent to an upstream model and API endpoint.
+# Copy to routing.toml and adjust values for your environment.
+
+[COMPLEX_REASONING]
+model = "claude-3.5-sonnet"
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+
+[FILE_READING]
+model = "deepseek-chat"
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+
+[SYNTAX_FIX]
+model = "gpt-4o-mini"
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+
+[CASUAL]
+model = "gpt-4o-mini"
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+
+[FALLBACK]
+model = "gpt-4o-mini"
+endpoint = "https://openrouter.ai/api/v1/chat/completions"

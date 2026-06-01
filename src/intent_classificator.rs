@@ -265,7 +265,8 @@ fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
         .unwrap_or_else(|_| "routing.toml".to_string());
     let mut routing = match load_routing_from_file(&path) {
         Ok(r) => r,
-        Err(_) => {
+        Err(e) => {
+            eprintln!("WARN intent_classificator: {e}; using hardcoded routing defaults");
             return hardcoded_routing();
         }
     };
