@@ -33,6 +33,24 @@ pub struct InferenceLog {
     pub duration_ms: Option<i32>,
 }
 
+/// One row from the latency aggregation query — a single category's summary.
+#[derive(Debug, Clone)]
+pub struct LatencySummaryRow {
+    pub category: String,
+    pub request_count: i64,
+    pub avg_duration_ms: Option<i32>,
+    pub p99_duration_ms: Option<i32>,
+}
+
+/// Container for the full latency aggregation result.
+#[derive(Debug, Clone)]
+pub struct LatencySummary {
+    pub rows: Vec<LatencySummaryRow>,
+    pub unclassified_count: i64,
+    pub total_classified_count: i64,
+    pub hours: u32,
+}
+
 /// Shared persistence configuration injected into the app router.
 #[derive(Clone)]
 pub struct PersistenceConfig {
@@ -205,6 +223,75 @@ impl PersistenceConfig {
             .collect();
 
         Ok((records, total_count))
+    }
+
+    /// Fetch a per-category latency summary for the given time window.
+    ///
+    /// Runs two queries: a GROUP BY aggregation for classified records, and a
+    /// separate COUNT for NULL-category (unclassified) records. Returns a
+    /// [`LatencySummary`] with per-category rows, unclassified count, and the
+    /// sum of all classified row counts.
+    pub async fn fetch_latency_summary(
+        &self,
+        hours: u32,
+    ) -> Result<LatencySummary, QueryError> {
+        let rows = sqlx::query(
+            "SELECT category, \
+             COUNT(*)::BIGINT AS count, \
+             ROUND(AVG(duration_ms))::INTEGER AS avg_duration_ms, \
+             ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY duration_ms))::INTEGER \
+             AS p99_duration_ms \
+             FROM inferences \
+             WHERE created_at >= NOW() - ($1 || ' hours')::INTERVAL \
+             AND category IS NOT NULL \
+             GROUP BY category \
+             ORDER BY count DESC",
+        )
+        .bind(hours as i64)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(|e| QueryError::Database(e.to_string()))?;
+
+        let summary_rows: Vec<LatencySummaryRow> = rows
+            .iter()
+            .map(|row| {
+                let category: String = row.try_get("category").unwrap_or_default();
+                let request_count: i64 = row.try_get("count").unwrap_or(0);
+                let avg_duration_ms: Option<i32> = row.try_get("avg_duration_ms").unwrap_or(None);
+                let p99_duration_ms: Option<i32> = row.try_get("p99_duration_ms").unwrap_or(None);
+
+                LatencySummaryRow {
+                    category,
+                    request_count,
+                    avg_duration_ms,
+                    p99_duration_ms,
+                }
+            })
+            .collect();
+
+        let total_classified_count: i64 = summary_rows.iter().map(|r| r.request_count).sum();
+
+        let unclassified_row = sqlx::query(
+            "SELECT COUNT(*) \
+             FROM inferences \
+             WHERE created_at >= NOW() - ($1 || ' hours')::INTERVAL \
+             AND category IS NULL",
+        )
+        .bind(hours as i64)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(|e| QueryError::Database(e.to_string()))?;
+
+        let unclassified_count: i64 = unclassified_row
+            .try_get(0)
+            .map_err(|e| QueryError::Database(e.to_string()))?;
+
+        Ok(LatencySummary {
+            rows: summary_rows,
+            unclassified_count,
+            total_classified_count,
+            hours,
+        })
     }
 }
 
@@ -681,5 +768,241 @@ mod tests {
 
         assert_eq!(records.len(), 1, "should return only 1 record (limit=1)");
         assert!(total_count >= 3, "total_count should be at least 3");
+    }
+
+    // ── fetch_latency_summary ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_fetch_latency_summary_empty() {
+        let pool = match test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP test_fetch_latency_summary_empty: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pc = make_persistence(pool);
+        let result = pc
+            .fetch_latency_summary(1)
+            .await
+            .expect("fetch should succeed");
+        assert!(result.rows.is_empty(), "expected no rows");
+        assert_eq!(result.unclassified_count, 0, "expected no unclassified");
+        assert_eq!(result.total_classified_count, 0, "expected zero total");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_latency_summary_with_data() {
+        let pool = match test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP test_fetch_latency_summary_with_data: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pc = make_persistence(pool.clone());
+        let id_a1 = uuid::Uuid::new_v4();
+        let id_a2 = uuid::Uuid::new_v4();
+        let id_a3 = uuid::Uuid::new_v4();
+        let id_b1 = uuid::Uuid::new_v4();
+        let id_b2 = uuid::Uuid::new_v4();
+        let id_c1 = uuid::Uuid::new_v4();
+        let ids = vec![id_a1, id_a2, id_a3, id_b1, id_b2, id_c1];
+
+        // Category A: 3 records with durations 100, 200, 300
+        for (id, dur) in [(id_a1, 100), (id_a2, 200), (id_a3, 300)] {
+            sqlx::query(
+                "INSERT INTO inferences (request_id, status, category, duration_ms, prompt_snippet) \
+                 VALUES ($1,$2,$3,$4,$5)",
+            )
+            .bind(id)
+            .bind("ok")
+            .bind("LATENCY_CAT_A")
+            .bind(dur)
+            .bind("cat a")
+            .execute(pool.as_ref())
+            .await
+            .ok();
+        }
+        // Category B: 2 records with durations 50, 150
+        for (id, dur) in [(id_b1, 50), (id_b2, 150)] {
+            sqlx::query(
+                "INSERT INTO inferences (request_id, status, category, duration_ms, prompt_snippet) \
+                 VALUES ($1,$2,$3,$4,$5)",
+            )
+            .bind(id)
+            .bind("ok")
+            .bind("LATENCY_CAT_B")
+            .bind(dur)
+            .bind("cat b")
+            .execute(pool.as_ref())
+            .await
+            .ok();
+        }
+        // Category C: 1 record with duration 500
+        sqlx::query(
+            "INSERT INTO inferences (request_id, status, category, duration_ms, prompt_snippet) \
+             VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(id_c1)
+        .bind("ok")
+        .bind("LATENCY_CAT_C")
+        .bind(500)
+        .bind("cat c")
+        .execute(pool.as_ref())
+        .await
+        .ok();
+
+        let result = pc
+            .fetch_latency_summary(24)
+            .await
+            .expect("fetch should succeed");
+
+        // Cleanup.
+        sqlx::query("DELETE FROM inferences WHERE request_id = ANY($1)")
+            .bind(ids)
+            .execute(pool.as_ref())
+            .await
+            .ok();
+
+        assert!(
+            !result.rows.is_empty(),
+            "expected at least one summary row"
+        );
+
+        let row_a = result
+            .rows
+            .iter()
+            .find(|r| r.category == "LATENCY_CAT_A")
+            .expect("LATENCY_CAT_A should appear");
+        assert_eq!(row_a.request_count, 3);
+        assert_eq!(row_a.avg_duration_ms, Some(200));
+
+        let row_b = result
+            .rows
+            .iter()
+            .find(|r| r.category == "LATENCY_CAT_B")
+            .expect("LATENCY_CAT_B should appear");
+        assert_eq!(row_b.request_count, 2);
+        assert_eq!(row_b.avg_duration_ms, Some(100));
+
+        let row_c = result
+            .rows
+            .iter()
+            .find(|r| r.category == "LATENCY_CAT_C")
+            .expect("LATENCY_CAT_C should appear");
+        assert_eq!(row_c.request_count, 1);
+        assert_eq!(row_c.avg_duration_ms, Some(500));
+
+        // Category A (3 records) should be first (ORDER BY count DESC).
+        assert_eq!(
+            result.rows[0].category, "LATENCY_CAT_A",
+            "most frequent category should be first"
+        );
+
+        assert_eq!(result.total_classified_count, 6, "expected 6 total classified");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_latency_summary_unclassified_count() {
+        let pool = match test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP test_fetch_latency_summary_unclassified_count: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pc = make_persistence(pool.clone());
+        let id1 = uuid::Uuid::new_v4();
+        let id2 = uuid::Uuid::new_v4();
+        let ids = vec![id1, id2];
+
+        // Insert records with NULL category (unclassified).
+        sqlx::query(
+            "INSERT INTO inferences (request_id, status, duration_ms, prompt_snippet) \
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(id1)
+        .bind("ok")
+        .bind(100i32)
+        .bind("unclassified 1")
+        .execute(pool.as_ref())
+        .await
+        .ok();
+        sqlx::query(
+            "INSERT INTO inferences (request_id, status, duration_ms, prompt_snippet) \
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(id2)
+        .bind("ok")
+        .bind(200i32)
+        .bind("unclassified 2")
+        .execute(pool.as_ref())
+        .await
+        .ok();
+
+        let result = pc
+            .fetch_latency_summary(24)
+            .await
+            .expect("fetch should succeed");
+
+        // Cleanup.
+        sqlx::query("DELETE FROM inferences WHERE request_id = ANY($1)")
+            .bind(ids)
+            .execute(pool.as_ref())
+            .await
+            .ok();
+
+        assert!(result.rows.is_empty(), "no classified rows expected");
+        assert_eq!(result.unclassified_count, 2, "expected 2 unclassified records");
+        assert_eq!(result.total_classified_count, 0, "expected 0 classified total");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_latency_summary_time_filter() {
+        let pool = match test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP test_fetch_latency_summary_time_filter: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pc = make_persistence(pool.clone());
+        let id = uuid::Uuid::new_v4();
+
+        // Insert a record with created_at set to 2 hours ago.
+        let two_hours_ago = chrono::Utc::now() - chrono::Duration::hours(2);
+        sqlx::query(
+            "INSERT INTO inferences (request_id, status, category, duration_ms, prompt_snippet, created_at) \
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(id)
+        .bind("ok")
+        .bind("OLD_CATEGORY")
+        .bind(100i32)
+        .bind("old record")
+        .bind(two_hours_ago)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert should succeed");
+
+        // Query with hours=1 — should not find the 2-hour-old record.
+        let result = pc
+            .fetch_latency_summary(1)
+            .await
+            .expect("fetch should succeed");
+
+        // Cleanup.
+        sqlx::query("DELETE FROM inferences WHERE request_id = $1")
+            .bind(id)
+            .execute(pool.as_ref())
+            .await
+            .ok();
+
+        assert!(
+            result.rows.is_empty(),
+            "old record should be excluded from 1-hour window"
+        );
+        assert_eq!(result.unclassified_count, 0);
     }
 }
