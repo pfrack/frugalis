@@ -1,23 +1,33 @@
 # Cerebrum routing configuration
-# Maps each classified intent to an upstream model and API endpoint.
+# Maps each classified intent to an upstream model, provider, and auth key.
 # Copy to routing.toml and adjust values for your environment.
 
 [COMPLEX_REASONING]
-model = "claude-3.5-sonnet"
-endpoint = "https://openrouter.ai/api/v1/chat/completions"
+model = "claude-sonnet-4-20250514"
+endpoint = "https://api.anthropic.com/v1/messages"
+provider_type = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
 
 [FILE_READING]
 model = "deepseek-chat"
-endpoint = "https://openrouter.ai/api/v1/chat/completions"
+endpoint = "https://api.openai.com/v1/chat/completions"
+provider_type = "openai_compatible"
+api_key_env = "OPENAI_API_KEY"
 
 [SYNTAX_FIX]
 model = "gpt-4o-mini"
-endpoint = "https://openrouter.ai/api/v1/chat/completions"
+endpoint = "https://api.openai.com/v1/chat/completions"
+provider_type = "openai_compatible"
+api_key_env = "OPENAI_API_KEY"
 
 [CASUAL]
 model = "gpt-4o-mini"
-endpoint = "https://openrouter.ai/api/v1/chat/completions"
+endpoint = "https://api.openai.com/v1/chat/completions"
+provider_type = "openai_compatible"
+api_key_env = "OPENAI_API_KEY"
 
 [FALLBACK]
 model = "gpt-4o-mini"
-endpoint = "https://openrouter.ai/api/v1/chat/completions"
+endpoint = "https://api.openai.com/v1/chat/completions"
+provider_type = "openai_compatible"
+api_key_env = "OPENAI_API_KEY""

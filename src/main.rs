@@ -120,6 +120,41 @@ async fn health() -> (StatusCode, &'static str) {
     (StatusCode::OK, "ok")
 }
 
+/// Shared logging helper. Extracts the snippet, builds the inference record,
+/// and enqueues a fire-and-forget DB write.
+fn log_classification(
+    state: &AppState,
+    classification: &intent_classificator::ClassificationResult,
+    body_str: &str,
+    start: std::time::Instant,
+    log_status: &str,
+) {
+    if let Some(persistence) = &state.persistence {
+        let duration_ms = start.elapsed().as_millis() as i32;
+        let snippet = persistence::extract_snippet(body_str);
+        let prompt = persistence::extract_last_user_message(body_str);
+        let prompt_char_count = if prompt.is_empty() {
+            None
+        } else {
+            Some(prompt.chars().count() as i32)
+        };
+        let record = persistence::InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: log_status.to_string(),
+            category: Some(classification.category.clone()),
+            upstream_model: Some(classification.model.clone()),
+            duration_ms: Some(duration_ms),
+            prompt_snippet: snippet,
+            prompt_char_count,
+        };
+        persistence::log_inference(
+            persistence.pool.clone(),
+            persistence.task_semaphore.clone(),
+            record,
+        );
+    }
+}
+
 /// Shared classify-and-log logic. Validates Content-Type, extracts the prompt,
 /// classifies intent, builds the JSON response, and optionally enqueues a
 /// fire-and-forget inference record with the given `log_status`.
@@ -150,39 +185,16 @@ fn classify_and_log(
         "model": classification.model,
         "tier": format!("{:?}", classification.tier),
     }).to_string();
-    let response = (StatusCode::OK, response_body);
-
     if let Some(log_status) = log_status {
-        if let Some(persistence) = &state.persistence {
-            let duration_ms = start.elapsed().as_millis() as i32;
-            let snippet = persistence::extract_snippet(body_str);
-            let prompt_char_count = if prompt.is_empty() {
-                None
-            } else {
-                Some(prompt.chars().count() as i32)
-            };
-            let record = persistence::InferenceRecord {
-                request_id: uuid::Uuid::new_v4(),
-                status: log_status.to_string(),
-                category: Some(classification.category.clone()),
-                upstream_model: Some(classification.model.clone()),
-                duration_ms: Some(duration_ms),
-                prompt_snippet: snippet,
-                prompt_char_count,
-            };
-            persistence::log_inference(
-                persistence.pool.clone(),
-                persistence.task_semaphore.clone(),
-                record,
-            );
-        }
+        log_classification(state, &classification, body_str, start, log_status);
     }
 
-    response
+    (StatusCode::OK, response_body)
 }
 
-/// Completion handler: classifies intent, returns JSON metadata, and
-/// enqueues a non-blocking inference logging event.
+/// Completion handler: classifies intent, resolves API key, returns enriched
+/// JSON metadata (including endpoint, provider_type, api_key), and enqueues a
+/// non-blocking inference logging event.
 async fn completion_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -190,7 +202,37 @@ async fn completion_handler(
 ) -> (StatusCode, String) {
     let start = std::time::Instant::now();
     let body_str = std::str::from_utf8(&body).unwrap_or("");
-    classify_and_log(&headers, body_str, start, &state, Some("ok"))
+
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !content_type.starts_with("application/json") {
+        return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected application/json".to_string());
+    }
+
+    let prompt = persistence::extract_last_user_message(body_str);
+    let classification = state.classifier.as_ref()
+        .map(|c| c.classify(&prompt))
+        .unwrap_or_else(intent_classificator::ClassificationResult::fallback);
+
+    let api_key = classification.api_key_env
+        .as_ref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let response_body = serde_json::json!({
+        "status": "classified",
+        "category": classification.category,
+        "model": classification.model,
+        "tier": format!("{:?}", classification.tier),
+        "endpoint": classification.endpoint,
+        "provider_type": classification.provider_type,
+        "api_key": api_key,
+    }).to_string();
+
+    log_classification(&state, &classification, body_str, start, "ok");
+
+    (StatusCode::OK, response_body)
 }
 
 /// Classify handler: extracts prompt, classifies intent, optionally logs a
@@ -527,6 +569,137 @@ mod tests {
         );
         assert!(body.contains(r#""status":"classified""#), "expected classified status");
         assert!(body.contains(r#""tier":"Regex""#), "expected Regex tier");
+    }
+
+    fn test_app_with_enriched_classifier(
+        provider_type_val: &str,
+        api_key_env_val: Option<&str>,
+    ) -> Router {
+        use std::collections::HashMap;
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let mut routing = HashMap::new();
+        routing.insert(
+            "SYNTAX_FIX".to_string(),
+            intent_classificator::RouteEntry {
+                model: "sf-model".to_string(),
+                endpoint: "https://test.endpoint".to_string(),
+                cost_per_1m_input_tokens: None,
+                provider_type: provider_type_val.to_string(),
+                api_key_env: api_key_env_val.map(|s| s.to_string()),
+            },
+        );
+        routing.insert(
+            "CASUAL".to_string(),
+            intent_classificator::RouteEntry {
+                model: "ca-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
+        let fallback = intent_classificator::RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        let classifier = Some(Arc::new(
+            intent_classificator::IntentClassifier::from_values(routing, fallback),
+        ));
+        let app_state = Arc::new(AppState {
+            persistence: None,
+            classifier,
+            classify_db_log: false,
+        });
+        build_app(auth_config, app_state)
+    }
+
+    #[tokio::test]
+    async fn test_completion_enriched_response_fields() {
+        std::env::set_var("TEST_API_KEY", "sk-test-value-123");
+        let response = test_app_with_enriched_classifier("test_provider", Some("TEST_API_KEY"))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.contains(r#""provider_type":"test_provider""#), "expected provider_type in response");
+        assert!(body.contains(r#""endpoint":"https://test.endpoint""#), "expected endpoint in response");
+        assert!(body.contains(r#""api_key":"sk-test-value-123""#), "expected api_key in response");
+    }
+
+    #[tokio::test]
+    async fn test_completion_api_key_null_when_env_missing() {
+        let response = test_app_with_enriched_classifier("test_provider", Some("MISSING_KEY_XYZ"))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.contains(r#""api_key":null"#), "expected api_key to be null, got: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_classify_no_enriched_fields() {
+        let response = test_app_with_enriched_classifier("test_provider", Some("TEST_API_KEY"))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/classify")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("classify request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(!body.contains(r#""provider_type""#), "classify response should not contain provider_type");
+        assert!(!body.contains(r#""api_key""#), "classify response should not contain api_key");
     }
 
     #[tokio::test]
