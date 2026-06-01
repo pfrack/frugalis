@@ -1,9 +1,37 @@
 use std::sync::Arc;
 
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use tokio::sync::Semaphore;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::Row;
 use uuid::Uuid;
+use tokio::sync::Semaphore;
+
+/// Custom error type for inference query failures.
+#[derive(Debug, Clone)]
+pub enum QueryError {
+    Database(String),      // Connection, query, or pool error
+    InvalidFilter(String), // Invalid filter value
+}
+
+impl std::fmt::Display for QueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Database(msg) => write!(f, "Database error: {}", msg),
+            Self::InvalidFilter(msg) => write!(f, "Invalid filter: {}", msg),
+        }
+    }
+}
+
+/// One row from the `inferences` table, pre-formatted for dashboard display.
+#[derive(Debug, Clone)]
+pub struct InferenceLog {
+    pub id: String,
+    pub timestamp: String,
+    pub prompt_snippet: String,
+    pub category: Option<String>,
+    pub upstream_model: Option<String>,
+    pub duration_ms: Option<i32>,
+}
 
 /// Shared persistence configuration injected into the app router.
 #[derive(Clone)]
@@ -24,25 +52,159 @@ pub struct InferenceRecord {
     pub prompt_snippet: String,
 }
 
+use sqlx::postgres::{PgConnectOptions};
+use std::str::FromStr;
+
 impl PersistenceConfig {
-    /// Initialise from `DATABASE_URL` environment variable.
-    /// Configures connection pool with explicit bounds: max 10 connections,
-    /// 30s acquire timeout, 30m idle timeout. Prevents connection exhaustion
-    /// under load.
     pub async fn from_env() -> Result<Self, String> {
         let url = std::env::var("DATABASE_URL")
             .map_err(|_| "DATABASE_URL environment variable is required".to_string())?;
+
+        let options = PgConnectOptions::from_str(&url)
+            .map_err(|e| format!("DB connection string parse error: {e}"))?;
+
         let pool = PgPoolOptions::new()
             .max_connections(10)
             .acquire_timeout(std::time::Duration::from_secs(30))
             .idle_timeout(std::time::Duration::from_secs(1800))
-            .connect(&url)
-            .await
-            .map_err(|e| format!("DB connection failed: {e}"))?;
+            .connect_lazy_with(options);
+
         Ok(Self {
             pool: Arc::new(pool),
             task_semaphore: Arc::new(Semaphore::new(100)),
         })
+    }
+
+    /// Fetch recent inference records with optional pagination and filtering.
+    ///
+    /// Returns both the matching records (formatted for display) and the total
+    /// count of matching rows (for pagination metadata), avoiding N+1 queries
+    /// by running a separate COUNT query with the same filters.
+    pub async fn fetch_inferences(
+        &self,
+        offset: u32,
+        limit: u32,
+        filter_category: Option<&str>,
+        filter_model: Option<&str>,
+    ) -> Result<(Vec<InferenceLog>, i64), QueryError> {
+        // Build the data query and count query with proper parameter indices.
+        let (data_sql, count_sql) = match (filter_category, filter_model) {
+            (Some(_), Some(_)) => (
+                "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
+                 FROM inferences WHERE category = $1 AND upstream_model = $2 \
+                 ORDER BY created_at DESC LIMIT $3 OFFSET $4",
+                "SELECT COUNT(*) FROM inferences WHERE category = $1 AND upstream_model = $2",
+            ),
+            (Some(_), None) => (
+                "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
+                 FROM inferences WHERE category = $1 \
+                 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+                "SELECT COUNT(*) FROM inferences WHERE category = $1",
+            ),
+            (None, Some(_)) => (
+                "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
+                 FROM inferences WHERE upstream_model = $1 \
+                 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+                "SELECT COUNT(*) FROM inferences WHERE upstream_model = $1",
+            ),
+            (None, None) => (
+                "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
+                 FROM inferences ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+                "SELECT COUNT(*) FROM inferences",
+            ),
+        };
+
+        // Execute the count query.
+        let total_count: i64 = match (filter_category, filter_model) {
+            (Some(cat), Some(model)) => sqlx::query(count_sql)
+                .bind(cat)
+                .bind(model)
+                .fetch_one(self.pool.as_ref())
+                .await
+                .map_err(|e| QueryError::Database(e.to_string()))?
+                .try_get(0)
+                .map_err(|e| QueryError::Database(e.to_string()))?,
+            (Some(cat), None) => sqlx::query(count_sql)
+                .bind(cat)
+                .fetch_one(self.pool.as_ref())
+                .await
+                .map_err(|e| QueryError::Database(e.to_string()))?
+                .try_get(0)
+                .map_err(|e| QueryError::Database(e.to_string()))?,
+            (None, Some(model)) => sqlx::query(count_sql)
+                .bind(model)
+                .fetch_one(self.pool.as_ref())
+                .await
+                .map_err(|e| QueryError::Database(e.to_string()))?
+                .try_get(0)
+                .map_err(|e| QueryError::Database(e.to_string()))?,
+            (None, None) => sqlx::query(count_sql)
+                .fetch_one(self.pool.as_ref())
+                .await
+                .map_err(|e| QueryError::Database(e.to_string()))?
+                .try_get(0)
+                .map_err(|e| QueryError::Database(e.to_string()))?,
+        };
+
+        // Execute the data query.
+        let rows = match (filter_category, filter_model) {
+            (Some(cat), Some(model)) => sqlx::query(data_sql)
+                .bind(cat)
+                .bind(model)
+                .bind(limit as i64)
+                .bind(offset as i64)
+                .fetch_all(self.pool.as_ref())
+                .await
+                .map_err(|e| QueryError::Database(e.to_string()))?,
+            (Some(cat), None) => sqlx::query(data_sql)
+                .bind(cat)
+                .bind(limit as i64)
+                .bind(offset as i64)
+                .fetch_all(self.pool.as_ref())
+                .await
+                .map_err(|e| QueryError::Database(e.to_string()))?,
+            (None, Some(model)) => sqlx::query(data_sql)
+                .bind(model)
+                .bind(limit as i64)
+                .bind(offset as i64)
+                .fetch_all(self.pool.as_ref())
+                .await
+                .map_err(|e| QueryError::Database(e.to_string()))?,
+            (None, None) => sqlx::query(data_sql)
+                .bind(limit as i64)
+                .bind(offset as i64)
+                .fetch_all(self.pool.as_ref())
+                .await
+                .map_err(|e| QueryError::Database(e.to_string()))?,
+        };
+
+        // Map rows to InferenceLog, formatting timestamps and durations.
+        let records: Vec<InferenceLog> = rows
+            .iter()
+            .map(|row| {
+                let id: Uuid = row.try_get("id").unwrap_or_default();
+                let created_at: chrono::DateTime<chrono::Utc> =
+                    row.try_get("created_at").unwrap_or_default();
+                let timestamp = created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+                let prompt_snippet: String =
+                    row.try_get("prompt_snippet").unwrap_or_default();
+                let category: Option<String> = row.try_get("category").unwrap_or(None);
+                let upstream_model: Option<String> =
+                    row.try_get("upstream_model").unwrap_or(None);
+                let duration_ms: Option<i32> = row.try_get("duration_ms").unwrap_or(None);
+
+                InferenceLog {
+                    id: id.to_string(),
+                    timestamp,
+                    prompt_snippet,
+                    category,
+                    upstream_model,
+                    duration_ms,
+                }
+            })
+            .collect();
+
+        Ok((records, total_count))
     }
 }
 
@@ -105,7 +267,9 @@ pub fn log_inference(
         let _permit = match semaphore.acquire().await {
             Ok(p) => p,
             Err(_) => {
-                eprintln!("ERROR persistence: semaphore closed for request_id={request_id}");
+                eprintln!(
+                    "ERROR persistence: semaphore closed for request_id={request_id}"
+                );
                 return;
             }
         };
@@ -119,13 +283,15 @@ pub fn log_inference(
 }
 
 async fn write_with_retry(pool: &PgPool, record: &InferenceRecord) -> Result<(), String> {
-    retry_once(|| insert_once(pool, record)).await.map_err(|e| {
-        eprintln!(
-            "ERROR persistence: insert failed for request_id={} after retries: {:?}",
-            record.request_id, e
-        );
-        e.to_string()
-    })
+    retry_once(|| insert_once(pool, record))
+        .await
+        .map_err(|e| {
+            eprintln!(
+                "ERROR persistence: insert failed for request_id={} after retries: {:?}",
+                record.request_id, e
+            );
+            e.to_string()
+        })
 }
 
 /// Retry an async operation exactly once.
@@ -139,7 +305,9 @@ where
     match f().await {
         Ok(v) => Ok(v),
         Err(first) => {
-            eprintln!("WARN persistence: first insert attempt failed ({first}); retrying once");
+            eprintln!(
+                "WARN persistence: first insert attempt failed ({first}); retrying once"
+            );
             f().await
         }
     }
@@ -287,5 +455,175 @@ mod tests {
         .await;
 
         assert_eq!(result.unwrap(), "recovered");
+    }
+
+    // ── fetch_inferences ─────────────────────────────────────────────────────
+
+    async fn test_pool() -> Option<Arc<PgPool>> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let pool = sqlx::PgPool::connect(&url).await.ok()?;
+        Some(Arc::new(pool))
+    }
+
+    fn make_persistence(pool: Arc<PgPool>) -> PersistenceConfig {
+        PersistenceConfig {
+            pool,
+            task_semaphore: Arc::new(Semaphore::new(100)),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_inferences_empty_list() {
+        let pool = match test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP test_fetch_inferences_empty_list: DATABASE_URL not set");
+                return;
+            }
+        };
+        // Clean slate for this test using a unique category prefix unlikely to collide.
+        let pc = make_persistence(pool);
+        // Fetch with a filter that will match nothing.
+        let result = pc
+            .fetch_inferences(0, 20, Some("NONEXISTENT_CATEGORY_XYZ"), None)
+            .await;
+        let (records, count) = result.expect("fetch should succeed");
+        assert!(records.is_empty(), "expected no records");
+        assert_eq!(count, 0, "expected count=0");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_inferences_with_records() {
+        let pool = match test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP test_fetch_inferences_with_records: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pc = make_persistence(pool.clone());
+        // Insert a test record.
+        let request_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO inferences (request_id, status, category, upstream_model, duration_ms, prompt_snippet) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(request_id)
+        .bind("ok")
+        .bind("TEST_CAT_FETCH")
+        .bind("test-model")
+        .bind(42i32)
+        .bind("test snippet")
+        .execute(pool.as_ref())
+        .await
+        .expect("insert should succeed");
+
+        let (records, count) = pc
+            .fetch_inferences(0, 20, Some("TEST_CAT_FETCH"), None)
+            .await
+            .expect("fetch should succeed");
+
+        // Cleanup.
+        sqlx::query("DELETE FROM inferences WHERE request_id = $1")
+            .bind(request_id)
+            .execute(pool.as_ref())
+            .await
+            .ok();
+
+        assert!(count >= 1, "expected at least one record");
+        let found = records.iter().any(|r| r.prompt_snippet == "test snippet");
+        assert!(found, "inserted record should appear in results");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_inferences_filter_by_category() {
+        let pool = match test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP test_fetch_inferences_filter_by_category: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pc = make_persistence(pool.clone());
+        let id_a = uuid::Uuid::new_v4();
+        let id_b = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO inferences (request_id, status, category, prompt_snippet) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(id_a)
+        .bind("ok")
+        .bind("CAT_ALPHA")
+        .bind("alpha snippet")
+        .execute(pool.as_ref())
+        .await
+        .ok();
+        sqlx::query(
+            "INSERT INTO inferences (request_id, status, category, prompt_snippet) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(id_b)
+        .bind("ok")
+        .bind("CAT_BETA")
+        .bind("beta snippet")
+        .execute(pool.as_ref())
+        .await
+        .ok();
+
+        let (records, _) = pc
+            .fetch_inferences(0, 100, Some("CAT_ALPHA"), None)
+            .await
+            .expect("fetch should succeed");
+
+        // Cleanup.
+        sqlx::query("DELETE FROM inferences WHERE request_id = ANY($1)")
+            .bind(vec![id_a, id_b])
+            .execute(pool.as_ref())
+            .await
+            .ok();
+
+        let has_alpha = records.iter().any(|r| r.prompt_snippet == "alpha snippet");
+        let has_beta = records.iter().any(|r| r.prompt_snippet == "beta snippet");
+        assert!(has_alpha, "CAT_ALPHA record should appear");
+        assert!(!has_beta, "CAT_BETA record should not appear when filtering by CAT_ALPHA");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_inferences_returns_total_count() {
+        let pool = match test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP test_fetch_inferences_returns_total_count: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pc = make_persistence(pool.clone());
+        let ids: Vec<uuid::Uuid> = (0..3).map(|_| uuid::Uuid::new_v4()).collect();
+        for id in &ids {
+            sqlx::query(
+                "INSERT INTO inferences (request_id, status, category, prompt_snippet) VALUES ($1,$2,$3,$4)",
+            )
+            .bind(*id)
+            .bind("ok")
+            .bind("TOTAL_COUNT_TEST")
+            .bind("snippet")
+            .execute(pool.as_ref())
+            .await
+            .ok();
+        }
+
+        // Fetch only 1 row but total_count should reflect all matching rows.
+        let (records, total_count) = pc
+            .fetch_inferences(0, 1, Some("TOTAL_COUNT_TEST"), None)
+            .await
+            .expect("fetch should succeed");
+
+        // Cleanup.
+        sqlx::query("DELETE FROM inferences WHERE request_id = ANY($1)")
+            .bind(ids)
+            .execute(pool.as_ref())
+            .await
+            .ok();
+
+        assert_eq!(records.len(), 1, "should return only 1 record (limit=1)");
+        assert!(total_count >= 3, "total_count should be at least 3");
     }
 }

@@ -265,9 +265,9 @@ var additions, no Render configuration changes.
 
 #### Automated
 
-- [x] 2.1 `cargo build --release` succeeds (template compilation clean)
-- [x] 2.2 `cargo test` passes including `test_dashboard_authenticated_returns_html`
-- [x] 2.3 `cargo test auth` passes with no regressions
+- [x] 2.1 `cargo build --release` succeeds (template compilation clean) — da9f084
+- [x] 2.2 `cargo test` passes including `test_dashboard_authenticated_returns_html` — da9f084
+- [x] 2.3 `cargo test auth` passes with no regressions — da9f084
 
 #### Manual
 
