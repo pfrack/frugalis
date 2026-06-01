@@ -142,6 +142,11 @@ async fn completion_handler(
     if let Some(persistence) = &state.persistence {
         let duration_ms = start.elapsed().as_millis() as i32;
         let snippet = persistence::extract_snippet(body_str);
+        let prompt_char_count = if prompt.is_empty() {
+            None
+        } else {
+            Some(prompt.chars().count() as i32)
+        };
         let record = persistence::InferenceRecord {
             request_id: uuid::Uuid::new_v4(),
             status: "ok".to_string(),
@@ -149,6 +154,7 @@ async fn completion_handler(
             upstream_model: Some(classification.model.clone()),
             duration_ms: Some(duration_ms),
             prompt_snippet: snippet,
+            prompt_char_count,
         };
         persistence::log_inference(
             persistence.pool.clone(),
@@ -347,6 +353,7 @@ mod tests {
             intent_classificator::RouteEntry {
                 model: "sf-model".to_string(),
                 endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
             },
         );
         routing.insert(
@@ -354,11 +361,13 @@ mod tests {
             intent_classificator::RouteEntry {
                 model: "ca-model".to_string(),
                 endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
             },
         );
         let fallback = intent_classificator::RouteEntry {
             model: "fallback-model".to_string(),
             endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
         };
         let classifier = Some(Arc::new(
             intent_classificator::IntentClassifier::from_values(routing, fallback),
@@ -480,6 +489,33 @@ mod tests {
     /// DB integration test: only runs when DATABASE_URL is set.
     /// Skips gracefully in local/CI environments without a live database.
     /// Run with: cargo test persistence_integration (requires DATABASE_URL)
+    /// Verify the prompt_char_count column exists with INTEGER type.
+    /// Runs only when DATABASE_URL is set.
+    #[tokio::test]
+    async fn persistence_integration_prompt_char_count_column_exists() {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("SKIP persistence_integration_prompt_char_count_column_exists: DATABASE_URL not set");
+                return;
+            }
+        };
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("integration test DB connect should succeed");
+        let row: Option<sqlx::postgres::PgRow> = sqlx::query(
+            "SELECT data_type FROM information_schema.COLUMNS \
+             WHERE table_name = 'inferences' AND column_name = 'prompt_char_count'"
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("schema query should succeed");
+        let row = row.expect("prompt_char_count column should exist in the inferences table");
+        use sqlx::Row;
+        let data_type: String = row.try_get("data_type").unwrap();
+        assert_eq!(data_type, "integer", "prompt_char_count should be INTEGER type");
+    }
+
     #[tokio::test]
     async fn persistence_integration_insert_and_read_back() {
         let url = match std::env::var("DATABASE_URL") {
@@ -503,13 +539,14 @@ mod tests {
             upstream_model: Some("test-model".to_string()),
             duration_ms: Some(10),
             prompt_snippet: "integration test snippet".to_string(),
+            prompt_char_count: Some(25),
         };
         let handle = persistence::log_inference(pool.clone(), semaphore, record);
         handle.await.expect("logging task should complete");
 
         // Read back using non-macro query (no offline cache required).
         let row =
-            sqlx::query("SELECT status, prompt_snippet FROM inferences WHERE request_id = $1")
+            sqlx::query("SELECT status, prompt_snippet, prompt_char_count FROM inferences WHERE request_id = $1")
                 .bind(request_id)
                 .fetch_optional(pool.as_ref())
                 .await
@@ -523,6 +560,11 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("integration test snippet")
+        );
+        assert_eq!(
+            row.try_get::<Option<i32>, _>("prompt_char_count").unwrap(),
+            Some(25),
+            "prompt_char_count should be stored and retrievable"
         );
     }
 

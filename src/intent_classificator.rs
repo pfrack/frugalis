@@ -10,6 +10,30 @@ use regex::RegexSet;
 pub struct RouteEntry {
     pub model: String,
     pub endpoint: String,
+    pub cost_per_1m_input_tokens: Option<f64>,
+}
+
+/// Maps model names to their cost per 1M input tokens.
+/// Defaults are hardcoded; routing.toml entries can override.
+pub struct ModelCosts {
+    costs: HashMap<String, f64>,
+}
+
+impl ModelCosts {
+    /// Look up a model's cost per 1M input tokens.
+    pub fn get(&self, model: &str) -> Option<f64> {
+        self.costs.get(model).copied()
+    }
+}
+
+/// Hardcoded default costs per 1M input tokens for known models.
+fn hardcoded_model_costs() -> HashMap<String, f64> {
+    let mut m = HashMap::new();
+    m.insert("claude-3.5-sonnet".to_string(), 3.00);
+    m.insert("gpt-4o".to_string(), 2.50);
+    m.insert("gpt-4o-mini".to_string(), 0.15);
+    m.insert("deepseek-chat".to_string(), 0.14);
+    m
 }
 
 pub struct ClassificationResult {
@@ -31,6 +55,8 @@ pub struct IntentClassifier {
     pub negative_idx: Range<usize>,
     pub routing: HashMap<String, RouteEntry>,
     pub fallback_entry: RouteEntry,
+    pub model_costs: ModelCosts,
+    pub baseline_model: String,
 }
 
 // ── Internal Types ──
@@ -178,6 +204,7 @@ fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
         RouteEntry {
             model: env_or_default("DEFAULT_MODEL_COMPLEX", DEFAULT_MODEL_COMPLEX),
             endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
         },
     );
     routing.insert(
@@ -185,6 +212,7 @@ fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
         RouteEntry {
             model: env_or_default("DEFAULT_MODEL_READING", DEFAULT_MODEL_READING),
             endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
         },
     );
     routing.insert(
@@ -192,6 +220,7 @@ fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
         RouteEntry {
             model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
             endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
         },
     );
     routing.insert(
@@ -199,11 +228,13 @@ fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
         RouteEntry {
             model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
             endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
         },
     );
     let fallback = RouteEntry {
         model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
         endpoint: String::new(),
+        cost_per_1m_input_tokens: None,
     };
     (routing, fallback)
 }
@@ -295,7 +326,12 @@ fn load_routing_from_file(path: &str) -> Result<HashMap<String, RouteEntry>, Str
             .and_then(|v| v.as_str())
             .unwrap_or(DEFAULT_ENDPOINT)
             .to_string();
-        routing.insert(key.to_uppercase(), RouteEntry { model, endpoint });
+        let cost_per_1m_input_tokens = value.get("cost_per_1m_input_tokens")
+            .and_then(|v| v.as_float());
+        routing.insert(
+            key.to_uppercase(),
+            RouteEntry { model, endpoint, cost_per_1m_input_tokens },
+        );
     }
     Ok(routing)
 }
@@ -316,6 +352,7 @@ fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
     let fallback_entry = routing.remove("FALLBACK").unwrap_or_else(|| RouteEntry {
         model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
         endpoint: String::new(),
+        cost_per_1m_input_tokens: None,
     });
     (routing, fallback_entry)
 }
@@ -346,13 +383,31 @@ impl IntentClassifier {
         let negative_start = FR_COUNT + CR_COUNT + SF_COUNT + CA_COUNT;
         let negative_idx = negative_start..(negative_start + NEG_COUNT);
         let (routing, fallback_entry) = load_routing();
+
+        let baseline_model = std::env::var("BASELINE_MODEL")
+            .unwrap_or_else(|_| DEFAULT_MODEL_COMPLEX.to_string());
+
+        // Merge routing.toml overrides into the hardcoded cost table.
+        let mut costs = hardcoded_model_costs();
+        for (_category, entry) in &routing {
+            if let Some(override_cost) = entry.cost_per_1m_input_tokens {
+                costs.insert(entry.model.clone(), override_cost);
+            }
+        }
+
         Ok(IntentClassifier {
             set,
             metadata,
             negative_idx,
             routing,
             fallback_entry,
+            model_costs: ModelCosts { costs },
+            baseline_model,
         })
+    }
+
+    pub fn model_costs(&self) -> &ModelCosts {
+        &self.model_costs
     }
 
     #[cfg(test)]
@@ -362,12 +417,20 @@ impl IntentClassifier {
             .expect("built-in patterns should always compile");
         let negative_start = FR_COUNT + CR_COUNT + SF_COUNT + CA_COUNT;
         let negative_idx = negative_start..(negative_start + NEG_COUNT);
+        let mut costs = hardcoded_model_costs();
+        for (_category, entry) in &routing {
+            if let Some(override_cost) = entry.cost_per_1m_input_tokens {
+                costs.insert(entry.model.clone(), override_cost);
+            }
+        }
         IntentClassifier {
             set,
             metadata,
             negative_idx,
             routing,
             fallback_entry,
+            model_costs: ModelCosts { costs },
+            baseline_model: "claude-3.5-sonnet".to_string(),
         }
     }
 
@@ -461,23 +524,24 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             "FILE_READING".to_string(),
-            RouteEntry { model: "fr-model".to_string(), endpoint: String::new() },
+            RouteEntry { model: "fr-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None },
         );
         routing.insert(
             "COMPLEX_REASONING".to_string(),
-            RouteEntry { model: "cr-model".to_string(), endpoint: String::new() },
+            RouteEntry { model: "cr-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None },
         );
         routing.insert(
             "SYNTAX_FIX".to_string(),
-            RouteEntry { model: "sf-model".to_string(), endpoint: String::new() },
+            RouteEntry { model: "sf-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None },
         );
         routing.insert(
             "CASUAL".to_string(),
-            RouteEntry { model: "ca-model".to_string(), endpoint: String::new() },
+            RouteEntry { model: "ca-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None },
         );
         let fallback = RouteEntry {
             model: "fallback-model".to_string(),
             endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
         };
         IntentClassifier::from_values(routing, fallback)
     }
@@ -533,5 +597,59 @@ mod tests {
         let c = test_classifier();
         let result = c.classify("read the architecture document");
         assert_ne!(result.category, "COMPLEX_REASONING");
+    }
+
+    // ── ModelCosts ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn model_costs_returns_some_for_hardcoded_models() {
+        let c = test_classifier();
+        assert_eq!(c.model_costs().get("claude-3.5-sonnet"), Some(3.00));
+        assert_eq!(c.model_costs().get("gpt-4o"), Some(2.50));
+        assert_eq!(c.model_costs().get("gpt-4o-mini"), Some(0.15));
+        assert_eq!(c.model_costs().get("deepseek-chat"), Some(0.14));
+    }
+
+    #[test]
+    fn model_costs_returns_none_for_unknown_model() {
+        let c = test_classifier();
+        assert_eq!(c.model_costs().get("nonexistent-model"), None);
+    }
+
+    #[test]
+    fn model_costs_override_via_route_entry() {
+        let mut routing = HashMap::new();
+        routing.insert(
+            "COMPLEX_REASONING".to_string(),
+            RouteEntry {
+                model: "claude-3.5-sonnet".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: Some(5.0),
+            },
+        );
+        routing.insert(
+            "CASUAL".to_string(),
+            RouteEntry {
+                model: "ca-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        let fallback = RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+        };
+        let classifier = IntentClassifier::from_values(routing, fallback);
+        // claude-3.5-sonnet should be 5.0 (override), not 3.00 (hardcoded)
+        assert_eq!(classifier.model_costs().get("claude-3.5-sonnet"), Some(5.0));
+        // ca-model gets no override and is not in hardcoded table → None
+        assert_eq!(classifier.model_costs().get("ca-model"), None);
+    }
+
+    #[test]
+    fn model_costs_baseline_model_default() {
+        let c = test_classifier();
+        assert_eq!(c.baseline_model, "claude-3.5-sonnet");
     }
 }

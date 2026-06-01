@@ -68,6 +68,7 @@ pub struct InferenceRecord {
     pub upstream_model: Option<String>,
     pub duration_ms: Option<i32>,
     pub prompt_snippet: String,
+    pub prompt_char_count: Option<i32>,
 }
 
 use sqlx::postgres::{PgConnectOptions};
@@ -86,6 +87,18 @@ impl PersistenceConfig {
             .acquire_timeout(std::time::Duration::from_secs(30))
             .idle_timeout(std::time::Duration::from_secs(1800))
             .connect_lazy_with(options);
+
+        // Idempotent schema migration: add the prompt_char_count column if absent.
+        let pool_for_migration = pool.clone();
+        match sqlx::query(
+            "ALTER TABLE inferences ADD COLUMN IF NOT EXISTS prompt_char_count INTEGER"
+        )
+        .execute(&pool_for_migration)
+        .await
+        {
+            Ok(_) => eprintln!("Schema migration: prompt_char_count column ensured"),
+            Err(e) => eprintln!("WARN persistence: schema migration skipped ({e})"),
+        }
 
         Ok(Self {
             pool: Arc::new(pool),
@@ -338,6 +351,15 @@ pub fn extract_snippet(body: &str) -> String {
     full.chars().take(200).collect()
 }
 
+/// Convert character count to estimated dollar cost.
+///
+/// Uses a simple 4-characters-to-1-token heuristic. Rounds to 4 decimal places.
+pub fn prompt_chars_to_cost(char_count: i32, cost_per_1m_input_tokens: f64) -> f64 {
+    let tokens = char_count as f64 / 4.0;
+    let cost = tokens * cost_per_1m_input_tokens / 1_000_000.0;
+    (cost * 10_000.0).round() / 10_000.0
+}
+
 /// Enqueue an inference record for async persistence.
 ///
 /// Spawns a detached background task that attempts one insert and, on failure,
@@ -410,8 +432,8 @@ where
 async fn insert_once(pool: &PgPool, record: &InferenceRecord) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO inferences \
-         (request_id, status, category, upstream_model, duration_ms, prompt_snippet) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
+         (request_id, status, category, upstream_model, duration_ms, prompt_snippet, prompt_char_count) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(record.request_id)
     .bind(&record.status)
@@ -419,6 +441,7 @@ async fn insert_once(pool: &PgPool, record: &InferenceRecord) -> Result<(), sqlx
     .bind(&record.upstream_model)
     .bind(record.duration_ms)
     .bind(&record.prompt_snippet)
+    .bind(record.prompt_char_count)
     .execute(pool)
     .await
     .map(|_| ())
@@ -760,6 +783,30 @@ mod tests {
 
         assert_eq!(records.len(), 1, "should return only 1 record (limit=1)");
         assert!(total_count >= 3, "total_count should be at least 3");
+    }
+
+    // ── prompt_chars_to_cost ──────────────────────────────────────────────────
+
+    #[test]
+    fn persistence_prompt_chars_to_cost_known_values() {
+        // 10000 chars → 2500 tokens → $0.000375 for gpt-4o-mini ($0.15/1M)
+        // → rounds to $0.0004
+        let cost = prompt_chars_to_cost(10000, 0.15);
+        assert!((cost - 0.0004).abs() < 0.0001, "got {cost}");
+        // 4000 chars → 1000 tokens → $0.0025 for gpt-4o ($2.50/1M)
+        let cost = prompt_chars_to_cost(4000, 2.50);
+        assert!((cost - 0.0025).abs() < 0.0001, "got {cost}");
+    }
+
+    #[test]
+    fn persistence_prompt_chars_to_cost_zero_chars() {
+        assert_eq!(prompt_chars_to_cost(0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn persistence_prompt_chars_to_cost_rounds_to_4_decimals() {
+        let cost = prompt_chars_to_cost(1, 3.00); // ~0.00000075 → rounds to 0.0
+        assert_eq!(cost, 0.0);
     }
 
     // ── fetch_latency_summary ────────────────────────────────────────────────
