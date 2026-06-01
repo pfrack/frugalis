@@ -348,8 +348,8 @@ Add unit tests for the classifier's `classify()` method, verify existing handler
 
 #### Manual
 
-- [ ] 1.4 `routing.toml` readable by classifier (run locally, no TOML-related WARNs)
-- [ ] 1.5 Hardcoded fallback routing works when `routing.toml` absent (delete file, restart, verify WARN + startup)
+- [x] 1.4 `routing.toml` readable by classifier (run locally, no TOML-related WARNs)
+- [x] 1.5 Hardcoded fallback routing works when `routing.toml` absent (delete file, restart, verify WARN + startup)
 
 ### Phase 2: Wire into Handler
 
@@ -363,14 +363,14 @@ Add unit tests for the classifier's `classify()` method, verify existing handler
 
 #### Manual
 
-- [ ] 2.6 curl POST with "fix this bug" → 200 JSON with `"category":"SYNTAX_FIX"`
-- [ ] 2.7 Gateway starts and classifies without `routing.toml` (WARN + CASUAL fallback)
-- [ ] 2.8 Dashboard `/dashboard/inferences` shows populated category/model badges
+- [x] 2.6 curl POST with "fix this bug" → 200 JSON with `"category":"SYNTAX_FIX"`
+- [x] 2.7 Gateway starts and classifies without `routing.toml` (WARN + CASUAL fallback)
+- [x] 2.8 Dashboard `/dashboard/inferences` shows populated category/model badges
 
 ### Phase 3: Tests
 
 #### Automated
 
-- [ ] 3.1 `cargo test intent_classificator` — all unit tests pass
-- [ ] 3.2 `cargo test test_completion_handler_returns_classification_json` — integration test passes
-- [ ] 3.3 `cargo test` — full suite passes, no regressions
+- [x] 3.1 `cargo test intent_classificator` — all unit tests pass — f54dc90
+- [x] 3.2 `cargo test test_completion_handler_returns_classification_json` — integration test passes — f54dc90
+- [x] 3.3 `cargo test` — full suite passes, no regressions — f54dc90
