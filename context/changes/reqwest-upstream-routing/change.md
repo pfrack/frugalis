@@ -1,8 +1,8 @@
 ---
 id: reqwest-upstream-routing
-status: preparing
+status: impl_reviewed
 created: 2026-06-01
-updated: 2026-06-01
+updated: 2026-06-02
 user: pfrack
 tags: [upstream-routing, reqwest, http-client, proxy, change-2-of-4]
 ---

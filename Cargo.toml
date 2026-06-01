@@ -17,3 +17,7 @@ askama = "0.16.0"
 askama_web = { version = "0.16.0", features = ["axum-0.8"] }
 regex = "1"
 toml = "0.8"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+httpmock = "0.7"

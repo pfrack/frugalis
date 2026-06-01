@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Query, State},
     http::{header, HeaderMap, StatusCode},
     middleware,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
@@ -58,6 +58,7 @@ struct AppState {
     persistence: Option<persistence::PersistenceConfig>,
     classifier: Option<Arc<intent_classificator::IntentClassifier>>,
     classify_db_log: bool,
+    http_client: Option<reqwest::Client>,
 }
 
 #[tokio::main]
@@ -91,10 +92,15 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(false);
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .expect("reqwest client should build");
     let app_state = Arc::new(AppState {
         persistence: persistence_state,
         classifier,
         classify_db_log,
+        http_client: Some(http_client),
     });
 
     let port: u16 = std::env::var("PORT")
@@ -192,39 +198,223 @@ fn classify_and_log(
     (StatusCode::OK, response_body)
 }
 
-/// Completion handler: classifies intent, returns JSON metadata, and enqueues
-/// a non-blocking inference logging event.
+fn json_response(status: StatusCode, body: String) -> Response<Body> {
+    let mut resp = Response::new(Body::from(body));
+    *resp.status_mut() = status;
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
+    resp
+}
+
+/// Completion handler: classifies intent, optionally skips classification via
+/// X-Cerebrum-Category / X-Cerebrum-Model headers, resolves the API key from
+/// the env var named by the classification result, builds auth headers,
+/// overrides the model field, forwards the body to the upstream endpoint,
+/// and returns the buffered response with Content-Type: application/json.
 async fn completion_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
-) -> (StatusCode, String) {
+) -> impl IntoResponse {
     let start = std::time::Instant::now();
-    let body_str = std::str::from_utf8(&body).unwrap_or("");
 
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !content_type.starts_with("application/json") {
-        return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected application/json".to_string());
+        return json_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected application/json".to_string());
     }
 
-    let prompt = persistence::extract_last_user_message(body_str);
-    let classification = state.classifier.as_ref()
-        .map(|c| c.classify(&prompt))
-        .unwrap_or_else(intent_classificator::ClassificationResult::fallback);
+    let body_str = match std::str::from_utf8(&body) {
+        Ok(s) => s,
+        Err(_) => {
+            return json_response(StatusCode::BAD_REQUEST, r#"{"error":"bad_request","message":"invalid UTF-8 body"}"#.to_string());
+        }
+    };
+
+    let x_category = headers
+        .get("x-cerebrum-category")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let x_model = headers
+        .get("x-cerebrum-model")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let classification = if let (Some(category), Some(model)) = (x_category.as_ref(), x_model.as_ref()) {
+        match state.classifier.as_ref().and_then(|c| c.routing.get(category)) {
+            Some(entry) => intent_classificator::ClassificationResult {
+                category: category.clone(),
+                model: model.clone(),
+                endpoint: entry.endpoint.clone(),
+                tier: intent_classificator::ClassificationTier::Fallback,
+                provider_type: entry.provider_type.clone(),
+                api_key_env: entry.api_key_env.clone(),
+            },
+            None => {
+                let fallback = state.classifier.as_ref()
+                    .map(|c| c.classify(""))
+                    .unwrap_or_else(intent_classificator::ClassificationResult::fallback);
+                let response_body = serde_json::json!({
+                    "status": "classified",
+                    "category": fallback.category,
+                    "model": fallback.model,
+                    "tier": format!("{:?}", fallback.tier),
+                }).to_string();
+                log_classification(&state, &fallback, body_str, start, "ok");
+                return json_response(StatusCode::OK, response_body);
+            }
+        }
+    } else {
+        let prompt = persistence::extract_last_user_message(body_str);
+        state.classifier.as_ref()
+            .map(|c| c.classify(&prompt))
+            .unwrap_or_else(intent_classificator::ClassificationResult::fallback)
+    };
+
+    if state.http_client.is_none() {
+        let response_body = serde_json::json!({
+            "status": "classified",
+            "category": classification.category,
+            "model": classification.model,
+            "tier": format!("{:?}", classification.tier),
+        }).to_string();
+        log_classification(&state, &classification, body_str, start, "ok");
+        return json_response(StatusCode::OK, response_body);
+    }
+
+    let api_key = match &classification.api_key_env {
+        Some(env_name) => match std::env::var(env_name) {
+            Ok(key) if !key.is_empty() => key,
+            _ => {
+                let response_body = serde_json::json!({
+                    "status": "classified",
+                    "category": classification.category,
+                    "model": classification.model,
+                    "tier": format!("{:?}", classification.tier),
+                }).to_string();
+                log_classification(&state, &classification, body_str, start, "ok");
+                return json_response(StatusCode::OK, response_body);
+            }
+        },
+        None => {
+            let response_body = serde_json::json!({
+                "status": "classified",
+                "category": classification.category,
+                "model": classification.model,
+                "tier": format!("{:?}", classification.tier),
+            }).to_string();
+            log_classification(&state, &classification, body_str, start, "ok");
+            return json_response(StatusCode::OK, response_body);
+        }
+    };
+
+    if classification.endpoint.is_empty() {
+        let error_body = serde_json::json!({
+            "error": "upstream_error",
+            "status": 502,
+            "message": "no endpoint configured",
+        }).to_string();
+        log_classification(&state, &classification, body_str, start, "upstream_error");
+        return json_response(StatusCode::BAD_GATEWAY, error_body);
+    }
+
+    let mut req_body: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            let error_body = serde_json::json!({
+                "error": "bad_request",
+                "status": 400,
+                "message": format!("invalid JSON body: {e}"),
+            }).to_string();
+            log_classification(&state, &classification, body_str, start, "bad_request");
+            return json_response(StatusCode::BAD_REQUEST, error_body);
+        }
+    };
+    req_body["model"] = serde_json::Value::String(classification.model.clone());
+    let modified_body = serde_json::to_vec(&req_body).unwrap_or_else(|_| body.to_vec());
+
+    let auth_headers = intent_classificator::auth_headers_for(&classification.provider_type, &api_key);
+    let client = state.http_client.as_ref().unwrap();
+
+    let mut upstream_req = client.post(&classification.endpoint).body(modified_body);
+    for (name, value) in &auth_headers {
+        upstream_req = upstream_req.header(name.as_str(), value.as_str());
+    }
+
+    let mut upstream_response = match upstream_req.send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            let error_body = serde_json::json!({
+                "error": "upstream_error",
+                "status": 502,
+                "message": e.to_string(),
+            }).to_string();
+            log_classification(&state, &classification, body_str, start, "upstream_error");
+            return json_response(StatusCode::BAD_GATEWAY, error_body);
+        }
+    };
+
+    let upstream_status = upstream_response.status();
+    const MAX_UPSTREAM_BODY: usize = 10 * 1024 * 1024; // 10 MB
+    let mut upstream_body_bytes: Vec<u8> = Vec::new();
+    loop {
+        match upstream_response.chunk().await {
+            Ok(Some(chunk)) => {
+                if upstream_body_bytes.len() + chunk.len() > MAX_UPSTREAM_BODY {
+                    let error_body = serde_json::json!({
+                        "error": "upstream_error",
+                        "status": 502,
+                        "message": "upstream response too large",
+                    }).to_string();
+                    log_classification(&state, &classification, body_str, start, "upstream_error");
+                    return json_response(StatusCode::BAD_GATEWAY, error_body);
+                }
+                upstream_body_bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) => {
+                let error_body = serde_json::json!({
+                    "error": "upstream_error",
+                    "status": 502,
+                    "message": e.to_string(),
+                }).to_string();
+                log_classification(&state, &classification, body_str, start, "upstream_error");
+                return json_response(StatusCode::BAD_GATEWAY, error_body);
+            }
+        }
+    }
+    let upstream_body = String::from_utf8_lossy(&upstream_body_bytes).into_owned();
+
+    if !upstream_status.is_success() {
+        let truncated = upstream_body.chars().take(512).collect::<String>();
+        if upstream_body.len() > truncated.len() {
+            eprintln!(
+                "WARN completion_handler: upstream error body truncated from {} to 512 chars; \
+                 full body: {}",
+                upstream_body.len(),
+                upstream_body
+            );
+        }
+        let error_body = serde_json::json!({
+            "error": "upstream_error",
+            "status": upstream_status.as_u16(),
+            "message": truncated,
+        }).to_string();
+        log_classification(&state, &classification, body_str, start, "upstream_error");
+        return json_response(
+            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            error_body,
+        );
+    }
 
     log_classification(&state, &classification, body_str, start, "ok");
-
-    let response_body = serde_json::json!({
-        "status": "classified",
-        "category": classification.category,
-        "model": classification.model,
-        "tier": format!("{:?}", classification.tier),
-    }).to_string();
-
-    (StatusCode::OK, response_body)
+    json_response(StatusCode::OK, upstream_body)
 }
 
 /// Classify handler: extracts prompt, classifies intent, optionally logs a
@@ -447,6 +637,7 @@ mod tests {
             persistence: None,
             classifier: None,
             classify_db_log: false,
+            http_client: None,
         });
         build_app(auth_config, app_state)
     }
@@ -493,6 +684,7 @@ mod tests {
             persistence: None,
             classifier,
             classify_db_log: false,
+            http_client: None,
         });
         build_app(auth_config, app_state)
     }
@@ -608,6 +800,7 @@ mod tests {
             persistence: None,
             classifier,
             classify_db_log: false,
+            http_client: None,
         });
         build_app(auth_config, app_state)
     }
@@ -1019,6 +1212,252 @@ mod tests {
             .await
             .expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ── Upstream routing tests ────────────────────────────────────────────────
+
+    fn test_app_with_http_client(env_var_name: &str) -> (Router, httpmock::MockServer) {
+        use std::collections::HashMap;
+        let server = httpmock::MockServer::start();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("test reqwest client should build");
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let endpoint = server.url("/v1/chat/completions");
+        let mut routing = HashMap::new();
+        routing.insert(
+            "SYNTAX_FIX".to_string(),
+            intent_classificator::RouteEntry {
+                model: "sf-model".to_string(),
+                endpoint: endpoint.clone(),
+                cost_per_1m_input_tokens: None,
+                provider_type: "openai_compatible".to_string(),
+                api_key_env: Some(env_var_name.to_string()),
+            },
+        );
+        routing.insert(
+            "CASUAL".to_string(),
+            intent_classificator::RouteEntry {
+                model: "ca-model".to_string(),
+                endpoint,
+                cost_per_1m_input_tokens: None,
+                provider_type: "openai_compatible".to_string(),
+                api_key_env: Some(env_var_name.to_string()),
+            },
+        );
+        let fallback = intent_classificator::RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        let classifier = Some(Arc::new(
+            intent_classificator::IntentClassifier::from_values(routing, fallback),
+        ));
+        let app_state = Arc::new(AppState {
+            persistence: None,
+            classifier,
+            classify_db_log: false,
+            http_client: Some(client),
+        });
+        (build_app(auth_config, app_state), server)
+    }
+
+    fn test_app_with_dead_endpoint(env_var_name: &str) -> Router {
+        use std::collections::HashMap;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .expect("test reqwest client should build");
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let mut routing = HashMap::new();
+        routing.insert(
+            "SYNTAX_FIX".to_string(),
+            intent_classificator::RouteEntry {
+                model: "sf-model".to_string(),
+                endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+                cost_per_1m_input_tokens: None,
+                provider_type: "openai_compatible".to_string(),
+                api_key_env: Some(env_var_name.to_string()),
+            },
+        );
+        routing.insert(
+            "CASUAL".to_string(),
+            intent_classificator::RouteEntry {
+                model: "ca-model".to_string(),
+                endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+                cost_per_1m_input_tokens: None,
+                provider_type: "openai_compatible".to_string(),
+                api_key_env: Some(env_var_name.to_string()),
+            },
+        );
+        let fallback = intent_classificator::RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        let classifier = Some(Arc::new(
+            intent_classificator::IntentClassifier::from_values(routing, fallback),
+        ));
+        let app_state = Arc::new(AppState {
+            persistence: None,
+            classifier,
+            classify_db_log: false,
+            http_client: Some(client),
+        });
+        build_app(auth_config, app_state)
+    }
+
+    #[tokio::test]
+    async fn test_upstream_returns_response() {
+        let env = "TEST_UPSTREAM_RESP";
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"hello"}}]}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.contains(r#""choices""#), "expected upstream response body, got: {body}");
+        mock.assert();
+        std::env::remove_var(env);
+    }
+
+    #[tokio::test]
+    async fn test_upstream_request_includes_auth_header() {
+        let env = "TEST_UPSTREAM_AUTH";
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header("Authorization", "Bearer sk-test");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body("ok");
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        std::env::remove_var(env);
+    }
+
+    #[tokio::test]
+    async fn test_upstream_unreachable_returns_502() {
+        let env = "TEST_UPSTREAM_DEAD";
+        std::env::set_var(env, "sk-test");
+        let app = test_app_with_dead_endpoint(env);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(
+            body.contains(r#""error":"upstream_error""#),
+            "expected upstream_error in body, got: {body}"
+        );
+        std::env::remove_var(env);
+    }
+
+    #[tokio::test]
+    async fn test_upstream_skip_classify_via_headers() {
+        let env = "TEST_UPSTREAM_SKIP";
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"skipped"}}]}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-cerebrum-category", "SYNTAX_FIX")
+                    .header("x-cerebrum-model", "gpt-4o-mini")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(
+            body.contains(r#""skipped""#),
+            "expected skip-classify upstream response, got: {body}"
+        );
+        mock.assert();
+        std::env::remove_var(env);
     }
 
     // ── Latency page ─────────────────────────────────────────────────────────

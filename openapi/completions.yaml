@@ -90,25 +90,18 @@ paths:
               required: [messages]
       responses:
         "200":
-          description: Intent classified successfully
+          description: Upstream model completion response
           content:
             application/json:
               schema:
                 type: object
-                properties:
-                  status:
-                    type: string
-                    enum: [classified]
-                  category:
-                    type: string
-                    enum: [COMPLEX_REASONING, FILE_READING, SYNTAX_FIX, CASUAL]
-                  model:
-                    type: string
-                    description: Upstream model selected for this category
-                  tier:
-                    type: string
-                    enum: [Regex, Fallback]
-                required: [status, category, model, tier]
+                description: >
+                  The raw JSON response from the upstream model API (typically
+                  OpenAI-compatible chat completion format). The response body
+                  is passed through from the upstream provider without
+                  transformation. When no upstream is configured, the response
+                  is a synthetic classification JSON with `status`, `category`,
+                  `model`, and `tier` fields.
         "401":
           description: Missing or invalid bearer token
           content:
@@ -118,6 +111,22 @@ paths:
                 properties:
                   error:
                     type: string
+        "502":
+          description: Upstream API unreachable or no endpoint configured
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    enum: [upstream_error]
+                  status:
+                    type: integer
+                    example: 502
+                  message:
+                    type: string
+                required: [error, status, message]
 components:
   securitySchemes:
     bearerAuth:
