@@ -192,9 +192,8 @@ fn classify_and_log(
     (StatusCode::OK, response_body)
 }
 
-/// Completion handler: classifies intent, resolves API key, returns enriched
-/// JSON metadata (including endpoint, provider_type, api_key), and enqueues a
-/// non-blocking inference logging event.
+/// Completion handler: classifies intent, returns JSON metadata, and enqueues
+/// a non-blocking inference logging event.
 async fn completion_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -216,21 +215,14 @@ async fn completion_handler(
         .map(|c| c.classify(&prompt))
         .unwrap_or_else(intent_classificator::ClassificationResult::fallback);
 
-    let api_key = classification.api_key_env
-        .as_ref()
-        .and_then(|env_name| std::env::var(env_name).ok());
+    log_classification(&state, &classification, body_str, start, "ok");
 
     let response_body = serde_json::json!({
         "status": "classified",
         "category": classification.category,
         "model": classification.model,
         "tier": format!("{:?}", classification.tier),
-        "endpoint": classification.endpoint,
-        "provider_type": classification.provider_type,
-        "api_key": api_key,
     }).to_string();
-
-    log_classification(&state, &classification, body_str, start, "ok");
 
     (StatusCode::OK, response_body)
 }
@@ -621,7 +613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_completion_enriched_response_fields() {
+    async fn test_completion_does_not_include_enriched_fields() {
         std::env::set_var("TEST_API_KEY", "sk-test-value-123");
         let response = test_app_with_enriched_classifier("test_provider", Some("TEST_API_KEY"))
             .oneshot(
@@ -644,13 +636,14 @@ mod tests {
             .await
             .expect("body should be readable");
         let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(body.contains(r#""provider_type":"test_provider""#), "expected provider_type in response");
-        assert!(body.contains(r#""endpoint":"https://test.endpoint""#), "expected endpoint in response");
-        assert!(body.contains(r#""api_key":"sk-test-value-123""#), "expected api_key in response");
+        assert!(body.contains(r#""category":"SYNTAX_FIX""#), "expected SYNTAX_FIX category");
+        assert!(!body.contains(r#""provider_type""#), "response should NOT contain provider_type");
+        assert!(!body.contains(r#""endpoint""#), "response should NOT contain endpoint");
+        assert!(!body.contains(r#""api_key""#), "response should NOT contain api_key");
     }
 
     #[tokio::test]
-    async fn test_completion_api_key_null_when_env_missing() {
+    async fn test_completion_no_enriched_fields_with_missing_env() {
         let response = test_app_with_enriched_classifier("test_provider", Some("MISSING_KEY_XYZ"))
             .oneshot(
                 Request::builder()
@@ -672,7 +665,7 @@ mod tests {
             .await
             .expect("body should be readable");
         let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(body.contains(r#""api_key":null"#), "expected api_key to be null, got: {body}");
+        assert!(!body.contains(r#""api_key""#), "response should NOT contain api_key");
     }
 
     #[tokio::test]
