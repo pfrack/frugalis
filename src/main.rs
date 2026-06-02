@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::panic;
 use std::sync::Arc;
 
 use axum::{
@@ -11,7 +12,8 @@ use axum::{
     Router,
 };
 use tokio_stream::StreamExt;
-use tower_http::services::ServeDir;
+use tower_http::{services::ServeDir, limit::RequestBodyLimitLayer, cors::CorsLayer};
+
 
 mod auth;
 mod persistence;
@@ -30,6 +32,11 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
+    // Ensure any panic is logged, not silent.
+    panic::set_hook(Box::new(|info| {
+        eprintln!("Panic in Cerebrum: {info}");
+    }));
+
     let auth_config = auth::AuthConfig::from_env().unwrap_or_else(|err| {
         panic!("Auth configuration error: {err}");
     });
@@ -344,14 +351,12 @@ async fn completion_handler(
     if client_wants_stream {
         let upstream_status = upstream_response.status();
         if !upstream_status.is_success() {
-            const MAX_SSE_ERROR_BODY: usize = 10 * 1024 * 1024; // 10 MB
-            let mut error_bytes: Vec<u8> = Vec::new();
-            let mut error_text = String::new();
+            const MAX_ERROR_BODY_BYTES: usize = 2 * 1024; // 2 KB, enough for ~512 chars
+            let mut error_bytes = Vec::new();
             loop {
                 match upstream_response.chunk().await {
                     Ok(Some(chunk)) => {
-                        if error_bytes.len() + chunk.len() > MAX_SSE_ERROR_BODY {
-                            error_bytes.extend_from_slice(b"... (truncated)");
+                        if error_bytes.len() + chunk.len() > MAX_ERROR_BODY_BYTES {
                             break;
                         }
                         error_bytes.extend_from_slice(&chunk);
@@ -360,7 +365,7 @@ async fn completion_handler(
                     Err(_) => break,
                 }
             }
-            error_text = String::from_utf8_lossy(&error_bytes)
+            let error_text = String::from_utf8_lossy(&error_bytes)
                 .chars()
                 .take(512)
                 .collect::<String>()
@@ -382,7 +387,11 @@ async fn completion_handler(
         }
 
         let byte_stream = upstream_response.bytes_stream();
-        let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(32);
+        let channel_capacity = std::env::var("STREAMING_CHANNEL_CAPACITY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32);
+        let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(channel_capacity);
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
@@ -431,6 +440,56 @@ async fn completion_handler(
     }
 
     let upstream_status = upstream_response.status();
+    if !upstream_status.is_success() {
+        const MAX_ERROR_BODY_BYTES: usize = 2 * 1024; // 2 KB, enough for ~512 chars
+        let mut error_bytes = Vec::new();
+        let error_body = loop {
+            match upstream_response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if error_bytes.len() + chunk.len() > MAX_ERROR_BODY_BYTES {
+                        let error_text = String::from_utf8_lossy(&error_bytes)
+                            .chars()
+                            .take(512)
+                            .collect::<String>()
+                            .replace('\n', " ")
+                            .replace('\r', " ");
+                        break serde_json::json!({
+                            "error": "upstream_error",
+                            "status": upstream_status.as_u16(),
+                            "message": error_text,
+                        }).to_string();
+                    }
+                    error_bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => {
+                    let error_text = String::from_utf8_lossy(&error_bytes)
+                        .chars()
+                        .take(512)
+                        .collect::<String>()
+                        .replace('\n', " ")
+                        .replace('\r', " ");
+                    break serde_json::json!({
+                        "error": "upstream_error",
+                        "status": upstream_status.as_u16(),
+                        "message": error_text,
+                    }).to_string();
+                }
+                Err(e) => {
+                    break serde_json::json!({
+                        "error": "upstream_error",
+                        "status": 502,
+                        "message": e.to_string(),
+                    }).to_string();
+                }
+            }
+        };
+        log_classification(&state, &classification, body_str, start, "upstream_error");
+        return json_response(
+            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            error_body,
+        );
+    }
+
     const MAX_UPSTREAM_BODY: usize = 10 * 1024 * 1024; // 10 MB
     let mut upstream_body_bytes: Vec<u8> = Vec::new();
     let upstream_body = loop {
@@ -460,66 +519,17 @@ async fn completion_handler(
         }
     };
 
-    if !upstream_status.is_success() {
-        let truncated: String = upstream_body.chars().take(512).collect();
-        if upstream_body.chars().count() > 512 {
-            eprintln!(
-                "WARN completion_handler: upstream error body truncated from {} to 512 chars; full body: {}",
-                upstream_body.chars().count(),
-                upstream_body
-            );
-        }
-        let upstream_body = truncated;
-        let error_body = serde_json::json!({
-            "error": "upstream_error",
-            "status": upstream_status.as_u16(),
-            "message": upstream_body,
-        }).to_string();
-        log_classification(&state, &classification, body_str, start, "upstream_error");
-        return json_response(
-            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-            error_body,
-        );
-    }
-
     log_classification(&state, &classification, body_str, start, "ok");
-    json_response(StatusCode::OK, sanitize_json_string_control_chars(&upstream_body))
+    let response_body = match serde_json::from_str::<serde_json::Value>(&upstream_body) {
+        Ok(value) => {
+            // Re-serialize to guarantee valid JSON escaping. Fallback to original on error.
+            serde_json::to_string(&value).unwrap_or(upstream_body)
+        }
+        Err(_) => upstream_body,
+    };
+    json_response(StatusCode::OK, response_body)
 }
 
-fn sanitize_json_string_control_chars(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut in_string = false;
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if !in_string {
-            result.push(ch);
-            if ch == '"' {
-                in_string = true;
-            }
-        } else {
-            match ch {
-                '\\' => {
-                    result.push(ch);
-                    if let Some(next) = chars.next() {
-                        result.push(next);
-                    }
-                }
-                '"' => {
-                    result.push(ch);
-                    in_string = false;
-                }
-                '\n' => result.push_str("\\n"),
-                '\r' => result.push_str("\\r"),
-                '\t' => result.push_str("\\t"),
-                c if (c as u32) < 0x20 => {
-                    result.push_str(&format!("\\u{:04x}", c as u32));
-                }
-                _ => result.push(ch),
-            }
-        }
-    }
-    result
-}
 
 /// Classify handler: extracts prompt, classifies intent, optionally logs a
 /// lightweight classification record with status "classified", and returns
@@ -551,6 +561,8 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
         .nest_service("/static", ServeDir::new("static"))
         .nest("/v1", proxy_routes)
         .nest("/dashboard", dashboard_routes)
+        .layer(CorsLayer::permissive())
+        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .with_state(app_state)
 }
 
