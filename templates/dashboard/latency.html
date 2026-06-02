@@ -1,15 +1,10 @@
 {% extends "base.html" %}
 
-{% block nav %}
-<a href="/dashboard">Dashboard</a>
-<a href="/dashboard/inferences">Inference Logs</a>
-<a href="/dashboard/latency">Latency</a>
-<a href="/dashboard/savings">Savings</a>
-{% endblock %}
-
 {% block content %}
-<h2 style="font-size:20px;font-weight:700;letter-spacing:-0.02em;margin-bottom:0.25rem;">Latency Breakdown</h2>
-<p class="muted" style="font-size:13px;margin-bottom:1.5rem;">Per-category response time analysis</p>
+<div class="page-header">
+  <h2>Latency Breakdown</h2>
+  <p>Per-category response time analysis</p>
+</div>
 
 <form class="filters" method="get" action="/dashboard/latency" style="margin-bottom:1rem;">
   <label>
@@ -25,26 +20,35 @@
 
 {% if let Some(s) = summary %}
   {% if s.rows.len() > 0 %}
-  <div class="card" style="padding:0;">
+  <div class="card card-flush">
     <table>
       <tr>
         <th>Category</th>
         <th>Count</th>
-        <th>Avg Duration (ms)</th>
-        <th>P99 Duration (ms)</th>
+        <th style="width:50%;">Avg Duration</th>
+        <th>P99 (ms)</th>
       </tr>
       {% for row in s.rows %}
       <tr>
         <td><span class="badge">{{ row.category|e }}</span></td>
         <td>{{ row.request_count }}</td>
-        <td>{{ row.avg_duration_ms.unwrap_or(0) }}</td>
+        <td>
+          {% if let Some(d) = row.avg_duration_ms %}
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div style="flex:1;height:8px;background:#f0f0f5;border-radius:4px;overflow:hidden;max-width:200px;">
+              <div style="width:{{ d }}px;height:100%;border-radius:4px;background:linear-gradient(90deg,#4a6cf7,#74b9ff);"></div>
+            </div>
+            <span class="muted" style="font-size:12px;">{{ d }} ms</span>
+          </div>
+          {% else %}<span class="muted">&mdash;</span>{% endif %}
+        </td>
         <td>{{ row.p99_duration_ms.unwrap_or(0) }}</td>
       </tr>
       {% endfor %}
     </table>
   </div>
 
-  <div style="display:flex;gap:1rem;margin-top:0.75rem;">
+  <div style="display:flex;gap:1rem;margin-top:0.5rem;">
     <p class="muted" style="font-size:12px;">{{ s.total_classified_count }} total classified inferences</p>
     {% if s.unclassified_count > 0 %}
     <p class="muted" style="font-size:12px;">{{ s.unclassified_count }} unclassified records excluded</p>
@@ -53,6 +57,14 @@
   {% else %}
   <div class="card">
     <div class="empty-state">
+      <div class="empty-state-illustration">
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+          <circle cx="24" cy="24" r="20" stroke="#d1d1d6" stroke-width="2"/>
+          <polyline points="12 24 20 18 28 28 36 20" stroke="#e5e5ea" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <line x1="24" y1="10" x2="24" y2="14" stroke="#e5e5ea" stroke-width="2" stroke-linecap="round"/>
+          <line x1="24" y1="34" x2="24" y2="38" stroke="#e5e5ea" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </div>
       <p>No inference data in the selected window</p>
       <small>Try a larger time window, or send some test requests.</small>
     </div>

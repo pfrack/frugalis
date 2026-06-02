@@ -61,7 +61,7 @@ paths:
         "415":
           description: Unsupported media type
           content:
-            text/plain:
+            application/json:
               schema:
                 type: string
   /v1/chat/completions:
@@ -94,7 +94,41 @@ paths:
           content:
             application/json:
               schema:
+                oneOf:
+                  - type: object
+                    description: Upstream model response (pass-through)
+                  - type: object
+                    properties:
+                      status:
+                        type: string
+                        enum: [classified]
+                      category:
+                        type: string
+                        enum: [COMPLEX_REASONING, FILE_READING, SYNTAX_FIX, CASUAL]
+                      model:
+                        type: string
+                        description: Model selected for this category
+                      tier:
+                        type: string
+                        enum: [Regex, Fallback]
+                    required: [status, category, model, tier]
+                    description: Classification-only response when no upstream is configured
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
                 type: object
+                properties:
+                  error:
+                    type: string
+                    enum: [bad_request]
+                  status:
+                    type: integer
+                    example: 400
+                  message:
+                    type: string
+                required: [error, status, message]
                 description: >
                   The raw JSON response from the upstream model API (typically
                   OpenAI-compatible chat completion format). The response body
@@ -111,6 +145,12 @@ paths:
                 properties:
                   error:
                     type: string
+        "415":
+          description: Unsupported media type
+          content:
+            application/json:
+              schema:
+                type: string
         "502":
           description: Upstream API unreachable or no endpoint configured
           content:
@@ -133,3 +173,4 @@ components:
       type: http
       scheme: bearer
       bearerFormat: "PROXY_API_BEARER_TOKEN"
+

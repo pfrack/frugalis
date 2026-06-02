@@ -355,3 +355,4 @@ Update `openapi/completions.yaml` to document the proxied upstream response sche
 - **F3 (FIXED)**: Upstream error body truncated to 512 chars in client response; full body logged server-side via `eprintln!`.
 - **F4 (FIXED)**: Upstream response body read via chunked streaming with 10 MB cap; oversized responses return 502.
 - **F5 (FIXED)**: All 9 `persistence::tests::test_fetch_*` integration tests adapted to work on a shared DB: unique category/model prefixes per test prevent stale data collisions; `.expect()` replaces `.ok()` for INSERT/DELETE calls; assertions use `>=` or per-test filtering instead of assuming an empty DB.
+

@@ -1,17 +1,10 @@
 {% extends "base.html" %}
 
-{% block nav %}
-<a href="/dashboard">Dashboard</a>
-<a href="/dashboard/inferences">Inference Logs</a>
-<a href="/dashboard/latency">Latency</a>
-<a href="/dashboard/savings">Savings</a>
-{% endblock %}
-
 {% block content %}
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
-  <div>
-    <h2 style="font-size:18px;font-weight:600;">Inference Logs</h2>
-    <p style="font-size:12px;color:#6e6e73;margin-top:2px;">Recent requests routed through the proxy</p>
+  <div class="page-header" style="margin-bottom:0;">
+    <h2>Inference Logs</h2>
+    <p>Recent requests routed through the proxy</p>
   </div>
   <a href="/dashboard/inferences{% if let Some(cat) = filter_category %}?filter_category={{ cat|e }}{% endif %}" class="btn btn-ghost">↻ Refresh</a>
 </div>
@@ -35,9 +28,17 @@
   </form>
 </div>
 
-<div class="card" style="padding:0;overflow:hidden;">
+<div class="card card-flush">
 {% if records.is_empty() %}
 <div class="empty-state">
+  <div class="empty-state-illustration">
+    <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+      <rect x="6" y="8" width="36" height="32" rx="4" stroke="#d1d1d6" stroke-width="2"/>
+      <line x1="14" y1="18" x2="34" y2="18" stroke="#e5e5ea" stroke-width="2" stroke-linecap="round"/>
+      <line x1="14" y1="24" x2="28" y2="24" stroke="#e5e5ea" stroke-width="2" stroke-linecap="round"/>
+      <line x1="14" y1="30" x2="22" y2="30" stroke="#e5e5ea" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+  </div>
   <p>No inference records yet</p>
   <small>Send requests through the proxy to start seeing data here.</small>
 </div>
@@ -63,20 +64,22 @@
         </details>
       </td>
       <td>
-        {% if let Some(cat) = record.category %}<span class="badge">{{ cat|e }}</span>{% else %}<span class="muted">—</span>{% endif %}
+        {% if let Some(cat) = record.category %}<span class="badge">{{ cat|e }}</span>{% else %}<span class="muted">&mdash;</span>{% endif %}
       </td>
       <td>
-        {% if let Some(mdl) = record.upstream_model %}<span class="muted" style="font-size:12px;">{{ mdl|e }}</span>{% else %}<span class="muted">—</span>{% endif %}
+        {% if let Some(mdl) = record.upstream_model %}<span class="muted" style="font-size:12px;">{{ mdl|e }}</span>{% else %}<span class="muted">&mdash;</span>{% endif %}
       </td>
       <td style="text-align:right;white-space:nowrap;">
-        {% if let Some(dur) = record.duration_ms %}<span class="muted" style="font-size:12px;">{{ dur }} ms</span>{% else %}<span class="muted">—</span>{% endif %}
+        {% if let Some(dur) = record.duration_ms %}
+        <span class="muted" style="font-size:12px;">{{ dur }} ms</span>
+        {% else %}<span class="muted">&mdash;</span>{% endif %}
       </td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
 
-<div class="pagination" style="padding:0.75rem 1rem;border-top:1px solid #f2f2f7;">
+<div class="pagination">
   <span>Page {{ page + 1 }} of {{ total_pages }}</span>
   {% if page > 0 %}
   <a href="/dashboard/inferences?offset={{ (page - 1) * 20 }}&limit=20{% if let Some(cat) = filter_category %}&filter_category={{ cat|e }}{% endif %}{% if let Some(mdl) = filter_model %}&filter_model={{ mdl|e }}{% endif %}" class="btn btn-ghost">← Prev</a>

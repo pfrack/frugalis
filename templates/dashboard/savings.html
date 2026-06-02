@@ -1,15 +1,10 @@
 {% extends "base.html" %}
 
-{% block nav %}
-<a href="/dashboard">Dashboard</a>
-<a href="/dashboard/inferences">Inference Logs</a>
-<a href="/dashboard/latency">Latency</a>
-<a href="/dashboard/savings" class="active">Savings</a>
-{% endblock %}
-
 {% block content %}
-<h2 style="font-size:20px;font-weight:700;letter-spacing:-0.02em;margin-bottom:0.25rem;">Estimated Cost Savings</h2>
-<p class="muted" style="font-size:13px;margin-bottom:1.5rem;">Last 24 hours &middot; compared to {{ baseline_model|e }}</p>
+<div class="page-header">
+  <h2>Estimated Cost Savings</h2>
+  <p>Last 24 hours &middot; compared to {{ baseline_model|e }}</p>
+</div>
 
 {% if let Some(err) = error %}
 <div class="error-banner">{{ err|e }}</div>
@@ -20,13 +15,16 @@
     <div class="stat-row">
       <div class="stat">
         <div class="stat-label">Estimated Savings</div>
-        <div class="stat-value">
+        <div class="stat-value" style="color:{% if est.savings_usd > 0.0 %}#00b894{% else %}#8e8e93{% endif %};">
           {% if est.savings_usd > 0.0 %}
             ${{ est.formatted_savings_usd|e }}
           {% else %}
-            $0.00 <span class="muted" style="font-size:12px;">(no savings &mdash; baseline costs less)</span>
+            $0.00
           {% endif %}
         </div>
+        {% if est.savings_usd <= 0.0 %}
+        <div class="stat-footnote">No savings &mdash; baseline costs less</div>
+        {% endif %}
       </div>
       <div class="stat">
         <div class="stat-label">Classified Requests</div>
@@ -37,6 +35,30 @@
         <div class="stat-value" style="font-size:14px;">{{ est.baseline_model|e }}</div>
       </div>
     </div>
+
+    {% if est.savings_usd > 0.0 %}
+    <div style="margin-top:1rem;">
+      <p class="section-title">Cost Comparison</p>
+      <div class="comparison-row">
+        <span class="comparison-label">Baseline</span>
+        <div class="comparison-bars">
+          <div class="comparison-bar-track">
+            <div class="comparison-bar-fill baseline" style="width:100%;"></div>
+          </div>
+        </div>
+        <span class="comparison-value">${{ est.formatted_savings_usd|e }}</span>
+      </div>
+      <div class="comparison-row">
+        <span class="comparison-label">Actual</span>
+        <div class="comparison-bars">
+          <div class="comparison-bar-track" style="background:#e8f8f2;">
+            <div class="comparison-bar-fill actual" style="width:60%;"></div>
+          </div>
+        </div>
+        <span class="comparison-value" style="color:#00b894;">Saved</span>
+      </div>
+    </div>
+    {% endif %}
 
     {% if est.baseline_model_unknown %}
     <p class="warning" style="font-size:12px;margin-top:0.75rem;color:#d29922;">
@@ -57,6 +79,13 @@
     {% endif %}
   {% else %}
     <div class="empty-state">
+      <div class="empty-state-illustration">
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+          <circle cx="24" cy="24" r="20" stroke="#d1d1d6" stroke-width="2"/>
+          <path d="M24 14v4M24 30v4M14 24h4M30 24h4" stroke="#e5e5ea" stroke-width="2" stroke-linecap="round"/>
+          <path d="M18 18l4 4M26 26l4 4M18 30l4-4M26 22l4-4" stroke="#e5e5ea" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </div>
       <p>No inference data yet</p>
       <small>Send requests through the proxy to see cost savings here.</small>
     </div>

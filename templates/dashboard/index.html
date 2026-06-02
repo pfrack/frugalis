@@ -1,49 +1,89 @@
 {% extends "base.html" %}
 
-{% block nav %}
-<a href="/dashboard">Dashboard</a>
-<a href="/dashboard/inferences">Inference Logs</a>
-<a href="/dashboard/latency">Latency</a>
-<a href="/dashboard/savings">Savings</a>
-{% endblock %}
-
 {% block content %}
-<h2 style="font-size:20px;font-weight:700;letter-spacing:-0.02em;margin-bottom:0.25rem;">Dashboard</h2>
-<p class="muted" style="font-size:13px;margin-bottom:1.5rem;">Overview of recent proxy activity</p>
+<div class="page-header">
+  <h2>Dashboard</h2>
+  <p>Overview of recent proxy activity</p>
+</div>
 
 {% if let Some(err) = error %}
 <div class="error-banner">{{ err|e }}</div>
 {% endif %}
 
+<div class="status-bar">
+  <div class="status-item">
+    <span class="status-dot {% if classifier_active %}green{% else %}red{% endif %}"></span>
+    Gateway {% if classifier_active %}Active{% else %}Inactive{% endif %}
+  </div>
+  <div class="status-item">
+    <span class="status-dot {% if db_connected %}green{% else %}red{% endif %}"></span>
+    Database {% if db_connected %}Connected{% else %}Disconnected{% endif %}
+  </div>
+  <div class="status-item">
+    <span class="muted">Baseline: {{ baseline_model|e }}</span>
+  </div>
+  {% if let Some(s) = summary %}
+  <div class="status-item">
+    <span class="status-dot green"></span>
+    {{ s.total_classified_count }} classified in 24h
+  </div>
+  {% endif %}
+</div>
+
+<div class="quick-stats">
+  <div class="quick-stat">
+    {% if let Some(s) = summary %}
+    <div class="quick-stat-value">{{ s.total_classified_count + s.unclassified_count }}</div>
+    {% else %}
+    <div class="quick-stat-value">0</div>
+    {% endif %}
+    <div class="quick-stat-label">Total Requests</div>
+    <div class="quick-stat-footnote">Last 24 hours</div>
+  </div>
+  <div class="quick-stat">
+    {% if let Some(s) = summary %}
+    <div class="quick-stat-value">{{ s.rows.len() }}</div>
+    {% else %}
+    <div class="quick-stat-value">0</div>
+    {% endif %}
+    <div class="quick-stat-label">Categories</div>
+  </div>
+  <div class="quick-stat">
+    {% if let Some(s) = savings %}
+    <div class="quick-stat-value" style="color:#00b894;">${{ s.formatted_savings_usd|e }}</div>
+    {% else %}
+    <div class="quick-stat-value" style="color:var(--text-muted);">$0.00</div>
+    {% endif %}
+    <div class="quick-stat-label">Est. Savings</div>
+    <div class="quick-stat-footnote">vs {{ baseline_model|e }}</div>
+  </div>
+  <div class="quick-stat">
+    {% if let Some(s) = summary %}
+    {% if s.total_classified_count > 0 || s.unclassified_count > 0 %}
+    {% let total = s.total_classified_count + s.unclassified_count %}
+    <div class="quick-stat-value">{{ s.total_classified_count * 100 / total }}%</div>
+    {% else %}
+    <div class="quick-stat-value">0%</div>
+    {% endif %}
+    {% else %}
+    <div class="quick-stat-value">0%</div>
+    {% endif %}
+    <div class="quick-stat-label">Classified</div>
+  </div>
+</div>
+
 <div class="card">
   {% if let Some(s) = summary %}
-    <p class="section-title">Latency Summary — Last 24 hours</p>
-
-    <div class="stat-row">
-      <div class="stat">
-        <div class="stat-label">Total Classified</div>
-        <div class="stat-value">{{ s.total_classified_count }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">Categories</div>
-        <div class="stat-value">{{ s.rows.len() }}</div>
-      </div>
-      {% if s.unclassified_count > 0 %}
-      <div class="stat">
-        <div class="stat-label">Unclassified</div>
-        <div class="stat-value">{{ s.unclassified_count }}</div>
-      </div>
-      {% endif %}
-    </div>
-
     {% if s.rows.len() > 0 %}
+    <p class="section-title">Latency Summary &mdash; Last 24 hours</p>
     <table>
-      <tr><th>Category</th><th>Count</th><th>Avg Duration (ms)</th></tr>
+      <tr><th>Category</th><th>Count</th><th>Avg Duration (ms)</th><th>P99 (ms)</th></tr>
       {% for row in s.rows %}
       <tr>
         <td><span class="badge">{{ row.category|e }}</span></td>
         <td>{{ row.request_count }}</td>
         <td>{{ row.avg_duration_ms.unwrap_or(0) }}</td>
+        <td>{{ row.p99_duration_ms.unwrap_or(0) }}</td>
       </tr>
       {% endfor %}
     </table>
@@ -52,9 +92,57 @@
     {% endif %}
   {% else %}
     <div class="empty-state">
-      <p style="font-size:15px;font-weight:500;color:#1d1d1f;">Welcome to Cerebrum</p>
-      <small>Your intent-aware routing gateway. Use the navigation above to explore inference logs and latency data.</small>
+      <div class="empty-state-illustration">
+        <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+          <circle cx="32" cy="32" r="28" stroke="#d1d1d6" stroke-width="2"/>
+          <circle cx="32" cy="32" r="10" fill="#e5e5ea"/>
+          <path d="M32 4v12M32 48v12M4 32h12M48 32h12" stroke="#d1d1d6" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="18" cy="18" r="3" fill="#e5e5ea"/>
+          <circle cx="46" cy="18" r="3" fill="#e5e5ea"/>
+          <circle cx="18" cy="46" r="3" fill="#e5e5ea"/>
+          <circle cx="46" cy="46" r="3" fill="#e5e5ea"/>
+        </svg>
+      </div>
+      <p style="font-size:15px;font-weight:500;color:var(--text-primary);">Welcome to Cerebrum</p>
+      <small>Your intent-aware routing gateway. Use the navigation to explore inference logs and latency data.</small>
     </div>
   {% endif %}
 </div>
+
+{% if let Some(s) = summary %}
+{% if recent.len() > 0 %}
+<div class="card" style="padding:0;overflow:hidden;">
+  <p class="section-title" style="padding:1rem 1.25rem 0.5rem;margin-bottom:0;">Recent Activity</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Prompt</th>
+        <th>Category</th>
+        <th style="text-align:right;">Duration</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for record in recent %}
+      <tr>
+        <td class="muted" style="white-space:nowrap;font-size:12px;">{{ record.timestamp|e }}</td>
+        <td>
+          <details>
+            <summary>{{ record.prompt_snippet|e|truncate(60) }}</summary>
+            <pre>{{ record.prompt_snippet|e }}</pre>
+          </details>
+        </td>
+        <td>
+          {% if let Some(cat) = record.category %}<span class="badge">{{ cat|e }}</span>{% else %}<span class="muted">&mdash;</span>{% endif %}
+        </td>
+        <td style="text-align:right;white-space:nowrap;">
+          {% if let Some(dur) = record.duration_ms %}<span class="muted" style="font-size:12px;">{{ dur }} ms</span>{% else %}<span class="muted">&mdash;</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endif %}
 {% endblock %}

@@ -2,59 +2,24 @@ use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Query, State},
+    extract::State,
     http::{header, HeaderMap, StatusCode},
     middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
-use askama::Template;
-use askama_web::WebTemplate;
-use std::collections::HashMap;
+use tower_http::services::ServeDir;
 
 mod auth;
 mod persistence;
 mod intent_classificator;
-
-#[derive(Template, WebTemplate)]
-#[template(path = "dashboard/index.html")]
-struct DashboardIndex {
-    summary: Option<persistence::LatencySummary>,
-    error: Option<String>,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "dashboard/inferences.html")]
-struct InferencesTemplate {
-    records: Vec<persistence::InferenceLog>,
-    page: u32,
-    total_pages: u32,
-    error: Option<String>,
-    filter_category: Option<String>,
-    filter_model: Option<String>,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "dashboard/latency.html")]
-struct LatencyTemplate {
-    summary: Option<persistence::LatencySummary>,
-    hours: u32,
-    error: Option<String>,
-}
-
-#[derive(Template, WebTemplate)]
-#[template(path = "dashboard/savings.html")]
-struct SavingsTemplate {
-    estimate: Option<persistence::SavingsEstimate>,
-    error: Option<String>,
-    baseline_model: String,
-}
+mod dashboard;
 
 /// Shared application state injected into handlers via Axum's `State` extractor.
 /// `persistence` is `None` when `DATABASE_URL` is absent (persistence gracefully disabled).
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     persistence: Option<persistence::PersistenceConfig>,
     classifier: Option<Arc<intent_classificator::IntentClassifier>>,
     classify_db_log: bool,
@@ -138,7 +103,7 @@ fn log_classification(
     if let Some(persistence) = &state.persistence {
         let duration_ms = start.elapsed().as_millis() as i32;
         let snippet = persistence::extract_snippet(body_str);
-        let prompt = persistence::extract_last_user_message(body_str);
+        let prompt = persistence::extract_last_user_message(&body_str);
         let prompt_char_count = if prompt.is_empty() {
             None
         } else {
@@ -170,16 +135,16 @@ fn classify_and_log(
     start: std::time::Instant,
     state: &AppState,
     log_status: Option<&str>,
-) -> (StatusCode, String) {
+) -> impl IntoResponse {
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !content_type.starts_with("application/json") {
-        return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected application/json".to_string());
+        return json_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected application/json".to_string());
     }
 
-    let prompt = persistence::extract_last_user_message(body_str);
+    let prompt = persistence::extract_last_user_message(&body_str);
 
     let classification = state.classifier.as_ref()
         .map(|c| c.classify(&prompt))
@@ -195,7 +160,7 @@ fn classify_and_log(
         log_classification(state, &classification, body_str, start, log_status);
     }
 
-    (StatusCode::OK, response_body)
+    json_response(StatusCode::OK, response_body)
 }
 
 fn json_response(status: StatusCode, body: String) -> Response<Body> {
@@ -228,12 +193,7 @@ async fn completion_handler(
         return json_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected application/json".to_string());
     }
 
-    let body_str = match std::str::from_utf8(&body) {
-        Ok(s) => s,
-        Err(_) => {
-            return json_response(StatusCode::BAD_REQUEST, r#"{"error":"bad_request","message":"invalid UTF-8 body"}"#.to_string());
-        }
-    };
+    let body_str = String::from_utf8_lossy(&body).to_string();
 
     let x_category = headers
         .get("x-cerebrum-category")
@@ -257,51 +217,25 @@ async fn completion_handler(
                 api_key_env: entry.api_key_env.clone(),
             },
             None => {
-                let fallback = state.classifier.as_ref()
-                    .map(|c| c.classify(""))
-                    .unwrap_or_else(intent_classificator::ClassificationResult::fallback);
-                let response_body = serde_json::json!({
-                    "status": "classified",
-                    "category": fallback.category,
-                    "model": fallback.model,
-                    "tier": format!("{:?}", fallback.tier),
+                let error_body = serde_json::json!({
+                    "error": "unknown_category",
+                    "status": 400,
+                    "message": format!("category '{category}' not found in routing configuration"),
                 }).to_string();
-                log_classification(&state, &fallback, body_str, start, "ok");
-                return json_response(StatusCode::OK, response_body);
+                return json_response(StatusCode::BAD_REQUEST, error_body);
             }
         }
     } else {
-        let prompt = persistence::extract_last_user_message(body_str);
+        let prompt = persistence::extract_last_user_message(&body_str);
         state.classifier.as_ref()
             .map(|c| c.classify(&prompt))
             .unwrap_or_else(intent_classificator::ClassificationResult::fallback)
     };
 
-    if state.http_client.is_none() {
-        let response_body = serde_json::json!({
-            "status": "classified",
-            "category": classification.category,
-            "model": classification.model,
-            "tier": format!("{:?}", classification.tier),
-        }).to_string();
-        log_classification(&state, &classification, body_str, start, "ok");
-        return json_response(StatusCode::OK, response_body);
-    }
+    log_classification(&state, &classification, &body_str, start, "ok");
 
-    let api_key = match &classification.api_key_env {
-        Some(env_name) => match std::env::var(env_name) {
-            Ok(key) if !key.is_empty() => key,
-            _ => {
-                let response_body = serde_json::json!({
-                    "status": "classified",
-                    "category": classification.category,
-                    "model": classification.model,
-                    "tier": format!("{:?}", classification.tier),
-                }).to_string();
-                log_classification(&state, &classification, body_str, start, "ok");
-                return json_response(StatusCode::OK, response_body);
-            }
-        },
+    let client = match &state.http_client {
+        Some(c) => c,
         None => {
             let response_body = serde_json::json!({
                 "status": "classified",
@@ -309,7 +243,32 @@ async fn completion_handler(
                 "model": classification.model,
                 "tier": format!("{:?}", classification.tier),
             }).to_string();
-            log_classification(&state, &classification, body_str, start, "ok");
+            return json_response(StatusCode::OK, response_body);
+        }
+    };
+
+    let api_key = match &classification.api_key_env {
+        Some(env_name) => match std::env::var(env_name) {
+            Ok(key) if !key.is_empty() => key,
+            _ => {
+                eprintln!("WARN: upstream API key env var '{env_name}' is missing or empty; degrading to classification-only response");
+                let response_body = serde_json::json!({
+                    "status": "classified",
+                    "category": classification.category,
+                    "model": classification.model,
+                    "tier": format!("{:?}", classification.tier),
+                }).to_string();
+                return json_response(StatusCode::OK, response_body);
+            }
+        },
+        None => {
+            eprintln!("WARN: no api_key_env configured for category '{}'; degrading to classification-only response", classification.category);
+            let response_body = serde_json::json!({
+                "status": "classified",
+                "category": classification.category,
+                "model": classification.model,
+                "tier": format!("{:?}", classification.tier),
+            }).to_string();
             return json_response(StatusCode::OK, response_body);
         }
     };
@@ -320,7 +279,6 @@ async fn completion_handler(
             "status": 502,
             "message": "no endpoint configured",
         }).to_string();
-        log_classification(&state, &classification, body_str, start, "upstream_error");
         return json_response(StatusCode::BAD_GATEWAY, error_body);
     }
 
@@ -332,7 +290,6 @@ async fn completion_handler(
                 "status": 400,
                 "message": format!("invalid JSON body: {e}"),
             }).to_string();
-            log_classification(&state, &classification, body_str, start, "bad_request");
             return json_response(StatusCode::BAD_REQUEST, error_body);
         }
     };
@@ -340,14 +297,13 @@ async fn completion_handler(
     let modified_body = serde_json::to_vec(&req_body).unwrap_or_else(|_| body.to_vec());
 
     let auth_headers = intent_classificator::auth_headers_for(&classification.provider_type, &api_key);
-    let client = state.http_client.as_ref().unwrap();
 
     let mut upstream_req = client.post(&classification.endpoint).body(modified_body);
     for (name, value) in &auth_headers {
         upstream_req = upstream_req.header(name.as_str(), value.as_str());
     }
 
-    let mut upstream_response = match upstream_req.send().await {
+    let upstream_response = match upstream_req.send().await {
         Ok(resp) => resp,
         Err(e) => {
             let error_body = serde_json::json!({
@@ -355,65 +311,40 @@ async fn completion_handler(
                 "status": 502,
                 "message": e.to_string(),
             }).to_string();
-            log_classification(&state, &classification, body_str, start, "upstream_error");
             return json_response(StatusCode::BAD_GATEWAY, error_body);
         }
     };
 
     let upstream_status = upstream_response.status();
-    const MAX_UPSTREAM_BODY: usize = 10 * 1024 * 1024; // 10 MB
-    let mut upstream_body_bytes: Vec<u8> = Vec::new();
-    loop {
-        match upstream_response.chunk().await {
-            Ok(Some(chunk)) => {
-                if upstream_body_bytes.len() + chunk.len() > MAX_UPSTREAM_BODY {
-                    let error_body = serde_json::json!({
-                        "error": "upstream_error",
-                        "status": 502,
-                        "message": "upstream response too large",
-                    }).to_string();
-                    log_classification(&state, &classification, body_str, start, "upstream_error");
-                    return json_response(StatusCode::BAD_GATEWAY, error_body);
-                }
-                upstream_body_bytes.extend_from_slice(&chunk);
-            }
-            Ok(None) => break,
-            Err(e) => {
-                let error_body = serde_json::json!({
-                    "error": "upstream_error",
-                    "status": 502,
-                    "message": e.to_string(),
-                }).to_string();
-                log_classification(&state, &classification, body_str, start, "upstream_error");
-                return json_response(StatusCode::BAD_GATEWAY, error_body);
-            }
+    let upstream_body = match upstream_response.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            let error_body = serde_json::json!({
+                "error": "upstream_error",
+                "status": 502,
+                "message": e.to_string(),
+            }).to_string();
+            return json_response(StatusCode::BAD_GATEWAY, error_body);
         }
-    }
-    let upstream_body = String::from_utf8_lossy(&upstream_body_bytes).into_owned();
+    };
 
     if !upstream_status.is_success() {
-        let truncated = upstream_body.chars().take(512).collect::<String>();
-        if upstream_body.len() > truncated.len() {
-            eprintln!(
-                "WARN completion_handler: upstream error body truncated from {} to 512 chars; \
-                 full body: {}",
-                upstream_body.len(),
-                upstream_body
-            );
-        }
+        let upstream_body = if upstream_body.len() > 1000 {
+            format!("{}... (truncated)", &upstream_body[..1000])
+        } else {
+            upstream_body
+        };
         let error_body = serde_json::json!({
             "error": "upstream_error",
             "status": upstream_status.as_u16(),
-            "message": truncated,
+            "message": upstream_body,
         }).to_string();
-        log_classification(&state, &classification, body_str, start, "upstream_error");
         return json_response(
             StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
             error_body,
         );
     }
 
-    log_classification(&state, &classification, body_str, start, "ok");
     json_response(StatusCode::OK, upstream_body)
 }
 
@@ -424,170 +355,11 @@ async fn classify_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
-) -> (StatusCode, String) {
+) -> impl IntoResponse {
     let start = std::time::Instant::now();
     let body_str = std::str::from_utf8(&body).unwrap_or("");
     let log_status = if state.classify_db_log { Some("classified") } else { None };
     classify_and_log(&headers, body_str, start, &state, log_status)
-}
-
-async fn dashboard(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let persistence = match &state.persistence {
-        Some(p) => p,
-        None => {
-            return DashboardIndex {
-                summary: None,
-                error: None,
-            };
-        }
-    };
-
-    match persistence.fetch_latency_summary(24).await {
-        Ok(s) => DashboardIndex {
-            summary: Some(s),
-            error: None,
-        },
-        Err(e) => DashboardIndex {
-            summary: None,
-            error: Some(e.to_string()),
-        },
-    }
-}
-
-async fn inferences(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let offset = params
-        .get("offset")
-        .and_then(|o| o.parse::<u32>().ok())
-        .unwrap_or(0);
-    let limit = params
-        .get("limit")
-        .and_then(|l| l.parse::<u32>().ok())
-        .map(|l| l.min(100))
-        .unwrap_or(20);
-    let filter_category = params.get("filter_category").cloned();
-    let filter_model = params.get("filter_model").cloned();
-
-    let persistence = match &state.persistence {
-        Some(p) => p,
-        None => {
-            return InferencesTemplate {
-                records: vec![],
-                page: 0,
-                total_pages: 0,
-                error: Some("Database not configured".to_string()),
-                filter_category,
-                filter_model,
-            };
-        }
-    };
-
-    match persistence
-        .fetch_inferences(
-            offset,
-            limit,
-            filter_category.as_deref(),
-            filter_model.as_deref(),
-        )
-        .await
-    {
-        Ok((records, total_count)) => {
-            let page = if limit > 0 { offset / limit } else { 0 };
-            let total_pages = if limit > 0 {
-                ((total_count as u32).saturating_add(limit - 1)) / limit
-            } else {
-                0
-            };
-            InferencesTemplate {
-                records,
-                page,
-                total_pages,
-                error: None,
-                filter_category,
-                filter_model,
-            }
-        }
-        Err(e) => InferencesTemplate {
-            records: vec![],
-            page: 0,
-            total_pages: 0,
-            error: Some(e.to_string()),
-            filter_category,
-            filter_model,
-        },
-    }
-}
-
-async fn latency(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let hours: u32 = params
-        .get("hours")
-        .and_then(|h| h.parse::<u32>().ok())
-        .map(|h| h.clamp(1, 720))
-        .unwrap_or(24);
-
-    let persistence = match &state.persistence {
-        Some(p) => p,
-        None => {
-            return LatencyTemplate {
-                summary: None,
-                hours,
-                error: Some("Database not configured".to_string()),
-            };
-        }
-    };
-
-    match persistence.fetch_latency_summary(hours).await {
-        Ok(s) => LatencyTemplate {
-            summary: Some(s),
-            hours,
-            error: None,
-        },
-        Err(e) => LatencyTemplate {
-            summary: None,
-            hours,
-            error: Some(e.to_string()),
-        },
-    }
-}
-
-async fn savings(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let persistence = match &state.persistence {
-        Some(p) => p,
-        None => {
-            return SavingsTemplate {
-                estimate: None,
-                error: Some("Database not configured".to_string()),
-                baseline_model: "unknown".to_string(),
-            };
-        }
-    };
-
-    let (model_costs, baseline_model) = match &state.classifier {
-        Some(c) => (c.model_costs().clone(), c.baseline_model.clone()),
-        None => (intent_classificator::ModelCosts::empty(), "unknown".to_string()),
-    };
-
-    match persistence.fetch_savings_estimate(24, &model_costs, &baseline_model).await {
-        Ok(est) => SavingsTemplate {
-            estimate: Some(est),
-            error: None,
-            baseline_model: baseline_model.clone(),
-        },
-        Err(e) => SavingsTemplate {
-            estimate: None,
-            error: Some(e.to_string()),
-            baseline_model: baseline_model.clone(),
-        },
-    }
 }
 
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
@@ -599,19 +371,11 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
             auth::require_proxy_bearer,
         ));
 
-    let dashboard_routes =
-        Router::new()
-            .route("/", get(dashboard))
-            .route("/inferences", get(inferences))
-            .route("/latency", get(latency))
-            .route("/savings", get(savings))
-            .layer(middleware::from_fn_with_state(
-                auth_config,
-                auth::require_dashboard_basic,
-            ));
+    let dashboard_routes = dashboard::routes(auth_config);
 
     Router::new()
         .route("/health", get(health))
+        .nest_service("/static", ServeDir::new("static"))
         .nest("/v1", proxy_routes)
         .nest("/dashboard", dashboard_routes)
         .with_state(app_state)
@@ -1627,3 +1391,4 @@ mod tests {
         );
     }
 }
+

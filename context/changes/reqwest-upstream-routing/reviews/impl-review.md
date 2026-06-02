@@ -106,3 +106,4 @@
     - Blind spot: CI pipeline may not support this split.
 
 - **Decision**: FIXED — all 9 persistence integration tests now pass. Unique category/model prefixes isolate each test from stale data; delta-based assertions where needed; `.expect()` instead of `.ok()` on all INSERT/DELETE operations.
+

@@ -19,11 +19,41 @@ Tests are co-located in source modules using `#[cfg(test)]` blocks (see [src/mai
 ## Naming & File Layout
 
 Source files under `src/`:
-- `main.rs` — Axum router setup, route definitions, health endpoint, test harness
+- `main.rs` — Axum router setup, route definitions, health endpoint, proxy handlers, test harness
 - `auth.rs` — `AuthConfig` struct, middleware implementations (`require_proxy_bearer`, `require_dashboard_basic`), token/credential validation, utility helpers
 - `persistence.rs` — `PersistenceConfig` (pool + bounded task semaphore), `InferenceRecord`, async logging API (`log_inference`), snippet extraction. A separate module is justified: persistence is a distinct cross-cutting concern with its own lifecycle, retry policy, and DB driver dependency.
+- `dashboard.rs` — Dashboard page registry (`PAGES`), `dashboard_page!` macro, template structs, handler functions, and `routes()` builder for the `/dashboard/*` sub-router
+- `intent_classificator.rs` — Intent classification logic, regex patterns, model cost configuration
 
 Add new authentication schemes or routes to existing modules rather than creating separate files. Keep middleware functions near the config they read.
+
+### Dashboard Pages & Auto-Nav
+
+Dashboard pages are registered in `src/dashboard.rs` via a static registry and a macro.
+
+**`PAGES`** (`src/dashboard.rs:37-42`) — the single source of truth for the sidebar navigation. Each entry has `path`, `label`, and inline SVG `icon`. To add a page, add one `NavPage` entry here.
+
+**`dashboard_page!` macro** (`src/dashboard.rs:55-68`) — generates the Askama template struct with `nav: NavContext` and `error: Option<String>` pre-populated. Usage:
+```rust
+dashboard_page! {
+    struct MyPageTemplate for "dashboard/my-page.html" {
+        records: Vec<SomeType>,
+        count: u32,
+    }
+}
+```
+The generated struct has `#[derive(Template, WebTemplate)]` and the correct `#[template(path = ...)]` attribute.
+
+**Nav auto-generation** — `templates/base.html` renders the entire sidebar by iterating `nav.pages` (a `Vec<NavItem>`), using `item.active` to highlight the current page. Each child template only provides `{% block content %}` — the nav block was removed from all dashboard templates.
+
+**Adding a new dashboard page requires:**
+1. Create `templates/dashboard/{name}.html` (extends `base.html`, only `{% block content %}`)
+2. Add a `NavPage` entry to `PAGES` in `src/dashboard.rs`
+3. Define template struct with `dashboard_page!` macro
+4. Write the handler function (query DB, build struct with `nav_for("name")`)
+5. Add `.route("/name", get(name_handler))` in the `routes()` function
+
+Template structs and handlers live in `dashboard.rs`, not in `main.rs`.
 
 ## Coding Conventions
 
