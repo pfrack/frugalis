@@ -127,7 +127,7 @@ Rewrite `completion_handler` to perform the full upstream routing flow: classify
 **Contract**: The handler signature stays `async fn completion_handler(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> (StatusCode, String)`. 
 
 The body (flow):
-1. If `X-Cerebrum-Category` and `X-Cerebrum-Model` headers are both present and non-empty, skip classification — build a synthetic `ClassificationResult` with the header values, `tier: Fallback`, and `endpoint`/`api_key_env`/`provider_type` from the routing table lookup (or empty if the category isn't in routing)
+1. If `X-Cerebrum-Category` and `X-Cerebrum-Model` headers are both present and non-empty, skip classification — build a synthetic `ClassificationResult` with the header values, `tier: Fallback`, and `endpoint`/`api_key_env`/`provider_type` from the routing table lookup. If the category is not in the routing table, log a warning via `eprintln!` and degrade to a classification JSON response (classify the empty prompt, return the synthetic classification envelope).
 2. Otherwise, run the existing classify + log_classification flow (extract prompt, call `state.classifier.as_ref().map(|c| c.classify(&prompt)).unwrap_or_else(...)`)
 3. Check `state.http_client.is_some()` — if `None`, degrade to classification JSON (return `(StatusCode::OK, json)` identical to current behavior)
 4. Check `classification.api_key_env` — if `None`, degrade to classification JSON
@@ -152,7 +152,7 @@ Note: the handler now returns `impl IntoResponse` or uses `axum::response::Respo
 
 **Intent**: Clients that have already called `/v1/classify` can pass the result as `X-Cerebrum-Category` and `X-Cerebrum-Model` headers to skip re-classification. This reduces latency for pre-classified requests.
 
-**Contract**: Extract `x_cerebrum_category` and `x_cerebrum_model` from headers at the top of the handler. If both are `Some` and non-empty, look up the category in `state.classifier.as_ref().map(|c| c.routing.get(&category))` to get the `RouteEntry`. If found, build a `ClassificationResult` with the header values and the route entry's endpoint/api_key_env/provider_type. If the category is not in routing, degrade to classification JSON. If only one header is present (or both missing), fall through to normal classification.
+**Contract**: Extract `x_cerebrum_category` and `x_cerebrum_model` from headers at the top of the handler. If both are `Some` and non-empty, look up the category in `state.classifier.as_ref().map(|c| c.routing.get(&category))` to get the `RouteEntry`. If found, build a `ClassificationResult` with the header values and the route entry's endpoint/api_key_env/provider_type. If the category is not in routing, log a warning via `eprintln!` and degrade to a classification JSON response (call `state.classifier.as_ref().map(|c| c.classify(""))`, return the synthetic classification envelope). If only one header is present (or both missing), fall through to normal classification.
 
 ### Success Criteria:
 
@@ -194,6 +194,8 @@ Add `httpmock`-based tests for upstream routing behavior and ensure existing tes
 - **`test_upstream_unreachable_returns_502`**: Configures an endpoint pointing to a dead server (e.g., `http://127.0.0.1:1`). Asserts the response is 502 and body contains `"upstream_error"`.
 
 - **`test_upstream_skip_classify_via_headers`**: Sends a POST with `X-Cerebrum-Category: SYNTAX_FIX` and `X-Cerebrum-Model: gpt-4o-mini` headers and a body that would normally classify as CASUAL (e.g., `"hello"`). The mock server is configured for the SYNTAX_FIX endpoint. Asserts the response is the mocked upstream body (not CASUAL classification JSON). Verifies classification was skipped.
+
+- **`test_upstream_request_includes_content_type_json`**: Sends a POST through a mocked upstream and verifies the request forwarded to the upstream carries `Content-Type: application/json`. Added during implementation as extra coverage.
 
 #### 2. Adapt test_app for Option<reqwest::Client>
 

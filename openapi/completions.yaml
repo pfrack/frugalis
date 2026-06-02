@@ -87,6 +87,10 @@ paths:
                       content:
                         type: string
                     required: [role, content]
+                stream:
+                  type: boolean
+                  default: false
+                  description: When true, the response is streamed as SSE (Server-Sent Events)
               required: [messages]
       responses:
         "200":
@@ -113,6 +117,14 @@ paths:
                         enum: [Regex, Fallback]
                     required: [status, category, model, tier]
                     description: Classification-only response when no upstream is configured
+            text/event-stream:
+              schema:
+                type: string
+                description: >
+                  Raw SSE byte stream. Upstream bytes are forwarded directly as
+                  server-sent events. A `: keepalive` comment is injected every
+                  15 seconds of silence. Non-2xx upstream responses emit an
+                  `event: error` SSE event before closing.
         "400":
           description: Invalid request body
           content:
@@ -129,13 +141,6 @@ paths:
                   message:
                     type: string
                 required: [error, status, message]
-                description: >
-                  The raw JSON response from the upstream model API (typically
-                  OpenAI-compatible chat completion format). The response body
-                  is passed through from the upstream provider without
-                  transformation. When no upstream is configured, the response
-                  is a synthetic classification JSON with `status`, `category`,
-                  `model`, and `tier` fields.
         "401":
           description: Missing or invalid bearer token
           content:
@@ -152,7 +157,11 @@ paths:
               schema:
                 type: string
         "502":
-          description: Upstream API unreachable or no endpoint configured
+          description: |
+            Upstream API unreachable or no endpoint configured.
+            Upstream 4xx and 5xx responses (400, 401, 403, 429, 500, 503,
+            etc.) are wrapped in the same envelope with the upstream's
+            status code preserved in the `status` field.
           content:
             application/json:
               schema:
@@ -173,4 +182,3 @@ components:
       type: http
       scheme: bearer
       bearerFormat: "PROXY_API_BEARER_TOKEN"
-

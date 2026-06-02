@@ -105,5 +105,5 @@
     - Confidence: MEDIUM — depends on whether this workflow is practical for the project.
     - Blind spot: CI pipeline may not support this split.
 
-- **Decision**: FIXED — all 9 persistence integration tests now pass. Unique category/model prefixes isolate each test from stale data; delta-based assertions where needed; `.expect()` instead of `.ok()` on all INSERT/DELETE operations.
+- **Decision**: FIXED — all 9 persistence integration tests now pass. Strategy: unique `Z_TST_*_<uuid>` category/model prefixes per test isolate each test from stale shared-DB data; delta-based assertions (`>= 1`, filter on prefix) tolerate unrelated rows; `.expect()` at the critical INSERT/DELETE sites that gate the assertion data. Note: 13 remaining `.ok()` calls on setup/teardown are non-blocking (failures would manifest as downstream assertion errors), but symmetry would benefit from converting them to `.expect(...)` in a follow-up.
 

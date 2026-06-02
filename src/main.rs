@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::{
@@ -9,6 +10,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use tokio_stream::StreamExt;
 use tower_http::services::ServeDir;
 
 mod auth;
@@ -103,7 +105,7 @@ fn log_classification(
     if let Some(persistence) = &state.persistence {
         let duration_ms = start.elapsed().as_millis() as i32;
         let snippet = persistence::extract_snippet(body_str);
-        let prompt = persistence::extract_last_user_message(&body_str);
+        let prompt = persistence::extract_last_user_message(body_str);
         let prompt_char_count = if prompt.is_empty() {
             None
         } else {
@@ -144,7 +146,7 @@ fn classify_and_log(
         return json_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected application/json".to_string());
     }
 
-    let prompt = persistence::extract_last_user_message(&body_str);
+    let prompt = persistence::extract_last_user_message(body_str);
 
     let classification = state.classifier.as_ref()
         .map(|c| c.classify(&prompt))
@@ -182,7 +184,7 @@ async fn completion_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
+) -> Response {
     let start = std::time::Instant::now();
 
     let content_type = headers
@@ -193,7 +195,15 @@ async fn completion_handler(
         return json_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected application/json".to_string());
     }
 
-    let body_str = String::from_utf8_lossy(&body).to_string();
+    let body_str = match std::str::from_utf8(&body) {
+        Ok(s) => s,
+        Err(_) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                r#"{"error":"bad_request","message":"invalid UTF-8 body"}"#.to_string(),
+            );
+        }
+    };
 
     let x_category = headers
         .get("x-cerebrum-category")
@@ -217,22 +227,29 @@ async fn completion_handler(
                 api_key_env: entry.api_key_env.clone(),
             },
             None => {
-                let error_body = serde_json::json!({
-                    "error": "unknown_category",
-                    "status": 400,
-                    "message": format!("category '{category}' not found in routing configuration"),
+                eprintln!(
+                    "WARN: X-Cerebrum-Category '{category}' not found in routing configuration; \
+                     degrading to classification JSON"
+                );
+                let fallback = state.classifier.as_ref()
+                    .map(|c| c.classify(""))
+                    .unwrap_or_else(intent_classificator::ClassificationResult::fallback);
+                let response_body = serde_json::json!({
+                    "status": "classified",
+                    "category": fallback.category,
+                    "model": fallback.model,
+                    "tier": format!("{:?}", fallback.tier),
                 }).to_string();
-                return json_response(StatusCode::BAD_REQUEST, error_body);
+                log_classification(&state, &fallback, body_str, start, "ok");
+                return json_response(StatusCode::OK, response_body);
             }
         }
     } else {
-        let prompt = persistence::extract_last_user_message(&body_str);
+        let prompt = persistence::extract_last_user_message(body_str);
         state.classifier.as_ref()
             .map(|c| c.classify(&prompt))
             .unwrap_or_else(intent_classificator::ClassificationResult::fallback)
     };
-
-    log_classification(&state, &classification, &body_str, start, "ok");
 
     let client = match &state.http_client {
         Some(c) => c,
@@ -243,6 +260,7 @@ async fn completion_handler(
                 "model": classification.model,
                 "tier": format!("{:?}", classification.tier),
             }).to_string();
+            log_classification(&state, &classification, body_str, start, "ok");
             return json_response(StatusCode::OK, response_body);
         }
     };
@@ -258,6 +276,7 @@ async fn completion_handler(
                     "model": classification.model,
                     "tier": format!("{:?}", classification.tier),
                 }).to_string();
+                log_classification(&state, &classification, body_str, start, "ok");
                 return json_response(StatusCode::OK, response_body);
             }
         },
@@ -269,6 +288,7 @@ async fn completion_handler(
                 "model": classification.model,
                 "tier": format!("{:?}", classification.tier),
             }).to_string();
+            log_classification(&state, &classification, body_str, start, "ok");
             return json_response(StatusCode::OK, response_body);
         }
     };
@@ -279,6 +299,7 @@ async fn completion_handler(
             "status": 502,
             "message": "no endpoint configured",
         }).to_string();
+        log_classification(&state, &classification, body_str, start, "upstream_error");
         return json_response(StatusCode::BAD_GATEWAY, error_body);
     }
 
@@ -290,20 +311,24 @@ async fn completion_handler(
                 "status": 400,
                 "message": format!("invalid JSON body: {e}"),
             }).to_string();
+            log_classification(&state, &classification, body_str, start, "bad_request");
             return json_response(StatusCode::BAD_REQUEST, error_body);
         }
     };
+    let client_wants_stream = req_body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
     req_body["model"] = serde_json::Value::String(classification.model.clone());
     let modified_body = serde_json::to_vec(&req_body).unwrap_or_else(|_| body.to_vec());
 
     let auth_headers = intent_classificator::auth_headers_for(&classification.provider_type, &api_key);
 
-    let mut upstream_req = client.post(&classification.endpoint).body(modified_body);
+    let mut upstream_req = client.post(&classification.endpoint)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(modified_body);
     for (name, value) in &auth_headers {
         upstream_req = upstream_req.header(name.as_str(), value.as_str());
     }
 
-    let upstream_response = match upstream_req.send().await {
+    let mut upstream_response = match upstream_req.send().await {
         Ok(resp) => resp,
         Err(e) => {
             let error_body = serde_json::json!({
@@ -311,41 +336,189 @@ async fn completion_handler(
                 "status": 502,
                 "message": e.to_string(),
             }).to_string();
+            log_classification(&state, &classification, body_str, start, "upstream_error");
             return json_response(StatusCode::BAD_GATEWAY, error_body);
         }
     };
 
+    if client_wants_stream {
+        let upstream_status = upstream_response.status();
+        if !upstream_status.is_success() {
+            const MAX_SSE_ERROR_BODY: usize = 10 * 1024 * 1024; // 10 MB
+            let mut error_bytes: Vec<u8> = Vec::new();
+            let mut error_text = String::new();
+            loop {
+                match upstream_response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if error_bytes.len() + chunk.len() > MAX_SSE_ERROR_BODY {
+                            error_bytes.extend_from_slice(b"... (truncated)");
+                            break;
+                        }
+                        error_bytes.extend_from_slice(&chunk);
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+            error_text = String::from_utf8_lossy(&error_bytes)
+                .chars()
+                .take(512)
+                .collect::<String>()
+                .replace('\n', " ")
+                .replace('\r', " ");
+            let sse_error = format!("event: error\ndata: {}\n\n", error_text);
+            let mut resp = Response::new(Body::from(sse_error));
+            *resp.status_mut() = upstream_status;
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("text/event-stream"),
+            );
+            resp.headers_mut().insert(
+                header::CACHE_CONTROL,
+                header::HeaderValue::from_static("no-cache"),
+            );
+            log_classification(&state, &classification, body_str, start, "upstream_error");
+            return resp;
+        }
+
+        let byte_stream = upstream_response.bytes_stream();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(32);
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            let mut stream = byte_stream;
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    chunk = stream.next() => {
+                        match chunk {
+                            Some(Ok(bytes)) => { if tx.send(bytes).await.is_err() { break; } }
+                            Some(Err(e)) => {
+                                let sanitized = e.to_string().replace('\n', " ").replace('\r', " ");
+                                let _ = tx.send(Bytes::from(
+                                    format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", sanitized)
+                                )).await;
+                                break;
+                            }
+                            None => break,
+                        }
+                    }
+                    _ = interval.tick() => {
+                        if tx.send(Bytes::from_static(b": keepalive\n\n")).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let body = Body::from_stream(
+            tokio_stream::wrappers::ReceiverStream::new(rx)
+                .map(|bytes| Ok::<_, Infallible>(bytes)),
+        );
+
+        let mut resp = Response::new(body);
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("text/event-stream"),
+        );
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-cache"),
+        );
+        log_classification(&state, &classification, body_str, start, "ok");
+        return resp;
+    }
+
     let upstream_status = upstream_response.status();
-    let upstream_body = match upstream_response.text().await {
-        Ok(t) => t,
-        Err(e) => {
-            let error_body = serde_json::json!({
-                "error": "upstream_error",
-                "status": 502,
-                "message": e.to_string(),
-            }).to_string();
-            return json_response(StatusCode::BAD_GATEWAY, error_body);
+    const MAX_UPSTREAM_BODY: usize = 10 * 1024 * 1024; // 10 MB
+    let mut upstream_body_bytes: Vec<u8> = Vec::new();
+    let upstream_body = loop {
+        match upstream_response.chunk().await {
+            Ok(Some(chunk)) => {
+                if upstream_body_bytes.len() + chunk.len() > MAX_UPSTREAM_BODY {
+                    let error_body = serde_json::json!({
+                        "error": "upstream_error",
+                        "status": 502,
+                        "message": "upstream response too large",
+                    }).to_string();
+                    log_classification(&state, &classification, body_str, start, "upstream_error");
+                    return json_response(StatusCode::BAD_GATEWAY, error_body);
+                }
+                upstream_body_bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break String::from_utf8_lossy(&upstream_body_bytes).into_owned(),
+            Err(e) => {
+                let error_body = serde_json::json!({
+                    "error": "upstream_error",
+                    "status": 502,
+                    "message": e.to_string(),
+                }).to_string();
+                log_classification(&state, &classification, body_str, start, "upstream_error");
+                return json_response(StatusCode::BAD_GATEWAY, error_body);
+            }
         }
     };
 
     if !upstream_status.is_success() {
-        let upstream_body = if upstream_body.len() > 1000 {
-            format!("{}... (truncated)", &upstream_body[..1000])
-        } else {
-            upstream_body
-        };
+        let truncated: String = upstream_body.chars().take(512).collect();
+        if upstream_body.chars().count() > 512 {
+            eprintln!(
+                "WARN completion_handler: upstream error body truncated from {} to 512 chars; full body: {}",
+                upstream_body.chars().count(),
+                upstream_body
+            );
+        }
+        let upstream_body = truncated;
         let error_body = serde_json::json!({
             "error": "upstream_error",
             "status": upstream_status.as_u16(),
             "message": upstream_body,
         }).to_string();
+        log_classification(&state, &classification, body_str, start, "upstream_error");
         return json_response(
             StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
             error_body,
         );
     }
 
-    json_response(StatusCode::OK, upstream_body)
+    log_classification(&state, &classification, body_str, start, "ok");
+    json_response(StatusCode::OK, sanitize_json_string_control_chars(&upstream_body))
+}
+
+fn sanitize_json_string_control_chars(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if !in_string {
+            result.push(ch);
+            if ch == '"' {
+                in_string = true;
+            }
+        } else {
+            match ch {
+                '\\' => {
+                    result.push(ch);
+                    if let Some(next) = chars.next() {
+                        result.push(next);
+                    }
+                }
+                '"' => {
+                    result.push(ch);
+                    in_string = false;
+                }
+                '\n' => result.push_str("\\n"),
+                '\r' => result.push_str("\\r"),
+                '\t' => result.push_str("\\t"),
+                c if (c as u32) < 0x20 => {
+                    result.push_str(&format!("\\u{:04x}", c as u32));
+                }
+                _ => result.push(ch),
+            }
+        }
+    }
+    result
 }
 
 /// Classify handler: extracts prompt, classifies intent, optionally logs a
@@ -1153,6 +1326,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_upstream_request_includes_content_type_json() {
+        let env = "TEST_UPSTREAM_CT";
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header("Content-Type", "application/json");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body("ok");
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        std::env::remove_var(env);
+    }
+
+    #[tokio::test]
     async fn test_upstream_unreachable_returns_502() {
         let env = "TEST_UPSTREAM_DEAD";
         std::env::set_var(env, "sk-test");
@@ -1222,6 +1427,274 @@ mod tests {
         );
         mock.assert();
         std::env::remove_var(env);
+    }
+
+    // ── SSE streaming tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_streaming_handler_returns_sse_content_type() {
+        let env = "TEST_STREAM_CT";
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env);
+        let sse_body = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n";
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .expect("response should have Content-Type");
+        assert_eq!(content_type, "text/event-stream");
+        let cache_control = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .expect("response should have Cache-Control");
+        assert_eq!(cache_control, "no-cache");
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.contains("data:"), "expected SSE data, got: {body}");
+        assert!(body.contains("[DONE]"), "expected [DONE] marker, got: {body}");
+        mock.assert();
+        std::env::remove_var(env);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_handler_forwards_upstream_bytes() {
+        let env = "TEST_STREAM_FWD";
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env);
+        let sse_chunks = "data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\ndata: [DONE]\n\n";
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_chunks);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.contains(r#"content":"A""#), "expected chunk A, got: {body}");
+        assert!(body.contains(r#"content":"B""#), "expected chunk B, got: {body}");
+        assert!(body.contains("[DONE]"), "expected [DONE] marker, got: {body}");
+        mock.assert();
+        std::env::remove_var(env);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_handler_non_2xx_returns_sse_error_event() {
+        let env = "TEST_STREAM_ERR";
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"overloaded"}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(
+            body.starts_with("event: error"),
+            "expected SSE error event, got: {body}"
+        );
+        mock.assert();
+        std::env::remove_var(env);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_true_returns_sse_content() {
+        let env = "TEST_STREAM_TSSE";
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body("data: hello\n\n");
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(content_type, "text/event-stream", "expected SSE for stream:true");
+        mock.assert();
+        std::env::remove_var(env);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_false_returns_buffered_json() {
+        let env = "TEST_STREAM_FJSON";
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"buffered"}}]}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":false}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(content_type, "application/json", "expected JSON for stream:false");
+        mock.assert();
+        std::env::remove_var(env);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_absent_returns_buffered_json() {
+        let env = "TEST_STREAM_AJSON";
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"default"}}]}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(content_type, "application/json", "expected JSON for absent stream field");
+        mock.assert();
+        std::env::remove_var(env);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_degradation_no_client() {
+        // test_app() has http_client: None → classification-only degradation path
+        // Even with stream: true, should return classification JSON
+        let app = test_app_with_classifier();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.contains(r#""status":"classified""#), "expected classification JSON, got: {body}");
     }
 
     // ── Latency page ─────────────────────────────────────────────────────────
@@ -1391,4 +1864,3 @@ mod tests {
         );
     }
 }
-

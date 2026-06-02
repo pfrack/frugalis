@@ -6,6 +6,8 @@ updated: 2026-06-02
 user: pfrack
 tags: [upstream-routing, reqwest, http-client, proxy, change-2-of-4]
 ---
+# Second implementation review: see reviews/impl-review-2026-06-02.md (2026-06-02). Found 9 findings (2 critical, 4 warnings, 3 observations) caused by regressions from f19fc07 (Dashboard rewrite) and 9fb9ce3 (SSE streaming proxy). All fixed in triage; 89/89 tests pass.
+
 # reqwest-upstream-routing
 
 ## What
