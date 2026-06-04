@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use axum::{
     extract::{Query, State},
-    middleware,
     response::IntoResponse,
     routing::get,
     Router,
@@ -311,8 +310,5 @@ pub fn routes(auth_config: Arc<auth::AuthConfig>) -> Router<Arc<AppState>> {
         .route("/inferences", get(inferences_handler))
         .route("/latency", get(latency_handler))
         .route("/savings", get(savings_handler))
-        .layer(middleware::from_fn_with_state(
-            auth_config,
-            auth::require_dashboard_basic,
-        ))
+        .route_layer(auth::dashboard_auth_layer(auth_config))
 }

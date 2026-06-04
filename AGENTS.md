@@ -11,10 +11,11 @@ Set these environment variables: `PROXY_API_BEARER_TOKEN`, `DASHBOARD_BASIC_USER
 - `cargo build --release` — compile optimized binary for deployment
 - `cargo test auth` — run authentication validation tests
 - `cargo test routes_auth` — run route authorization tests
-- `cargo test` — run all tests
+- `cargo test` — run all fast unit/integration tests (excludes slow tests)
+- `cargo test slow_tests` — run slow tests (e.g., keepalive with real delays)
 - `RUST_LOG=info cargo run` — run locally with logging
 
-Tests are co-located in source modules using `#[cfg(test)]` blocks (see [src/main.rs](src/main.rs) and [src/auth.rs](src/auth.rs) for examples).
+Tests are organized in two groups in `src/main.rs`: `mod tests` (fast unit/integration tests, run with `cargo test`) and `mod slow_tests` (tests requiring delays or slow mocks, run with `cargo test slow_tests`). Keepalive interval is configurable via `KEEPALIVE_INTERVAL_SECS` env var (default: 15s).
 
 ## Naming & File Layout
 

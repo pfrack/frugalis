@@ -94,9 +94,9 @@ struct NegativeMeta {
 
 // ── Defaults ──
 
-const DEFAULT_MODEL: &str = "gpt-4o-mini";
-const DEFAULT_MODEL_COMPLEX: &str = "claude-3.5-sonnet";
-const DEFAULT_MODEL_READING: &str = "deepseek-chat";
+const DEFAULT_MODEL: &str = "meta/llama-3.1-8b-instruct";
+const DEFAULT_MODEL_COMPLEX: &str = "meta/llama-3.3-70b-instruct";
+const DEFAULT_MODEL_READING: &str = "meta/llama-3.1-70b-instruct";
 const DEFAULT_ENDPOINT: &str = "";
 
 // ── Category Name Constants ──
@@ -219,53 +219,57 @@ fn env_or_default(key: &str, default: &str) -> String {
 // ── Hardcoded routing defaults ──
 
 fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
+    let endpoint = env_or_default(
+        "NVIDIA_ENDPOINT",
+        "https://integrate.api.nvidia.com/v1/chat/completions",
+    );
     let mut routing = HashMap::new();
     routing.insert(
         CAT_COMPLEX_REASONING.to_string(),
         RouteEntry {
             model: env_or_default("DEFAULT_MODEL_COMPLEX", DEFAULT_MODEL_COMPLEX),
-            endpoint: String::new(),
+            endpoint: endpoint.clone(),
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
+            provider_type: "nvidia_nim".to_string(),
+            api_key_env: Some("NVIDIA_API_KEY".to_string()),
         },
     );
     routing.insert(
         CAT_FILE_READING.to_string(),
         RouteEntry {
             model: env_or_default("DEFAULT_MODEL_READING", DEFAULT_MODEL_READING),
-            endpoint: String::new(),
+            endpoint: endpoint.clone(),
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
+            provider_type: "nvidia_nim".to_string(),
+            api_key_env: Some("NVIDIA_API_KEY".to_string()),
         },
     );
     routing.insert(
         CAT_SYNTAX_FIX.to_string(),
         RouteEntry {
             model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
-            endpoint: String::new(),
+            endpoint: endpoint.clone(),
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
+            provider_type: "nvidia_nim".to_string(),
+            api_key_env: Some("NVIDIA_API_KEY".to_string()),
         },
     );
     routing.insert(
         CAT_CASUAL.to_string(),
         RouteEntry {
             model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
-            endpoint: String::new(),
+            endpoint: endpoint.clone(),
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
+            provider_type: "nvidia_nim".to_string(),
+            api_key_env: Some("NVIDIA_API_KEY".to_string()),
         },
     );
     let fallback = RouteEntry {
         model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
-        endpoint: String::new(),
+        endpoint,
         cost_per_1m_input_tokens: None,
-        provider_type: String::new(),
-        api_key_env: None,
+        provider_type: "nvidia_nim".to_string(),
+        api_key_env: Some("NVIDIA_API_KEY".to_string()),
     };
     (routing, fallback)
 }

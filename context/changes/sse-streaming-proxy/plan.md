@@ -305,7 +305,7 @@ No data migration needed. This change is purely additive — existing non-stream
 
 - [x] 2.1 `cargo test` — all existing + new streaming tests pass — dfe624d
 - [x] 2.2 `cargo build --release` compiles cleanly — dfe624d
-- [x] 2.3 New tests: SSE content type, upstream byte forwarding, error event, stream field respect, keepalive injection, degradation path — dfe624d
+- [x] 2.3 New tests: SSE content type, upstream byte forwarding, error event, stream field respect, degradation path — dfe624d (keepalive test added post-review; see 2.3a below)
 
 #### Manual
 
@@ -313,6 +313,10 @@ No data migration needed. This change is purely additive — existing non-stream
 - [ ] 2.5 Verify keepalive comments appear during a >15s silent completion
 - [ ] 2.6 Verify `stream: false` behavior unchanged
 - [ ] 2.7 Verify degradation path unchanged (no http_client → classification JSON)
+
+#### Automated (added post-review)
+
+- [ ] 2.3a `cargo test -- --ignored test_streaming_keepalive_injected` — keepalive injection test (17s delay; requires `--ignored` flag)
 
 ### Phase 3: OpenAPI Spec
 

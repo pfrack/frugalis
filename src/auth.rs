@@ -2,11 +2,9 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::State,
-    http::{HeaderMap, Request, Response, StatusCode, header},
-    middleware::Next,
+    http::{Request, Response, StatusCode, header},
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use tower_http::auth::{AsyncAuthorizeRequest, AsyncRequireAuthorizationLayer};
 
 pub struct AuthConfig {
     proxy_api_bearer_token: String,
@@ -27,7 +25,7 @@ impl AuthConfig {
         })
     }
 
-    pub fn validate_proxy_bearer_header(&self, auth_header: &str) -> bool {
+    fn validate_proxy_bearer_header(&self, auth_header: &str) -> bool {
         let Some(token) = parse_bearer_token(auth_header) else {
             return false;
         };
@@ -35,7 +33,7 @@ impl AuthConfig {
         constant_time_eq_str(token, &self.proxy_api_bearer_token)
     }
 
-    pub fn validate_dashboard_basic_header(&self, auth_header: &str) -> bool {
+    fn validate_dashboard_basic_header(&self, auth_header: &str) -> bool {
         let Some((user, password)) = parse_basic_credentials(auth_header) else {
             return false;
         };
@@ -58,41 +56,69 @@ impl AuthConfig {
     }
 }
 
-pub async fn require_proxy_bearer(
-    State(config): State<Arc<AuthConfig>>,
-    headers: HeaderMap,
-    request: Request<Body>,
-    next: Next,
-) -> Response<Body> {
-    let is_authorized = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| config.validate_proxy_bearer_header(value));
+// ── AsyncAuthorizeRequest implementations ──────────────────────────────────
 
-    if !is_authorized {
-        return api_unauthorized_response("invalid or missing bearer token");
-    }
-
-    next.run(request).await
+#[derive(Clone)]
+pub struct ProxyBearerAuth {
+    config: Arc<AuthConfig>,
 }
 
-pub async fn require_dashboard_basic(
-    State(config): State<Arc<AuthConfig>>,
-    headers: HeaderMap,
-    request: Request<Body>,
-    next: Next,
-) -> Response<Body> {
-    let is_authorized = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| config.validate_dashboard_basic_header(value));
+impl AsyncAuthorizeRequest<Body> for ProxyBearerAuth {
+    type RequestBody = Body;
+    type ResponseBody = Body;
+    type Future = std::future::Ready<Result<Request<Self::RequestBody>, Response<Self::ResponseBody>>>;
 
-    if !is_authorized {
-        return dashboard_unauthorized_response();
+    fn authorize(&mut self, request: Request<Body>) -> Self::Future {
+        let authorized = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| self.config.validate_proxy_bearer_header(value));
+
+        if !authorized {
+            return std::future::ready(Err(api_unauthorized_response("invalid or missing bearer token")));
+        }
+
+        std::future::ready(Ok(request))
     }
-
-    next.run(request).await
 }
+
+#[derive(Clone)]
+pub struct DashboardBasicAuth {
+    config: Arc<AuthConfig>,
+}
+
+impl AsyncAuthorizeRequest<Body> for DashboardBasicAuth {
+    type RequestBody = Body;
+    type ResponseBody = Body;
+    type Future = std::future::Ready<Result<Request<Self::RequestBody>, Response<Self::ResponseBody>>>;
+
+    fn authorize(&mut self, request: Request<Body>) -> Self::Future {
+        let authorized = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| self.config.validate_dashboard_basic_header(value));
+
+        if !authorized {
+            return std::future::ready(Err(dashboard_unauthorized_response()));
+        }
+
+        std::future::ready(Ok(request))
+    }
+}
+
+// ── Layer builders ─────────────────────────────────────────────────────────
+
+pub fn proxy_auth_layer(config: Arc<AuthConfig>) -> AsyncRequireAuthorizationLayer<ProxyBearerAuth> {
+    AsyncRequireAuthorizationLayer::new(ProxyBearerAuth { config })
+}
+
+pub fn dashboard_auth_layer(config: Arc<AuthConfig>) -> AsyncRequireAuthorizationLayer<DashboardBasicAuth> {
+    AsyncRequireAuthorizationLayer::new(DashboardBasicAuth { config })
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 fn required_env(key: &str) -> Result<String, String> {
     match std::env::var(key) {
@@ -112,6 +138,8 @@ pub fn parse_bearer_token(auth_header: &str) -> Option<&str> {
 }
 
 pub fn parse_basic_credentials(auth_header: &str) -> Option<(String, String)> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
     let encoded = auth_header.strip_prefix("Basic ")?;
     let decoded = STANDARD.decode(encoded).ok()?;
     let decoded = String::from_utf8(decoded).ok()?;

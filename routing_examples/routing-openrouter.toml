@@ -1,0 +1,32 @@
+# Routing configuration using OpenRouter
+# Copy to routing.toml and set OPENROUTER_API_KEY env var
+
+[FILE_READING]
+model = "deepseek/deepseek-chat"
+provider_type = "openai_compatible"
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+api_key_env = "OPENROUTER_API_KEY"
+
+[COMPLEX_REASONING]
+model = "anthropic/claude-3.5-sonnet"
+provider_type = "openai_compatible"
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+api_key_env = "OPENROUTER_API_KEY"
+
+[SYNTAX_FIX]
+model = "openai/gpt-4o-mini"
+provider_type = "openai_compatible"
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+api_key_env = "OPENROUTER_API_KEY"
+
+[CASUAL]
+model = "meta-llama/llama-3.1-8b-instruct"
+provider_type = "openai_compatible"
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+api_key_env = "OPENROUTER_API_KEY"
+
+[FALLBACK]
+model = "openai/gpt-4o-mini"
+provider_type = "openai_compatible"
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+api_key_env = "OPENROUTER_API_KEY"

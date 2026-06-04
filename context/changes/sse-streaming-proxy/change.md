@@ -1,8 +1,8 @@
 ---
 id: sse-streaming-proxy
-status: implemented
+status: impl_reviewed
 created: 2026-06-01
-updated: 2026-06-02
+updated: 2026-06-06
 user: pfrack
 tags: [upstream-routing, sse-streaming, keepalive, axum, change-4-of-4]
 ---

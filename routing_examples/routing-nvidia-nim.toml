@@ -1,0 +1,27 @@
+# NVIDIA NIM Free Model Routing Configuration
+# This file configures the intent classifier to use only free NVIDIA NIM models
+
+# FILE_READING - Use NVIDIA's free model for file reading operations
+[FILE_READING]
+model = "nvidia/llama-3.1-nemotron-70b-instruct"
+provider_type = "nvidia_nim"
+
+# COMPLEX_REASONING - Use NVIDIA's free model for complex reasoning
+[COMPLEX_REASONING]
+model = "nvidia/llama-3.1-nemotron-70b-instruct"
+provider_type = "nvidia_nim"
+
+# SYNTAX_FIX - Use NVIDIA's free model for syntax fixes
+[SYNTAX_FIX]
+model = "nvidia/llama-3.1-nemotron-70b-instruct"
+provider_type = "nvidia_nim"
+
+# CASUAL - Use NVIDIA's free model for casual interactions
+[CASUAL]
+model = "nvidia/llama-3.1-nemotron-70b-instruct"
+provider_type = "nvidia_nim"
+
+# FALLBACK - Use NVIDIA's free model as fallback
+[FALLBACK]
+model = "nvidia/llama-3.1-nemotron-70b-instruct"
+provider_type = "nvidia_nim"

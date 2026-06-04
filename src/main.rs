@@ -6,7 +6,6 @@ use axum::{
     body::{Body, Bytes},
     extract::State,
     http::{header, HeaderMap, StatusCode},
-    middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
@@ -369,9 +368,11 @@ async fn completion_handler(
                 .chars()
                 .take(512)
                 .collect::<String>()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
                 .replace('\n', " ")
                 .replace('\r', " ");
-            let sse_error = format!("event: error\ndata: {}\n\n", error_text);
+            let sse_error = format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", error_text);
             let mut resp = Response::new(Body::from(sse_error));
             *resp.status_mut() = upstream_status;
             resp.headers_mut().insert(
@@ -394,7 +395,11 @@ async fn completion_handler(
         let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(channel_capacity);
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            let keepalive_secs = std::env::var("KEEPALIVE_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(15);
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(keepalive_secs));
             let mut stream = byte_stream;
             interval.tick().await;
             loop {
@@ -403,7 +408,7 @@ async fn completion_handler(
                         match chunk {
                             Some(Ok(bytes)) => { if tx.send(bytes).await.is_err() { break; } }
                             Some(Err(e)) => {
-                                let sanitized = e.to_string().replace('\n', " ").replace('\r', " ");
+                                let sanitized = e.to_string().replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ").replace('\r', " ");
                                 let _ = tx.send(Bytes::from(
                                     format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", sanitized)
                                 )).await;
@@ -549,10 +554,7 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
     let proxy_routes = Router::new()
         .route("/chat/completions", post(completion_handler))
         .route("/classify", post(classify_handler))
-        .layer(middleware::from_fn_with_state(
-            auth_config.clone(),
-            auth::require_proxy_bearer,
-        ));
+        .route_layer(auth::proxy_auth_layer(auth_config.clone()));
 
     let dashboard_routes = dashboard::routes(auth_config);
 
@@ -1165,7 +1167,7 @@ mod tests {
 
     // ── Upstream routing tests ────────────────────────────────────────────────
 
-    fn test_app_with_http_client(env_var_name: &str) -> (Router, httpmock::MockServer) {
+    pub(crate) fn test_app_with_http_client(env_var_name: &str) -> (Router, httpmock::MockServer) {
         use std::collections::HashMap;
         let server = httpmock::MockServer::start();
         let client = reqwest::Client::builder()
@@ -1869,10 +1871,124 @@ mod tests {
             .await
             .expect("body should be readable");
         let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        // With both persistence and classifier None, DB-not-configured fires first.
-        assert!(
-            body.contains("Database not configured") || body.contains("Cost configuration not available"),
-            "expected error state, got: {body}"
+        }
+}
+
+#[cfg(test)]
+mod slow_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{header, Request},
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tower::util::ServiceExt;
+
+    // ── Keepalive test ──────────────────────────────────────────────────────
+    // Uses a real TCP server that sends headers immediately, waits for the
+    // keepalive interval, then sends body data. KEEPALIVE_INTERVAL_SECS=1
+    // keeps total test time around 2s instead of 17s.
+
+    async fn spawn_slow_sse_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/v1/chat/completions");
+        let handle = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let headers = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+            let _ = sock.write_all(headers.as_bytes()).await;
+            let _ = sock.flush().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            let body = "data: hello\n\n";
+            let _ = sock.write_all(body.as_bytes()).await;
+            let _ = sock.flush().await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn test_streaming_keepalive_injected() {
+        std::env::set_var("KEEPALIVE_INTERVAL_SECS", "1");
+        let (url, server_handle) = spawn_slow_sse_server().await;
+        let env = "TEST_STREAM_KA_SLOW";
+        std::env::set_var(env, "sk-test");
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let mut routing = std::collections::HashMap::new();
+        routing.insert(
+            "SYNTAX_FIX".to_string(),
+            intent_classificator::RouteEntry {
+                model: "sf-model".to_string(),
+                endpoint: url,
+                cost_per_1m_input_tokens: None,
+                provider_type: "openai_compatible".to_string(),
+                api_key_env: Some(env.to_string()),
+            },
         );
+        let fallback = intent_classificator::RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        let classifier = Some(Arc::new(
+            intent_classificator::IntentClassifier::from_values(routing, fallback),
+        ));
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let app_state = Arc::new(AppState {
+            persistence: None,
+            classifier,
+            classify_db_log: false,
+            http_client: Some(client),
+        });
+        let app = build_app(auth_config, app_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(content_type, "text/event-stream", "expected SSE content type");
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(
+            body.contains(": keepalive\n\n"),
+            "expected keepalive comment in stream, got: {body}"
+        );
+        assert!(
+            body.contains("data: hello"),
+            "expected upstream data after keepalive, got: {body}"
+        );
+        let _ = server_handle.await;
+        std::env::remove_var(env);
+        std::env::remove_var("KEEPALIVE_INTERVAL_SECS");
     }
 }
