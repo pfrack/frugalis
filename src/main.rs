@@ -12,7 +12,7 @@ use axum::{
     Router,
 };
 use tokio_stream::StreamExt;
-use tower_http::{services::ServeDir, limit::RequestBodyLimitLayer, cors::CorsLayer, trace::TraceLayer};
+use tower_http::{limit::RequestBodyLimitLayer, cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use tracing::{debug, error, info, warn};
 
@@ -623,7 +623,6 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
 
     Router::new()
         .route("/health", get(health))
-        .nest_service("/static", ServeDir::new("static"))
         .nest("/v1", proxy_routes)
         .nest("/dashboard", dashboard_routes)
         .layer(cors_layer)

@@ -41,6 +41,7 @@ Manual criteria (2.4 browser, 2.5 curl 401) were confirmed in the prior review.
 - **Location**: templates/dashboard/index.html:131 (and similar patterns in sibling templates)
 - **Detail**: `{{ record.prompt_snippet|e|truncate(60) }}` applies Askama's `|e` (HTML-escape) BEFORE `|truncate(60)`. If the raw string contains `<`, `>`, `&`, or `'` near position 60, the escape filter expands them to `&lt;`, `&gt;`, `&amp;`, `&#x27;` — and truncate then cuts the entity in half, producing garbled display like `&lt` or `&am`. Not an XSS vector (escaping still happens), but creates a user-visible display bug on truncated prompts containing special characters.
 - **Fix**: Swap filter order to `|truncate(60)|e` — truncate the raw string first (60 chars of UTF-8), then escape the result. This guarantees truncation happens on character boundaries before entity expansion.
+- **Decision**: FIXED — swapped `|e|truncate(N)` to `|truncate(N)|e` in index.html:131 and inferences.html:62
 
 ### F2 — Naming inconsistency: DashboardIndex vs XxxTemplate siblings
 - **Severity**: ⚠️ WARNING
@@ -49,6 +50,7 @@ Manual criteria (2.4 browser, 2.5 curl 401) were confirmed in the prior review.
 - **Location**: src/dashboard.rs:75
 - **Detail**: The index page struct is named `DashboardIndex` while all sibling page structs use the `XxxTemplate` suffix (`InferencesTemplate`, `LatencyTemplate`, `SavingsTemplate` — see dashboard.rs:89, 97, 105). Both conventions are defensible, but mixing them within 30 lines of the same file creates confusion about which convention governs.
 - **Fix**: Rename to `DashboardTemplate` to match siblings, or rename siblings to drop the suffix (pick one and apply consistently). The template path `dashboard/index.html` is defined independently so the rename is purely a code-level change.
+- **Decision**: FIXED — renamed `DashboardIndex` → `DashboardTemplate` (3 occurrences in dashboard.rs)
 
 ### OBSERVATIONS
 
@@ -59,6 +61,7 @@ Manual criteria (2.4 browser, 2.5 curl 401) were confirmed in the prior review.
 - **Location**: N/A (plan document)
 - **Detail**: The original plan was implemented correctly at da9f084 (zero-field `DashboardIndex` struct in `src/main.rs`, single handler, single test, "coming soon" template). Subsequent changes (f19fc07 Dashboard rewrite, inference log inspection, cost savings, latency summary, dashboard router refactor) moved the struct/handler/routes into a new `src/dashboard.rs` module, added 3 additional pages with a full nav router (violating the plan's "No multiple dashboard sub-pages or navigation router" guardrail), injected JS theme toggle (violating "No JavaScript / client-side interactivity"), and added DB queries + metrics display (violating "No querying or displaying inference records" and "No latency summaries or metrics"). The plan's "What We're NOT Doing" section and "Desired End State" now contradict HEAD. The test coverage was also substantially expanded (13 additional tests beyond the one planned). All of these expansions were intentional and part of later roadmap slices — they are not implementation mistakes. The plan document simply wasn't updated to reflect the cumulative scope.
 - **Fix**: Either archive this plan (since F-03 is done and the scaffold served its purpose as a prerequisite for S-02/S-03) or add an epilogue section documenting how later slices built on the scaffold.
+- **Decision**: TO ARCHIVE — user chose to archive the plan (pending /10x-archive after triage)
 
 ### F4 — /static served without authentication
 - **Severity**: ℹ️ OBSERVATION
@@ -67,6 +70,7 @@ Manual criteria (2.4 browser, 2.5 curl 401) were confirmed in the prior review.
 - **Location**: src/main.rs:628
 - **Detail**: The dashboard CSS (`static/dashboard.css`) is served via `ServeDir` on `/static` outside the dashboard auth layer. Currently harmless — CSS contains no secrets. However, any static asset added to `static/` in the future would also be publicly accessible by default, which could accidentally expose internal assets.
 - **Fix**: Consider nesting `ServeDir` inside the authenticated dashboard router (e.g., at `/dashboard/static/`) or documenting `/static` as intentionally public.
+- **Decision**: FIXED — moved `ServeDir("static")` into dashboard routes at `/dashboard/static`, removed public `/static` route
 
 ### F5 — |safe filter on nav icons is safe now but creates future risk
 - **Severity**: ℹ️ OBSERVATION
@@ -75,6 +79,7 @@ Manual criteria (2.4 browser, 2.5 curl 401) were confirmed in the prior review.
 - **Location**: templates/base.html:30
 - **Detail**: `{{ item.icon|safe }}` bypasses HTML escaping for sidebar navigation icons. Currently safe because icons are compile-time `&str` constants defined in `src/dashboard.rs:31-34`. If `NavPage.icon` ever becomes user-configurable or sourced from a database, this becomes an XSS injection point.
 - **Fix**: Add a `// Safety` doc comment on the `NavPage` struct documenting that `icon` must be a trusted compile-time constant. Alternatively, consider a newtype wrapper that enforces the trust boundary at the type level.
+- **Decision**: FIXED — added doc comment with `# Safety` section on NavPage struct
 
 ## Summary
 

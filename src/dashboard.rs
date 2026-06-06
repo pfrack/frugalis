@@ -5,12 +5,19 @@ use axum::{
     routing::get,
     Router,
 };
+use tower_http::services::ServeDir;
 use askama::Template;
 use askama_web::WebTemplate;
 use std::collections::HashMap;
 
 use crate::{auth, persistence, AppState};
 
+/// Navigation page entry registered in `PAGES`.
+///
+/// # Safety
+/// The `icon` field must contain a trusted SVG string (compile-time constant).
+/// It is rendered with `|safe` in `base.html` — bypassing HTML escaping.
+/// Never source `icon` from user input, a database, or any untrusted origin.
 pub struct NavPage {
     pub path: &'static str,
     pub label: &'static str,
@@ -306,5 +313,6 @@ pub fn routes(auth_config: Arc<auth::AuthConfig>) -> Router<Arc<AppState>> {
         .route("/inferences", get(inferences_handler))
         .route("/latency", get(latency_handler))
         .route("/savings", get(savings_handler))
+        .nest_service("/static", ServeDir::new("static"))
         .route_layer(auth::dashboard_auth_layer(auth_config))
 }
