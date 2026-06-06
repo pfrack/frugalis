@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::panic;
 use std::sync::Arc;
@@ -5,7 +6,7 @@ use std::sync::Arc;
 use axum::{
     body::{Body, Bytes},
     extract::State,
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
@@ -74,16 +75,24 @@ async fn main() {
     let (classifier, routing, model_costs, baseline_model) = match intent_classificator::RegexClassifier::from_env() {
         Ok(regex_classifier) => {
             info!("Intent classifier initialized");
-            let routing = Arc::new(regex_classifier.routing.clone());
             let model_costs = regex_classifier.model_costs.clone();
             let baseline_model = regex_classifier.baseline_model.clone();
+            // Build classifier chain; currently only one backend (RegexClassifier)
             let chain = intent_classificator::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
             let classifier = Arc::new(chain);
+            // Merge routing tables from all backends (currently just one)
+            let mut merged_routing = HashMap::new();
+            for backend in classifier.backends().iter() {
+                if let Some(r) = backend.get_routing() {
+                    merged_routing.extend(r.clone());
+                }
+            }
+            let routing = Arc::new(merged_routing);
             (Some(classifier), routing, model_costs, baseline_model)
         }
         Err(e) => {
             warn!("intent classification disabled: {e}");
-            (None, Arc::new(std::collections::HashMap::new()), intent_classificator::ModelCosts::empty(), String::new())
+            (None, Arc::new(HashMap::new()), intent_classificator::ModelCosts::empty(), String::new())
         }
     };
     let classify_db_log = std::env::var("CLASSIFY_DB_LOG")
@@ -177,7 +186,10 @@ fn classify_and_log(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !content_type.starts_with("application/json") {
-        return json_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected application/json".to_string());
+        return json_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            r#"{"error":"bad_request","status":415,"message":"expected application/json"}"#.to_string()
+        );
     }
 
     let prompt = persistence::extract_last_user_message(body_str);
@@ -226,7 +238,10 @@ async fn completion_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !content_type.starts_with("application/json") {
-        return json_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected application/json".to_string());
+        return json_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            r#"{"error":"bad_request","status":415,"message":"expected application/json"}"#.to_string()
+        );
     }
 
     let body_str = match std::str::from_utf8(&body) {
@@ -583,12 +598,35 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
 
     let dashboard_routes = dashboard::routes(auth_config);
 
+    // Build CORS layer from ALLOWED_ORIGINS env (comma-separated). If empty, no CORS headers (secure default).
+    let allowed_origin_headers: Vec<HeaderValue> = std::env::var("ALLOWED_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .filter_map(|s| header::HeaderValue::from_str(s.trim()).ok())
+        .collect();
+
+    let cors_layer = if allowed_origin_headers.is_empty() {
+        CorsLayer::new()
+    } else {
+        let mut cors = CorsLayer::new();
+        for origin in allowed_origin_headers {
+            cors = cors.allow_origin(origin);
+        }
+        cors.allow_methods([Method::GET, Method::POST])
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::ACCEPT,
+            ])
+    };
+
     Router::new()
         .route("/health", get(health))
         .nest_service("/static", ServeDir::new("static"))
         .nest("/v1", proxy_routes)
         .nest("/dashboard", dashboard_routes)
-        .layer(CorsLayer::permissive())
+        .layer(cors_layer)
         .layer(TraceLayer::new_for_http())
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .with_state(app_state)
@@ -602,6 +640,36 @@ mod tests {
         http::{header, Request},
     };
     use tower::util::ServiceExt;
+
+    /// Build an `AppState` from a `RegexClassifier` and optional HTTP client.
+    /// Mergeroutes from all classifier backends.
+    fn make_test_app_state(
+        classifier: intent_classificator::RegexClassifier,
+        http_client: Option<reqwest::Client>,
+    ) -> Arc<AppState> {
+        let model_costs = classifier.model_costs.clone();
+        let baseline_model = classifier.baseline_model.clone();
+        let classifier_chain = intent_classificator::ClassifierChain::new(vec![Arc::new(classifier)]);
+        let classifier_arc = Some(Arc::new(classifier_chain));
+        let mut merged_routing = std::collections::HashMap::new();
+        if let Some(cls) = classifier_arc.as_ref() {
+            for backend in cls.backends().iter() {
+                if let Some(r) = backend.get_routing() {
+                    merged_routing.extend(r.clone());
+                }
+            }
+        }
+        let routing = Arc::new(merged_routing);
+        Arc::new(AppState {
+            persistence: None,
+            classifier: classifier_arc,
+            routing,
+            model_costs,
+            baseline_model,
+            classify_db_log: false,
+            http_client,
+        })
+    }
 
     fn test_app() -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
@@ -660,19 +728,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier = intent_classificator::RegexClassifier::from_values(routing, fallback);
-        let routing_for_state = Arc::new(regex_classifier.routing.clone());
-        let model_costs = regex_classifier.model_costs.clone();
-        let baseline_model = regex_classifier.baseline_model.clone();
-        let classifier = Some(Arc::new(intent_classificator::ClassifierChain::new(vec![Arc::new(regex_classifier)])));
-        let app_state = Arc::new(AppState {
-            persistence: None,
-            classifier,
-            routing: routing_for_state,
-            model_costs,
-            baseline_model,
-            classify_db_log: false,
-            http_client: None,
-        });
+        let app_state = make_test_app_state(regex_classifier, None);
         build_app(auth_config, app_state)
     }
 
@@ -782,19 +838,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier = intent_classificator::RegexClassifier::from_values(routing, fallback);
-        let routing_for_state = Arc::new(regex_classifier.routing.clone());
-        let model_costs = regex_classifier.model_costs.clone();
-        let baseline_model = regex_classifier.baseline_model.clone();
-        let classifier = Some(Arc::new(intent_classificator::ClassifierChain::new(vec![Arc::new(regex_classifier)])));
-        let app_state = Arc::new(AppState {
-            persistence: None,
-            classifier,
-            routing: routing_for_state,
-            model_costs,
-            baseline_model,
-            classify_db_log: false,
-            http_client: None,
-        });
+        let app_state = make_test_app_state(regex_classifier, None);
         build_app(auth_config, app_state)
     }
 
@@ -1252,20 +1296,9 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier = intent_classificator::RegexClassifier::from_values(routing, fallback);
-        let routing_for_state = Arc::new(regex_classifier.routing.clone());
-        let model_costs = regex_classifier.model_costs.clone();
-        let baseline_model = regex_classifier.baseline_model.clone();
-        let classifier = Some(Arc::new(intent_classificator::ClassifierChain::new(vec![Arc::new(regex_classifier)])));
-        let app_state = Arc::new(AppState {
-            persistence: None,
-            classifier,
-            routing: routing_for_state,
-            model_costs,
-            baseline_model,
-            classify_db_log: false,
-            http_client: Some(client),
-        });
-        (build_app(auth_config, app_state), server)
+        let app_state = make_test_app_state(regex_classifier, Some(client));
+        let app = build_app(auth_config, app_state);
+        (app, server)
     }
 
     fn test_app_with_dead_endpoint(env_var_name: &str) -> Router {
@@ -1309,19 +1342,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier = intent_classificator::RegexClassifier::from_values(routing, fallback);
-        let routing_for_state = Arc::new(regex_classifier.routing.clone());
-        let model_costs = regex_classifier.model_costs.clone();
-        let baseline_model = regex_classifier.baseline_model.clone();
-        let classifier = Some(Arc::new(intent_classificator::ClassifierChain::new(vec![Arc::new(regex_classifier)])));
-        let app_state = Arc::new(AppState {
-            persistence: None,
-            classifier,
-            routing: routing_for_state,
-            model_costs,
-            baseline_model,
-            classify_db_log: false,
-            http_client: Some(client),
-        });
+        let app_state = make_test_app_state(regex_classifier, Some(client));
         build_app(auth_config, app_state)
     }
 
@@ -1998,10 +2019,20 @@ mod slow_tests {
             api_key_env: None,
         };
         let regex_classifier = intent_classificator::RegexClassifier::from_values(routing, fallback);
-        let routing_for_state = Arc::new(regex_classifier.routing.clone());
         let model_costs = regex_classifier.model_costs.clone();
         let baseline_model = regex_classifier.baseline_model.clone();
-        let classifier = Some(Arc::new(intent_classificator::ClassifierChain::new(vec![Arc::new(regex_classifier)])));
+        let classifier_chain = intent_classificator::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
+        let classifier = Some(Arc::new(classifier_chain));
+        // Merge routing from all backends in the chain
+        let mut merged_routing = HashMap::new();
+        if let Some(cls) = classifier.as_ref() {
+            for backend in cls.backends().iter() {
+                if let Some(r) = backend.get_routing() {
+                    merged_routing.extend(r.clone());
+                }
+            }
+        }
+        let routing = Arc::new(merged_routing);
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
             "user",
@@ -2010,7 +2041,7 @@ mod slow_tests {
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier,
-            routing: routing_for_state,
+            routing,
             model_costs,
             baseline_model,
             classify_db_log: false,

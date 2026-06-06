@@ -76,11 +76,21 @@ pub enum ClassificationTier {
 /// Trait for intent classification backends.
 pub trait IntentClassify {
     fn classify(&self, prompt: &str) -> ClassificationResult;
+
+    /// Returns a reference to this backend's routing table, if it has one.
+    /// Used to construct the merged routing map in `AppState`.
+    fn get_routing(&self) -> Option<&std::collections::HashMap<String, RouteEntry>> {
+        None
+    }
 }
 
 impl IntentClassify for RegexClassifier {
     fn classify(&self, prompt: &str) -> ClassificationResult {
         self.classify(prompt)
+    }
+
+    fn get_routing(&self) -> Option<&std::collections::HashMap<String, RouteEntry>> {
+        Some(&self.routing)
     }
 }
 
@@ -105,6 +115,11 @@ pub struct ClassifierChain {
 impl ClassifierChain {
     pub fn new(backends: Vec<Arc<dyn IntentClassify + Send + Sync>>) -> Self {
         Self { backends }
+    }
+
+    /// Get the slice of backend classifiers.
+    pub fn backends(&self) -> &[Arc<dyn IntentClassify + Send + Sync>] {
+        &self.backends
     }
 }
 
