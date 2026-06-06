@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use regex::RegexSet;
@@ -8,6 +8,7 @@ use tracing::{info, warn};
 
 // ── Public Types ──
 
+#[derive(Clone)]
 pub struct RouteEntry {
     pub model: String,
     pub endpoint: String,
@@ -56,6 +57,7 @@ pub(crate) fn hardcoded_model_costs() -> HashMap<String, f64> {
     m
 }
 
+#[derive(Clone)]
 pub struct ClassificationResult {
     pub category: String,
     pub model: String,
@@ -71,7 +73,18 @@ pub enum ClassificationTier {
     Fallback,
 }
 
-pub struct IntentClassifier {
+/// Trait for intent classification backends.
+pub trait IntentClassify {
+    fn classify(&self, prompt: &str) -> ClassificationResult;
+}
+
+impl IntentClassify for RegexClassifier {
+    fn classify(&self, prompt: &str) -> ClassificationResult {
+        self.classify(prompt)
+    }
+}
+
+pub struct RegexClassifier {
     pub set: RegexSet,
     pub metadata: Vec<PatternMeta>,
     pub negative_idx: Range<usize>,
@@ -79,6 +92,39 @@ pub struct IntentClassifier {
     pub fallback_entry: RouteEntry,
     pub model_costs: ModelCosts,
     pub baseline_model: String,
+}
+
+// Backward compatibility alias until Phase 3 updates consumers
+pub type IntentClassifier = RegexClassifier;
+
+/// A chain of classifiers that tries each in order until one returns a non-Fallback result.
+pub struct ClassifierChain {
+    backends: Vec<Arc<dyn IntentClassify + Send + Sync>>,
+}
+
+impl ClassifierChain {
+    pub fn new(backends: Vec<Arc<dyn IntentClassify + Send + Sync>>) -> Self {
+        Self { backends }
+    }
+}
+
+impl IntentClassify for ClassifierChain {
+    fn classify(&self, prompt: &str) -> ClassificationResult {
+        if self.backends.is_empty() {
+            return ClassificationResult::fallback();
+        }
+
+        let mut last_result = None;
+        for backend in &self.backends {
+            let result = backend.classify(prompt);
+            if result.tier != ClassificationTier::Fallback {
+                return result;
+            }
+            last_result = Some(result);
+        }
+        // All backends returned Fallback; return the last one.
+        last_result.unwrap_or_else(ClassificationResult::fallback)
+    }
 }
 
 // ── Internal Types ──
@@ -422,9 +468,9 @@ fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
 
 // ── Implementations ──
 
-impl ClassificationResult {
+    impl ClassificationResult {
     /// Creates a CASUAL fallback result with Fallback tier.
-    /// Used when the classifier is `None` (graceful degradation).
+    /// Used when no classifier chain is configured (graceful degradation).
     pub fn fallback() -> Self {
         ClassificationResult {
             category: CAT_CASUAL.to_string(),
@@ -437,7 +483,7 @@ impl ClassificationResult {
     }
 }
 
-impl IntentClassifier {
+impl RegexClassifier {
     /// Build the classifier from built-in patterns and environment configuration.
     /// Always succeeds — regex compilation errors are the only failure mode.
     /// When routing.toml is missing, hardcoded defaults are used.
@@ -522,7 +568,134 @@ impl IntentClassifier {
                     let neg = &NEGATIVE_META[neg_idx];
                     if let Some(score) = scores.get_mut(neg.suppressed) {
                         *score = score.saturating_sub(neg.penalty as u32);
-                    }
+    // ── ClassifierChain Tests ────────────────────────────────────────────────────
+
+    struct StubClassifier {
+        result: ClassificationResult,
+    }
+
+    impl IntentClassify for StubClassifier {
+        fn classify(&self, _prompt: &str) -> ClassificationResult {
+            self.result.clone()
+        }
+    }
+
+    #[test]
+    fn chain_returns_first_regex_match() {
+        let stub1 = StubClassifier {
+            result: ClassificationResult {
+                category: "CAT1".to_string(),
+                model: "model1".to_string(),
+                endpoint: "ep1".to_string(),
+                tier: ClassificationTier::Regex,
+                provider_type: "prov1".to_string(),
+                api_key_env: None,
+            },
+        };
+        let stub2 = StubClassifier {
+            result: ClassificationResult {
+                category: "CAT2".to_string(),
+                model: "model2".to_string(),
+                endpoint: "ep2".to_string(),
+                tier: ClassificationTier::Regex,
+                provider_type: "prov2".to_string(),
+                api_key_env: None,
+            },
+        };
+        let chain = ClassifierChain::new(vec![
+            Arc::new(stub1),
+            Arc::new(stub2),
+        ]);
+        let result = chain.classify("any prompt");
+        assert_eq!(result.category, "CAT1");
+        assert_eq!(result.tier, ClassificationTier::Regex);
+    }
+
+    #[test]
+    fn chain_falls_through_to_next() {
+        let stub1 = StubClassifier {
+            result: ClassificationResult {
+                category: "CASUAL".to_string(),
+                model: "fallback1".to_string(),
+                endpoint: String::new(),
+                tier: ClassificationTier::Fallback,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        };
+        let stub2 = StubClassifier {
+            result: ClassificationResult {
+                category: "COMPLEX_REASONING".to_string(),
+                model: "model2".to_string(),
+                endpoint: "ep2".to_string(),
+                tier: ClassificationTier::Regex,
+                provider_type: "prov2".to_string(),
+                api_key_env: None,
+            },
+        };
+        let chain = ClassifierChain::new(vec![
+            Arc::new(stub1),
+            Arc::new(stub2),
+        ]);
+        let result = chain.classify("prompt");
+        assert_eq!(result.category, "COMPLEX_REASONING");
+        assert_eq!(result.tier, ClassificationTier::Regex);
+    }
+
+    #[test]
+    fn chain_returns_last_on_all_fallback() {
+        let stub1 = StubClassifier {
+            result: ClassificationResult::fallback(),
+        };
+        let stub2 = StubClassifier {
+            result: ClassificationResult {
+                category: "CASUAL".to_string(),
+                model: "last".to_string(),
+                endpoint: String::new(),
+                tier: ClassificationTier::Fallback,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        };
+        let chain = ClassifierChain::new(vec![
+            Arc::new(stub1),
+            Arc::new(stub2),
+        ]);
+        let result = chain.classify("any");
+        assert_eq!(result.category, "CASUAL");
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+    }
+
+    #[test]
+    fn chain_handles_empty_backends() {
+        let chain = ClassifierChain::new(vec![]);
+        let result = chain.classify("prompt");
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+        assert_eq!(result.category, "CASUAL");
+    }
+
+    #[test]
+    fn trait_boundary_compilation() {
+        struct AnotherStub;
+        impl IntentClassify for AnotherStub {
+            fn classify(&self, _prompt: &str) -> ClassificationResult {
+                ClassificationResult {
+                    category: "STUB".to_string(),
+                    model: "stub-model".to_string(),
+                    endpoint: "stub-endpoint".to_string(),
+                    tier: ClassificationTier::Regex,
+                    provider_type: "stub".to_string(),
+                    api_key_env: None,
+                }
+            }
+        }
+        // Verify it can be used as a trait object and wrapped in a chain
+        let stub = Arc::new(AnotherStub) as Arc<dyn IntentClassify + Send + Sync>;
+        let chain = ClassifierChain::new(vec![stub]);
+        let result = chain.classify("test");
+        assert_eq!(result.category, "STUB");
+    }
+}
                 }
             }
         }
@@ -589,7 +762,7 @@ impl IntentClassifier {
 mod tests {
     use super::*;
 
-    fn test_classifier() -> IntentClassifier {
+    fn test_classifier() -> RegexClassifier {
         let mut routing = HashMap::new();
         routing.insert(
             "FILE_READING".to_string(),
@@ -614,7 +787,7 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        IntentClassifier::from_values(routing, fallback)
+        RegexClassifier::from_values(routing, fallback)
     }
 
     #[test]
@@ -717,7 +890,7 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        let classifier = IntentClassifier::from_values(routing, fallback);
+        let classifier = RegexClassifier::from_values(routing, fallback);
         // claude-3.5-sonnet should be 5.0 (override), not 3.00 (hardcoded)
         assert_eq!(classifier.model_costs().get("claude-3.5-sonnet"), Some(5.0));
         // ca-model gets no override and is not in hardcoded table → None
@@ -728,5 +901,133 @@ mod tests {
     fn model_costs_baseline_model_default() {
         let c = test_classifier();
         assert_eq!(c.baseline_model, "claude-3.5-sonnet");
+    }
+
+    // ── ClassifierChain Tests ────────────────────────────────────────────────────
+
+    struct StubClassifier {
+        result: ClassificationResult,
+    }
+
+    impl IntentClassify for StubClassifier {
+        fn classify(&self, _prompt: &str) -> ClassificationResult {
+            self.result.clone()
+        }
+    }
+
+    #[test]
+    fn chain_returns_first_regex_match() {
+        let stub1 = StubClassifier {
+            result: ClassificationResult {
+                category: "CAT1".to_string(),
+                model: "model1".to_string(),
+                endpoint: "ep1".to_string(),
+                tier: ClassificationTier::Regex,
+                provider_type: "prov1".to_string(),
+                api_key_env: None,
+            },
+        };
+        let stub2 = StubClassifier {
+            result: ClassificationResult {
+                category: "CAT2".to_string(),
+                model: "model2".to_string(),
+                endpoint: "ep2".to_string(),
+                tier: ClassificationTier::Regex,
+                provider_type: "prov2".to_string(),
+                api_key_env: None,
+            },
+        };
+        let chain = ClassifierChain::new(vec![
+            Arc::new(stub1),
+            Arc::new(stub2),
+        ]);
+        let result = chain.classify("any prompt");
+        assert_eq!(result.category, "CAT1");
+        assert_eq!(result.tier, ClassificationTier::Regex);
+    }
+
+    #[test]
+    fn chain_falls_through_to_next() {
+        let stub1 = StubClassifier {
+            result: ClassificationResult {
+                category: "CASUAL".to_string(),
+                model: "fallback1".to_string(),
+                endpoint: String::new(),
+                tier: ClassificationTier::Fallback,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        };
+        let stub2 = StubClassifier {
+            result: ClassificationResult {
+                category: "COMPLEX_REASONING".to_string(),
+                model: "model2".to_string(),
+                endpoint: "ep2".to_string(),
+                tier: ClassificationTier::Regex,
+                provider_type: "prov2".to_string(),
+                api_key_env: None,
+            },
+        };
+        let chain = ClassifierChain::new(vec![
+            Arc::new(stub1),
+            Arc::new(stub2),
+        ]);
+        let result = chain.classify("prompt");
+        assert_eq!(result.category, "COMPLEX_REASONING");
+        assert_eq!(result.tier, ClassificationTier::Regex);
+    }
+
+    #[test]
+    fn chain_returns_last_on_all_fallback() {
+        let stub1 = StubClassifier {
+            result: ClassificationResult::fallback(),
+        };
+        let stub2 = StubClassifier {
+            result: ClassificationResult {
+                category: "CASUAL".to_string(),
+                model: "last".to_string(),
+                endpoint: String::new(),
+                tier: ClassificationTier::Fallback,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        };
+        let chain = ClassifierChain::new(vec![
+            Arc::new(stub1),
+            Arc::new(stub2),
+        ]);
+        let result = chain.classify("any");
+        assert_eq!(result.category, "CASUAL");
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+    }
+
+    #[test]
+    fn chain_handles_empty_backends() {
+        let chain = ClassifierChain::new(vec![]);
+        let result = chain.classify("prompt");
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+        assert_eq!(result.category, "CASUAL");
+    }
+
+    #[test]
+    fn trait_boundary_compilation() {
+        struct AnotherStub;
+        impl IntentClassify for AnotherStub {
+            fn classify(&self, _prompt: &str) -> ClassificationResult {
+                ClassificationResult {
+                    category: "STUB".to_string(),
+                    model: "stub-model".to_string(),
+                    endpoint: "stub-endpoint".to_string(),
+                    tier: ClassificationTier::Regex,
+                    provider_type: "stub".to_string(),
+                    api_key_env: None,
+                }
+            }
+        }
+        // Verify it can be used as a trait object and wrapped in a chain
+        let stub = Arc::new(AnotherStub) as Arc<dyn IntentClassify + Send + Sync>;
+        let chain = ClassifierChain::new(vec![stub]);
+        let result = chain.classify("test");
+        assert_eq!(result.category, "STUB");
     }
 }

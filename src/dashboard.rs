@@ -9,7 +9,7 @@ use askama::Template;
 use askama_web::WebTemplate;
 use std::collections::HashMap;
 
-use crate::{auth, persistence, intent_classificator, AppState};
+use crate::{auth, persistence, AppState};
 
 pub struct NavPage {
     pub path: &'static str,
@@ -111,10 +111,8 @@ async fn dashboard_handler(
 ) -> impl IntoResponse {
     let db_connected = state.persistence.is_some();
     let classifier_active = state.classifier.is_some();
-    let (model_costs, baseline_model) = match &state.classifier {
-        Some(c) => (c.model_costs().clone(), c.baseline_model.clone()),
-        None => (intent_classificator::ModelCosts::empty(), "unknown".to_string()),
-    };
+    let model_costs = state.model_costs.clone();
+    let baseline_model = state.baseline_model.clone();
 
     let persistence = match &state.persistence {
         Some(p) => p,
@@ -283,10 +281,8 @@ async fn savings_handler(
         }
     };
 
-    let (model_costs, baseline_model) = match &state.classifier {
-        Some(c) => (c.model_costs().clone(), c.baseline_model.clone()),
-        None => (intent_classificator::ModelCosts::empty(), "unknown".to_string()),
-    };
+    let model_costs = state.model_costs.clone();
+    let baseline_model = state.baseline_model.clone();
 
     match persistence.fetch_savings_estimate(24, &model_costs, &baseline_model).await {
         Ok(est) => SavingsTemplate {

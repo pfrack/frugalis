@@ -21,12 +21,17 @@ mod persistence;
 mod intent_classificator;
 mod dashboard;
 
+use intent_classificator::IntentClassify;
+
 /// Shared application state injected into handlers via Axum's `State` extractor.
 /// `persistence` is `None` when `DATABASE_URL` is absent (persistence gracefully disabled).
 #[derive(Clone)]
 pub struct AppState {
     persistence: Option<persistence::PersistenceConfig>,
-    classifier: Option<Arc<intent_classificator::IntentClassifier>>,
+    classifier: Option<Arc<intent_classificator::ClassifierChain>>,
+    routing: Arc<std::collections::HashMap<String, intent_classificator::RouteEntry>>,
+    model_costs: intent_classificator::ModelCosts,
+    baseline_model: String,
     classify_db_log: bool,
     http_client: Option<reqwest::Client>,
 }
@@ -66,14 +71,19 @@ async fn main() {
             None
         }
     };
-    let classifier = match intent_classificator::IntentClassifier::from_env() {
-        Ok(c) => {
+    let (classifier, routing, model_costs, baseline_model) = match intent_classificator::RegexClassifier::from_env() {
+        Ok(regex_classifier) => {
             info!("Intent classifier initialized");
-            Some(Arc::new(c))
+            let routing = Arc::new(regex_classifier.routing.clone());
+            let model_costs = regex_classifier.model_costs.clone();
+            let baseline_model = regex_classifier.baseline_model.clone();
+            let chain = intent_classificator::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
+            let classifier = Arc::new(chain);
+            (Some(classifier), routing, model_costs, baseline_model)
         }
         Err(e) => {
             warn!("intent classification disabled: {e}");
-            None
+            (None, Arc::new(std::collections::HashMap::new()), intent_classificator::ModelCosts::empty(), String::new())
         }
     };
     let classify_db_log = std::env::var("CLASSIFY_DB_LOG")
@@ -87,6 +97,9 @@ async fn main() {
     let app_state = Arc::new(AppState {
         persistence: persistence_state,
         classifier,
+        routing,
+        model_costs,
+        baseline_model,
         classify_db_log,
         http_client: Some(http_client),
     });
@@ -238,7 +251,7 @@ async fn completion_handler(
         .map(|s| s.to_string());
 
     let classification = if let (Some(category), Some(model)) = (x_category.as_ref(), x_model.as_ref()) {
-        match state.classifier.as_ref().and_then(|c| c.routing.get(category)) {
+        match state.routing.get(category) {
             Some(entry) => intent_classificator::ClassificationResult {
                 category: category.clone(),
                 model: model.clone(),
@@ -601,6 +614,9 @@ mod tests {
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier: None,
+            routing: Arc::new(std::collections::HashMap::new()),
+            model_costs: intent_classificator::ModelCosts::empty(),
+            baseline_model: String::new(),
             classify_db_log: false,
             http_client: None,
         });
@@ -643,12 +659,17 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        let classifier = Some(Arc::new(
-            intent_classificator::IntentClassifier::from_values(routing, fallback),
-        ));
+        let regex_classifier = intent_classificator::RegexClassifier::from_values(routing, fallback);
+        let routing_for_state = Arc::new(regex_classifier.routing.clone());
+        let model_costs = regex_classifier.model_costs.clone();
+        let baseline_model = regex_classifier.baseline_model.clone();
+        let classifier = Some(Arc::new(intent_classificator::ClassifierChain::new(vec![Arc::new(regex_classifier)])));
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier,
+            routing: routing_for_state,
+            model_costs,
+            baseline_model,
             classify_db_log: false,
             http_client: None,
         });
@@ -760,12 +781,17 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        let classifier = Some(Arc::new(
-            intent_classificator::IntentClassifier::from_values(routing, fallback),
-        ));
+        let regex_classifier = intent_classificator::RegexClassifier::from_values(routing, fallback);
+        let routing_for_state = Arc::new(regex_classifier.routing.clone());
+        let model_costs = regex_classifier.model_costs.clone();
+        let baseline_model = regex_classifier.baseline_model.clone();
+        let classifier = Some(Arc::new(intent_classificator::ClassifierChain::new(vec![Arc::new(regex_classifier)])));
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier,
+            routing: routing_for_state,
+            model_costs,
+            baseline_model,
             classify_db_log: false,
             http_client: None,
         });
@@ -1225,12 +1251,17 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        let classifier = Some(Arc::new(
-            intent_classificator::IntentClassifier::from_values(routing, fallback),
-        ));
+        let regex_classifier = intent_classificator::RegexClassifier::from_values(routing, fallback);
+        let routing_for_state = Arc::new(regex_classifier.routing.clone());
+        let model_costs = regex_classifier.model_costs.clone();
+        let baseline_model = regex_classifier.baseline_model.clone();
+        let classifier = Some(Arc::new(intent_classificator::ClassifierChain::new(vec![Arc::new(regex_classifier)])));
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier,
+            routing: routing_for_state,
+            model_costs,
+            baseline_model,
             classify_db_log: false,
             http_client: Some(client),
         });
@@ -1277,12 +1308,17 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        let classifier = Some(Arc::new(
-            intent_classificator::IntentClassifier::from_values(routing, fallback),
-        ));
+        let regex_classifier = intent_classificator::RegexClassifier::from_values(routing, fallback);
+        let routing_for_state = Arc::new(regex_classifier.routing.clone());
+        let model_costs = regex_classifier.model_costs.clone();
+        let baseline_model = regex_classifier.baseline_model.clone();
+        let classifier = Some(Arc::new(intent_classificator::ClassifierChain::new(vec![Arc::new(regex_classifier)])));
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier,
+            routing: routing_for_state,
+            model_costs,
+            baseline_model,
             classify_db_log: false,
             http_client: Some(client),
         });
@@ -1889,6 +1925,10 @@ mod tests {
             .await
             .expect("body should be readable");
         let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(
+            body.contains("Database not configured"),
+            "expected 'Database not configured' in response, got: {body}"
+        );
         }
 }
 
@@ -1957,9 +1997,11 @@ mod slow_tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        let classifier = Some(Arc::new(
-            intent_classificator::IntentClassifier::from_values(routing, fallback),
-        ));
+        let regex_classifier = intent_classificator::RegexClassifier::from_values(routing, fallback);
+        let routing_for_state = Arc::new(regex_classifier.routing.clone());
+        let model_costs = regex_classifier.model_costs.clone();
+        let baseline_model = regex_classifier.baseline_model.clone();
+        let classifier = Some(Arc::new(intent_classificator::ClassifierChain::new(vec![Arc::new(regex_classifier)])));
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
             "user",
@@ -1968,6 +2010,9 @@ mod slow_tests {
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier,
+            routing: routing_for_state,
+            model_costs,
+            baseline_model,
             classify_db_log: false,
             http_client: Some(client),
         });

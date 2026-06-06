@@ -1,7 +1,7 @@
 ---
 change_id: critical-logging
 title: Critical logging
-status: implemented
+status: impl_reviewed
 created: 2026-06-06
 updated: 2026-06-06
 archived_at: null
