@@ -311,9 +311,9 @@ No new unit tests needed — the migration is a mechanical level remapping. The 
 
 #### Manual
 
-- [ ] 2.4 Verify TraceLayer span for GET /health
-- [ ] 2.5 Verify TraceLayer span for POST /v1/chat/completions
-- [ ] 2.6 Verify no Authorization header values in span output
+- [x] 2.4 Verify TraceLayer span for GET /health
+- [x] 2.5 Verify TraceLayer span for POST /v1/chat/completions
+- [x] 2.6 Verify no Authorization header values in span output
 
 ### Phase 3: Migrate Log Calls
 

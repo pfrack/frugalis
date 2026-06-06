@@ -11,7 +11,7 @@ use axum::{
     Router,
 };
 use tokio_stream::StreamExt;
-use tower_http::{services::ServeDir, limit::RequestBodyLimitLayer, cors::CorsLayer};
+use tower_http::{services::ServeDir, limit::RequestBodyLimitLayer, cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use tracing::{debug, error, info, warn};
 
@@ -579,6 +579,7 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
         .nest("/v1", proxy_routes)
         .nest("/dashboard", dashboard_routes)
         .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http())
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .with_state(app_state)
 }
