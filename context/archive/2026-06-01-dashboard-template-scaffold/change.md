@@ -1,9 +1,10 @@
 # Change: dashboard-template-scaffold
 
 **ID:** dashboard-template-scaffold
-**Status:** impl_reviewed
+**Status:** archived
 **Created:** 2026-06-01
-**Updated:** 2026-06-07
+**Updated:** 2026-06-06
+**Archived:** 2026-06-06T22:30:33Z
 
 ## Summary
 
