@@ -4,7 +4,7 @@ project: cerebrum
 version: 1
 status: draft
 created: 2026-05-26
-updated: 2026-06-01
+updated: 2026-06-06
 prd_version: 1
 main_goal: speed
 top_blocker: time
@@ -44,6 +44,9 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-04 | cost-savings-metric | view an estimated cost-savings indicator based on logged inferences | S-02 | FR-007 (nice-to-have) | implemented |
 | S-05 | dashboard-mvp-rewrite | comprehensive dashboard rewrite: dedicated module, navigation, CSS styling, and integrated UI | F-03, S-02, S-03, S-04 | FR-006, FR-007, Secondary Success Criterion | implemented |
 | S-06 | dashboard-logs-page | dedicated logs page showing detailed inference logs and trace information | F-04, F-02, F-03, S-01e | FR-006, Observability | proposed |
+| S-07 | intent-classifier-trait | extract `IntentClassify` trait; rename `IntentClassifier` → `RegexClassifier` with own config; add fallback chain config (primary → fallback classifier when confidence low); enable pluggable backends | S-01a, S-01c | FR-002 | proposed |
+| S-08 | provider-url-derivation | refactor routing config so endpoint URLs omit `v1/chat/*`; path suffix derived from `provider_type` (e.g. `openai_compatible` → `/v1/chat/completions`, `anthropic` → `/v1/messages`); future providers add their own mapping | S-01c | FR-003 | proposed |
+| S-09 | llm-classifier | implement `LLMClassifier` backend for `IntentClassify` trait: sends prompt to a small/cheap model, parses classification from response; config carries model, endpoint, `UPSTREAM_API_KEY`, classification prompt template | S-07, S-08 | FR-002 | proposed |
 
 ## Streams
 
@@ -51,7 +54,7 @@ Navigation aid — groups items that share a Prerequisites chain. Canonical orde
 
 | Stream | Theme | Chain | Note |
 |---|---|---|---|
-| A | Proxy core | `F-01` → `F-02` → `S-01a` → `S-01b` → `S-01c` → `S-01d` → `S-01e` | The validating path: gate access, enable logging, classification, routing, provider config, streaming, then end-to-end integration. |
+| A | Proxy core | `F-01` → `F-02` → `S-01a` → `S-01b` → `S-01c` → `S-01d` → `S-01e` → `S-07` → `S-08` → `S-09` | The validating path: gate access, enable logging, classification, routing, provider config, streaming, then end-to-end integration. S-07 extracts the classifier trait; S-08 derives URL paths; S-09 adds LLM-based classification. |
 | B | Dashboard | `F-03` → `S-02` → `S-03` → `S-04` → `S-05` | Observability: incremental features (S-02/S-03/S-04) followed by consolidation into polished MVP UI (S-05). S-02 depends on S-01e (proxy must be logging inferences). |
 | C | Metrics | — | All metrics features (S-04) integrated into dashboard stream (B). |
 | D | Critical Logging | `F-04` → `S-06` | Ensures all critical paths have observability logs and a dedicated UI page. |
@@ -256,6 +259,45 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Risk:** Provides deep observability; minimal UI complexity as it reuses existing table components.
 - **Status:** proposed
 
+### S-07: Intent classifier trait + configuration
+
+- **Outcome:** An `IntentClassify` trait is defined with a single method: `fn classify(&self, prompt: &str) -> ClassificationResult`. The current `IntentClassifier` is renamed to `RegexClassifier` and implements the trait, carrying its own config: regex patterns, pattern weights/metadata, routing table, classification thresholds, and test data. A `ClassifierChain` or composite config supports fallback ordering: primary classifier runs first, and if confidence is below a threshold (e.g., ambiguous/multi-match, `ClassificationTier::Fallback`), the next classifier in the chain is tried. `AppState` switches from `Option<Arc<IntentClassifier>>` to a configured chain of `Arc<dyn IntentClassify + Send + Sync>` backends.
+- **Change ID:** `intent-classifier-trait`
+- **PRD refs:** FR-002 (intent classification)
+- **Prerequisites:** S-01a (classification is working), S-01c (provider-agnostic config exists)
+- **Parallel with:** S-02 through S-06 (dashboard features — the trait is a pure refactor that doesn't change observable behavior)
+- **Blockers:** —
+- **Unknowns:**
+  - Should the trait carry an associated `Config` type, or should each implementation bundle its own config at construction time? Owner: planning. Block: no (bundled-at-construction is simpler for MVP trait boundary).
+  - Should fallback chaining be a separate `ClassifierChain` struct implementing `IntentClassify`, or built into `AppState` config? Owner: planning. Block: no (chain-as-implementor is cleaner — transparent to handlers).
+- **Risk:** Pure refactoring — no behavioral change, low risk. The trait must be narrow enough to not over-constrain future backends (a regex classifier, an LLM-based classifier, and an ML classifier have very different initialization needs) while keeping the current `RegexClassifier` simple. The `dyn` dispatch adds one vtable indirection per `classify` call — negligible vs. regex matching and network I/O.
+
+### S-08: Provider URL derivation from type
+
+- **Outcome:** Routing configuration no longer stores full URLs with path suffixes. Each `RouteEntry` stores a base URL (e.g., `https://api.anthropic.com`) and the `provider_type` determines the path: `openai_compatible` → `/v1/chat/completions`, `anthropic` → `/v1/messages`. A `fn provider_path(provider_type: &str) -> &str` lookup maps types to suffixes, extending the existing `auth_headers_for` pattern. Adding a future provider (e.g., `google_vertex`) only requires adding one match arm.
+- **Change ID:** `provider-url-derivation`
+- **PRD refs:** FR-003 (routing)
+- **Prerequisites:** S-01c (provider-agnostic config with `provider_type` field)
+- **Parallel with:** S-07 (both are config refactors on the proxy core)
+- **Blockers:** —
+- **Unknowns:**
+  - Should the base URL include the protocol/scheme or just host:port? Owner: planning. Block: no (full base URL is safer — some providers use non-standard ports or sub-paths).
+- **Risk:** Backward-compatible if full URLs are still accepted (with a deprecation warning). The `routing.toml` format simplifies noticeably — operators specify `endpoint = "https://api.openai.com"` instead of the full chat-completions path.
+- **Status:** proposed
+
+### S-09: LLM-based classifier backend
+
+- **Outcome:** An `LLMClassifier` struct implements `IntentClassify`, sending the user prompt to a small/cheap classification model (e.g., `gpt-4o-mini`) and parsing the intent category from the response. Its config carries: model name, endpoint, `UPSTREAM_API_KEY` env var, and a classification prompt template that instructs the model to output one of the known categories. The `AppState` can hold either `RegexClassifier` or `LLMClassifier` behind the same `Arc<dyn IntentClassify>`.
+- **Change ID:** `llm-classifier`
+- **PRD refs:** FR-002 (intent classification)
+- **Prerequisites:** S-07 (trait exists), S-08 (URL derived from provider type)
+- **Parallel with:** — (depends on both S-07 and S-08)
+- **Blockers:** —
+- **Unknowns:**
+  - What prompt template produces reliable single-token classification? Owner: planning. Block: no (few-shot examples in the system prompt, constrained output to known category names).
+  - Should the LLM classifier cache results for identical prompts? Owner: planning. Block: no (cache is a post-MVP optimization).
+- **Risk:** Adds latency (~200-500ms for small model inference) and cost (~$0.15/1M tokens) per classification call. Suitable as a fallback tier when regex confidence is low, or as primary classifier when regex patterns are unavailable. The `dyn` dispatch ensures swapping backends is a config-level decision.
+
 ## Backlog Handoff
 
 | Roadmap ID | Change ID | Suggested issue title | Ready for `/10x-plan` | Notes |
@@ -274,6 +316,9 @@ Foundations below assume these are present and do NOT re-scaffold them.
 | S-04 | cost-savings-metric | Dashboard: Estimated cost-savings metric (nice-to-have) | no | Already implemented; baseline model configurable via `BASELINE_MODEL` env var and classification costs accounted. |
 | S-05 | dashboard-mvp-rewrite | Dashboard: Comprehensive UI rewrite with navigation, CSS, and consolidated observability views | no | Already implemented; transforms POC scaffold into production-ready dashboard with sidebar, theming, and integrated homepage. |
 | S-06 | dashboard-logs-page | Dashboard: Dedicated page for detailed logs and traceability | no | Proposed; depends on critical logging foundation. |
+| S-07 | intent-classifier-trait | Classifier: Extract IntentClassify trait + ClassifierConfig for pluggable backends | no | Proposed; pure refactoring — trait boundary must accommodate future backends. |
+| S-08 | provider-url-derivation | Config: Derive URL path suffix from provider_type; endpoints omit v1/chat/* | no | Proposed; simplifies routing.toml, enables future providers via one match arm. |
+| S-09 | llm-classifier | Classifier: LLM-based backend implementing IntentClassify for fallback classification | no | Proposed; depends on S-07 trait + S-08 URL derivation. |
 
 ## Open Roadmap Questions
 
@@ -318,8 +363,8 @@ The 3-week MVP budget under a 6-week hard deadline makes calendar time the #1 bl
 **#1 blocker:** time (6-week hard deadline)
 **Baseline present:** Backend/API, Deploy/infra (partial)
 **Foundations:** 4
-**Slices:** 10 (S-01a through S-01e, S-02, S-03, S-04, S-05, S-06)
-**Status breakdown:** ready: 3 (F-01, F-02, F-03) | proposed: 2 (F-04, S-06) | implemented: 9 | blocked: 0
+**Slices:** 13 (S-01a through S-01e, S-02, S-03, S-04, S-05, S-06, S-07, S-08, S-09)
+**Status breakdown:** ready: 3 (F-01, F-02, F-03) | proposed: 5 (F-04, S-06, S-07, S-08, S-09) | implemented: 9 | blocked: 0
 **PRD coverage:** 6 must-have FRs covered | 1 nice-to-have FR (implemented)
 **Open Roadmap Q:** 3 (intent classification rules, cheap fallback model, upstream model choices)
 **Parked items:** 0
