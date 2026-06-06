@@ -31,7 +31,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | ID | Change ID | Outcome (user can …) | Prerequisites | PRD refs | Status |
 |---|---|---|---|---|---|
 | F-01 | auth-scaffold-access-keys | (foundation) Access key/token validation + operator dashboard auth gates are in place | — | FR-001, Access Control | done |
-| F-02 | data-persistence-async-logging | (foundation) Async inference logging pipeline connected to Supabase PostgreSQL | — | FR-005, NFR (non-blocking logs) | impl_reviewed |
+| F-02 | data-persistence-async-logging | (foundation) Async inference logging pipeline connected to Supabase PostgreSQL | — | FR-005, NFR (non-blocking logs) | done |
 | F-03 | dashboard-template-scaffold | (foundation) Askama HTML templating and server-side rendering wired into Axum | — | FR-006, Dashboard | done |
 | F-04 | critical-logging | (foundation) Add structured logging to all critical paths and make logging level configurable via RUST_LOG | F-01, F-02, F-03 | FR-005, Observability | proposed |
 | S-01a | classify-endpoint | classify prompts into intent categories using regex/keyword rules and cheap-model fallback | F-01, F-02 | FR-002 | implemented |
@@ -97,7 +97,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Blockers:** Supabase account setup + free-tier PostgreSQL provisioning (external, but quick; ~15 min).
 - **Unknowns:** —
 - **Risk:** Async logging is a secondary path; failures here must not stall proxy response streaming (guardrail-level). Implementation uses Tokio spawn or similar to ensure non-blocking semantics. Schema must include prompt-minimization / snippet extraction to meet privacy guardrail.
-- **Status:** proposed
+- **Status:** done
 
 ### F-03: Dashboard template scaffold — Askama + server-side rendering
 
@@ -334,6 +334,8 @@ All roadmap items are active or completed; no currently parked items.
 
 - **F-01: (foundation) Access key/token validation middleware + basic HTTP auth for dashboard are in place; proxy routes require a valid key header; dashboard requires operator credentials.** — Archived 2026-06-01 → `context/archive/2026-05-26-auth-scaffold-access-keys/`. Lesson: —.
 - **F-03: (foundation) Askama HTML templates wired into Axum routing; /dashboard endpoint renders template with static placeholder content; basic HTTP basic-auth gate wraps the endpoint.** — Archived 2026-06-06 → `context/archive/2026-06-01-dashboard-template-scaffold/`. Lesson: —.
+
+- **F-02: (foundation) Supabase PostgreSQL connection, schema for inference records (category, upstream model, duration, timestamp, prompt snippet), and async logging task are in place; proxy can write inference metadata non-blockingly after response streaming completes.** — Archived 2026-06-06 → `context/archive/2026-05-26-data-persistence-async-logging/`. Lesson: —.
 
 ---
 
