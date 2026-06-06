@@ -319,14 +319,14 @@ No new unit tests needed — the migration is a mechanical level remapping. The 
 
 #### Automated
 
-- [ ] 3.1 `cargo build` compiles with all macro migrations
-- [ ] 3.2 `cargo test` passes
-- [ ] 3.3 `cargo test routes_auth` passes
-- [ ] 3.4 `RUST_LOG=debug cargo test` produces debug-level output from health check handler
+- [x] 3.1 `cargo build` compiles with all macro migrations — 2bd1c44
+- [x] 3.2 `cargo test` passes — 2bd1c44
+- [x] 3.3 `cargo test routes_auth` passes — 2bd1c44
+- [x] 3.4 `RUST_LOG=debug cargo test` produces debug-level output from health check handler — 2bd1c44
 
 #### Manual
 
-- [x] 3.5 Verify startup messages without redundant prefixes via `RUST_LOG=info cargo run`
-- [x] 3.6 Trigger upstream error — verify ERROR-level message with request_id
-- [x] 3.7 Trigger missing API key — verify WARN-level message
-- [x] 3.8 Verify no `eprintln!` in production paths (grep excluding test modules)
+- [x] 3.5 Verify startup messages without redundant prefixes via `RUST_LOG=info cargo run` — 2bd1c44
+- [x] 3.6 Trigger upstream error — verify ERROR-level message with request_id — 2bd1c44
+- [x] 3.7 Trigger missing API key — verify WARN-level message — 2bd1c44
+- [x] 3.8 Verify no `eprintln!` in production paths (grep excluding test modules) — 2bd1c44
