@@ -1,10 +1,10 @@
 ---
 change_id: critical-logging
 title: Critical logging
-status: impl_reviewed
+status: archived
 created: 2026-06-06
 updated: 2026-06-06
-archived_at: null
+archived_at: 2026-06-06T22:38:36Z
 ---
 
 ## Notes

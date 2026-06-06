@@ -33,7 +33,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | F-01 | auth-scaffold-access-keys | (foundation) Access key/token validation + operator dashboard auth gates are in place | — | FR-001, Access Control | done |
 | F-02 | data-persistence-async-logging | (foundation) Async inference logging pipeline connected to Supabase PostgreSQL | — | FR-005, NFR (non-blocking logs) | done |
 | F-03 | dashboard-template-scaffold | (foundation) Askama HTML templating and server-side rendering wired into Axum | — | FR-006, Dashboard | done |
-| F-04 | critical-logging | (foundation) Add structured logging to all critical paths and make logging level configurable via RUST_LOG | F-01, F-02, F-03 | FR-005, Observability | proposed |
+| F-04 | critical-logging | (foundation) Add structured logging to all critical paths and make logging level configurable via RUST_LOG | F-01, F-02, F-03 | FR-005, Observability | done |
 | S-01a | classify-endpoint | classify prompts into intent categories using regex/keyword rules and cheap-model fallback | F-01, F-02 | FR-002 | implemented |
 | S-01b | reqwest-upstream-routing | route classified requests to appropriate upstream models via reqwest | S-01a | FR-003 | impl_reviewed |
 | S-01c | provider-agnostic-config | generalize routing configuration to support multiple providers with different auth schemes | S-01b | FR-003 | implemented |
@@ -123,7 +123,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Blockers:** —
 - **Unknowns:** —
 - **Risk:** Minimal runtime overhead; logs are emitted asynchronously via `tokio::spawn` to avoid blocking request handling.
-- **Status:** proposed
+- **Status:** done
 
 ## Slices
 
@@ -336,6 +336,8 @@ All roadmap items are active or completed; no currently parked items.
 - **F-03: (foundation) Askama HTML templates wired into Axum routing; /dashboard endpoint renders template with static placeholder content; basic HTTP basic-auth gate wraps the endpoint.** — Archived 2026-06-06 → `context/archive/2026-06-01-dashboard-template-scaffold/`. Lesson: —.
 
 - **F-02: (foundation) Supabase PostgreSQL connection, schema for inference records (category, upstream model, duration, timestamp, prompt snippet), and async logging task are in place; proxy can write inference metadata non-blockingly after response streaming completes.** — Archived 2026-06-06 → `context/archive/2026-05-26-data-persistence-async-logging/`. Lesson: —.
+
+- **F-04: (foundation) Add structured logging statements to all critical code paths and support configurable logging level via RUST_LOG: authentication middleware, proxy classification, routing, streaming, and error handling. Uses `tracing` crate with appropriate levels (info, error) and includes request identifiers for correlation.** — Archived 2026-06-06 → `context/archive/2026-06-06-critical-logging/`. Lesson: —.
 
 ---
 
