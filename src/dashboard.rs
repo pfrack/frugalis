@@ -72,7 +72,7 @@ macro_rules! dashboard_page {
 }
 
 dashboard_page! {
-    struct DashboardIndex for "dashboard/index.html" {
+    struct DashboardTemplate for "dashboard/index.html" {
         summary: Option<persistence::LatencySummary>,
         savings: Option<persistence::SavingsEstimate>,
         recent: Vec<persistence::InferenceLog>,
@@ -117,7 +117,7 @@ async fn dashboard_handler(
     let persistence = match &state.persistence {
         Some(p) => p,
         None => {
-            return DashboardIndex {
+            return DashboardTemplate {
                 nav: nav_for(""),
                 summary: None,
                 savings: None,
@@ -147,7 +147,7 @@ async fn dashboard_handler(
     let savings = savings_res.ok();
     let (recent, _) = recent_res.unwrap_or((vec![], 0));
 
-    DashboardIndex {
+    DashboardTemplate {
         nav: nav_for(""),
         summary,
         savings,

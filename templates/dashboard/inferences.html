@@ -59,7 +59,7 @@
       <td class="muted" style="white-space:nowrap;font-size:12px;">{{ record.timestamp|e }}</td>
       <td>
         <details>
-          <summary>{{ record.prompt_snippet|e|truncate(80) }}</summary>
+          <summary>{{ record.prompt_snippet|truncate(80)|e }}</summary>
           <pre>{{ record.prompt_snippet|e }}</pre>
         </details>
       </td>
