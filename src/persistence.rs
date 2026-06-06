@@ -5,6 +5,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;
 use uuid::Uuid;
 use tokio::sync::Semaphore;
+use tracing_subscriber;
 
 /// Trait for looking up model costs by name.
 /// Allows persistence to query costs without depending on the classification module directly.
@@ -723,12 +724,14 @@ mod tests {
     // ── fetch_inferences ─────────────────────────────────────────────────────
 
     async fn test_pool() -> Option<Arc<PgPool>> {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         let url = std::env::var("DATABASE_URL").ok()?;
         let pool = sqlx::PgPool::connect(&url).await.ok()?;
         Some(Arc::new(pool))
     }
 
     fn make_persistence(pool: Arc<PgPool>) -> PersistenceConfig {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         PersistenceConfig {
             pool,
             task_semaphore: Arc::new(Semaphore::new(100)),

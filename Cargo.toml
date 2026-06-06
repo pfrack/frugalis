@@ -18,7 +18,9 @@ askama_web = { version = "0.16.0", features = ["axum-0.8"] }
 regex = "1"
 toml = "0.8"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
-tower-http = { version = "0.6.11", features = ["fs", "limit", "cors", "auth"] }
+tower-http = { version = "0.6.11", features = ["fs", "limit", "cors", "auth", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tokio-stream = "0.1"
 futures = "0.3"
 

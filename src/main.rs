@@ -12,6 +12,8 @@ use axum::{
 };
 use tokio_stream::StreamExt;
 use tower_http::{services::ServeDir, limit::RequestBodyLimitLayer, cors::CorsLayer};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing::{debug, error, info, warn};
 
 
 mod auth;
@@ -31,6 +33,19 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
+    // Initialize tracing subscriber before any other code.
+    let log_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let fmt_layer = match std::env::var("LOG_FORMAT").as_deref() {
+        Ok("json") => fmt::layer().json().with_filter(log_filter).boxed(),
+        _ => fmt::layer().compact().with_filter(log_filter).boxed(),
+    };
+
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .init();
+
     // Ensure any panic is logged, not silent.
     panic::set_hook(Box::new(|info| {
         eprintln!("Panic in Cerebrum: {info}");
@@ -578,6 +593,7 @@ mod tests {
     use tower::util::ServiceExt;
 
     fn test_app() -> Router {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
             "user",
@@ -594,6 +610,7 @@ mod tests {
     }
 
     fn test_app_with_classifier() -> Router {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
@@ -710,6 +727,7 @@ mod tests {
         provider_type_val: &str,
         api_key_env_val: Option<&str>,
     ) -> Router {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
@@ -1168,6 +1186,7 @@ mod tests {
     // ── Upstream routing tests ────────────────────────────────────────────────
 
     pub(crate) fn test_app_with_http_client(env_var_name: &str) -> (Router, httpmock::MockServer) {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
         let server = httpmock::MockServer::start();
         let client = reqwest::Client::builder()
@@ -1221,6 +1240,7 @@ mod tests {
     }
 
     fn test_app_with_dead_endpoint(env_var_name: &str) -> Router {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(1))
@@ -1911,6 +1931,7 @@ mod slow_tests {
 
     #[tokio::test]
     async fn test_streaming_keepalive_injected() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         std::env::set_var("KEEPALIVE_INTERVAL_SECS", "1");
         let (url, server_handle) = spawn_slow_sse_server().await;
         let env = "TEST_STREAM_KA_SLOW";
