@@ -292,8 +292,8 @@ No new unit tests needed — the migration is a mechanical level remapping. The 
 
 - [x] 1.1 `cargo build` compiles with new dependencies
 - [x] 1.2 `cargo test` completes cleanly — no subscriber panic or double-init errors
-- [ ] 1.3 `RUST_LOG=debug cargo run` emits debug-level messages
-- [ ] 1.4 `LOG_FORMAT=json RUST_LOG=info cargo run` emits JSON-formatted lines
+- [x] 1.3 `RUST_LOG=debug cargo run` emits debug-level messages — 2bd1c44
+- [x] 1.4 `LOG_FORMAT=json RUST_LOG=info cargo run` emits JSON-formatted lines — 2bd1c44
 
 #### Manual
 
