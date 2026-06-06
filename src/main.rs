@@ -58,21 +58,21 @@ async fn main() {
 
     let persistence_state = match persistence::PersistenceConfig::from_env().await {
         Ok(s) => {
-            println!("Database connected successfully");
+            info!("Database connected successfully");
             Some(s)
         }
         Err(e) => {
-            eprintln!("WARN: persistence disabled: {e}");
+            warn!("persistence disabled: {e}");
             None
         }
     };
     let classifier = match intent_classificator::IntentClassifier::from_env() {
         Ok(c) => {
-            println!("Intent classifier initialized");
+            info!("Intent classifier initialized");
             Some(Arc::new(c))
         }
         Err(e) => {
-            eprintln!("WARN: intent classification disabled: {e}");
+            warn!("intent classification disabled: {e}");
             None
         }
     };
@@ -98,7 +98,7 @@ async fn main() {
 
     let app = build_app(auth_config, app_state);
     let bind_addr = format!("0.0.0.0:{port}");
-    println!("Starting cerebrum on {bind_addr}");
+    info!("Starting cerebrum on {bind_addr}");
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
@@ -110,7 +110,7 @@ async fn main() {
 }
 
 async fn health() -> (StatusCode, &'static str) {
-    println!("Health check request received");
+    debug!("Health check request received");
     (StatusCode::OK, "ok")
 }
 
@@ -248,10 +248,7 @@ async fn completion_handler(
                 api_key_env: entry.api_key_env.clone(),
             },
             None => {
-                eprintln!(
-                    "WARN: X-Cerebrum-Category '{category}' not found in routing configuration; \
-                     degrading to classification JSON"
-                );
+                warn!("X-Cerebrum-Category '{category}' not found in routing configuration; degrading to classification JSON");
                 let fallback = state.classifier.as_ref()
                     .map(|c| c.classify(""))
                     .unwrap_or_else(intent_classificator::ClassificationResult::fallback);
@@ -290,7 +287,7 @@ async fn completion_handler(
         Some(env_name) => match std::env::var(env_name) {
             Ok(key) if !key.is_empty() => key,
             _ => {
-                eprintln!("WARN: upstream API key env var '{env_name}' is missing or empty; degrading to classification-only response");
+                warn!("upstream API key env var '{env_name}' is missing or empty; degrading to classification-only response");
                 let response_body = serde_json::json!({
                     "status": "classified",
                     "category": classification.category,
@@ -302,7 +299,7 @@ async fn completion_handler(
             }
         },
         None => {
-            eprintln!("WARN: no api_key_env configured for category '{}'; degrading to classification-only response", classification.category);
+            warn!("no api_key_env configured for category '{}'; degrading to classification-only response", classification.category);
             let response_body = serde_json::json!({
                 "status": "classified",
                 "category": classification.category,

@@ -305,15 +305,15 @@ No new unit tests needed — the migration is a mechanical level remapping. The 
 
 #### Automated
 
-- [ ] 2.1 `cargo build` compiles (Phase 1 deps + Phase 2 code)
-- [ ] 2.2 `cargo test` passes — TraceLayer instruments test requests without breaking assertions
-- [ ] 2.3 `cargo test routes_auth` passes
+- [x] 2.1 `cargo build` compiles (Phase 1 deps + Phase 2 code) — 134cb88
+- [x] 2.2 `cargo test` passes — TraceLayer instruments test requests without breaking assertions — 134cb88
+- [x] 2.3 `cargo test routes_auth` passes — 134cb88
 
 #### Manual
 
-- [x] 2.4 Verify TraceLayer span for GET /health
-- [x] 2.5 Verify TraceLayer span for POST /v1/chat/completions
-- [x] 2.6 Verify no Authorization header values in span output
+- [x] 2.4 Verify TraceLayer span for GET /health — 134cb88
+- [x] 2.5 Verify TraceLayer span for POST /v1/chat/completions — 134cb88
+- [x] 2.6 Verify no Authorization header values in span output — 134cb88
 
 ### Phase 3: Migrate Log Calls
 
@@ -326,7 +326,7 @@ No new unit tests needed — the migration is a mechanical level remapping. The 
 
 #### Manual
 
-- [ ] 3.5 Verify startup messages without redundant prefixes via `RUST_LOG=info cargo run`
-- [ ] 3.6 Trigger upstream error — verify ERROR-level message with request_id
-- [ ] 3.7 Trigger missing API key — verify WARN-level message
-- [ ] 3.8 Verify no `eprintln!` in production paths (grep excluding test modules)
+- [x] 3.5 Verify startup messages without redundant prefixes via `RUST_LOG=info cargo run`
+- [x] 3.6 Trigger upstream error — verify ERROR-level message with request_id
+- [x] 3.7 Trigger missing API key — verify WARN-level message
+- [x] 3.8 Verify no `eprintln!` in production paths (grep excluding test modules)

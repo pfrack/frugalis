@@ -5,6 +5,7 @@ use axum::{
     http::{Request, Response, StatusCode, header},
 };
 use tower_http::auth::{AsyncAuthorizeRequest, AsyncRequireAuthorizationLayer};
+use tracing::warn;
 
 pub struct AuthConfig {
     proxy_api_bearer_token: String,
@@ -76,6 +77,8 @@ impl AsyncAuthorizeRequest<Body> for ProxyBearerAuth {
             .is_some_and(|value| self.config.validate_proxy_bearer_header(value));
 
         if !authorized {
+            let uri = request.uri().to_string();
+            warn!("proxy auth rejected for {uri}");
             return std::future::ready(Err(api_unauthorized_response("invalid or missing bearer token")));
         }
 
@@ -101,6 +104,8 @@ impl AsyncAuthorizeRequest<Body> for DashboardBasicAuth {
             .is_some_and(|value| self.config.validate_dashboard_basic_header(value));
 
         if !authorized {
+            let uri = request.uri().to_string();
+            warn!("dashboard auth rejected for {uri}");
             return std::future::ready(Err(dashboard_unauthorized_response()));
         }
 

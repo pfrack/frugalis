@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use regex::RegexSet;
+use tracing::{info, warn};
 
 // ── Public Types ──
 
@@ -401,11 +402,11 @@ fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
         .unwrap_or_else(|_| ROUTING_CONFIG_DEFAULT.to_string());
     let mut routing = match load_routing_from_file(&path) {
         Ok(r) => {
-            println!("Routing: loaded from {path}");
+            info!("Routing: loaded from {path}");
             r
         }
         Err(e) => {
-            eprintln!("WARN intent_classificator: {e}; using hardcoded routing defaults (no routing.toml)");
+            warn!("{e}; using hardcoded routing defaults (no routing.toml)");
             return hardcoded_routing();
         }
     };

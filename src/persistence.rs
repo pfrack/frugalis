@@ -5,7 +5,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;
 use uuid::Uuid;
 use tokio::sync::Semaphore;
-use tracing_subscriber;
+use tracing::{error, info, warn};
 
 /// Trait for looking up model costs by name.
 /// Allows persistence to query costs without depending on the classification module directly.
@@ -115,7 +115,7 @@ impl PersistenceConfig {
         .execute(&pool_for_migration)
         .await
         .map_err(|e| format!("Schema migration failed: {e}"))?;
-        println!("Schema migration: prompt_char_count column ensured");
+        info!("Schema migration: prompt_char_count column ensured");
 
         Ok(Self {
             pool: Arc::new(pool),
@@ -421,10 +421,7 @@ pub fn extract_last_user_message(body: &str) -> String {
         let messages = v.get("messages")?.as_array()?;
         // Prevent DoS via unbounded message arrays.
         if messages.len() > 1000 {
-            eprintln!(
-                "WARN persistence: ignoring request with {} messages (limit 1000)",
-                messages.len()
-            );
+            warn!("ignoring request with {} messages (limit 1000)", messages.len());
             return Some(String::new());
         }
         let last_user = messages
@@ -438,10 +435,7 @@ pub fn extract_last_user_message(body: &str) -> String {
     match result {
         Some(s) => s,
         None => {
-            eprintln!(
-                "WARN persistence: could not extract user message from request body; \
-                 storing empty prompt"
-            );
+            warn!("could not extract user message from request body; storing empty prompt");
             String::new()
         }
     }
@@ -489,17 +483,12 @@ pub fn log_inference(
         let _permit = match semaphore.acquire().await {
             Ok(p) => p,
             Err(_) => {
-                eprintln!(
-                    "ERROR persistence: semaphore closed for request_id={request_id}"
-                );
+                error!("semaphore closed for request_id={request_id}");
                 return;
             }
         };
         if let Err(class) = write_with_retry(&pool, &record).await {
-            eprintln!(
-                "ERROR persistence: final insert failure \
-                 request_id={request_id} class={class}"
-            );
+            error!("final insert failure request_id={request_id} class={class}");
         }
     })
 }
@@ -508,10 +497,7 @@ async fn write_with_retry(pool: &PgPool, record: &InferenceRecord) -> Result<(),
     retry_once(|| insert_once(pool, record))
         .await
         .map_err(|e| {
-            eprintln!(
-                "ERROR persistence: insert failed for request_id={} after retries: {:?}",
-                record.request_id, e
-            );
+            error!("insert failed for request_id={} after retries: {:?}", record.request_id, e);
             e.to_string()
         })
 }
@@ -527,9 +513,7 @@ where
     match f().await {
         Ok(v) => Ok(v),
         Err(first) => {
-            eprintln!(
-                "WARN persistence: first insert attempt failed ({first}); retrying once"
-            );
+            warn!("first insert attempt failed ({first}); retrying once");
             f().await
         }
     }
