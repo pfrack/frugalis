@@ -36,3 +36,10 @@
 - **Problem**: Four separate SQL query strings and bind/fetch blocks for different filter combinations were duplicated (~80 lines). Each new filter combination would multiply the branches, increasing maintenance burden and review surface.
 - **Rule**: Use dynamic WHERE clause building with a bind_count tracker and reusable bind/fetch logic instead of duplicating SQL queries and bind/fetch blocks for every filter combination. Keep the number of SQL statement variants proportional to the number of independent dimensions, not their product.
 - **Applies to**: implement, impl-review
+
+## Log operational failures before falling back
+
+- **Context**: File I/O operations with fallback paths (config file reading, template loading, environment variables)
+- **Problem**: `unwrap_or_else` silently swallows errors and falls back, making it difficult to diagnose why alternate code paths are being used. Example: `std::fs::read_to_string(path).unwrap_or_else(|_| default_value)` masks permission errors, file corruption, or misconfiguration.
+- **Rule**: When using a fallback for failed operations, log the failure before falling back so operators can diagnose configuration or environmental issues. Use `warn!` for user-configurable paths, `debug!` for internal defaults.
+- **Applies to**: implement, impl-review

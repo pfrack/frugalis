@@ -183,9 +183,13 @@ pub struct LLMClassifier {
 impl LLMClassifier {
     pub fn new(config: LlmClassifierConfig, client: reqwest::Client, categories: Vec<CategoryConfig>) -> Self {
         let prompt_template = if let Some(ref path) = config.prompt_template_path {
-            std::fs::read_to_string(path).unwrap_or_else(|_| {
-                build_llm_classifier_prompt(&categories, None)
-            })
+            match std::fs::read_to_string(path) {
+                Ok(contents) => contents,
+                Err(e) => {
+                    tracing::warn!("Failed to read prompt template at {}: {}", path, e);
+                    build_llm_classifier_prompt(&categories, None)
+                }
+            }
         } else {
             build_llm_classifier_prompt(&categories, None)
         };
@@ -222,6 +226,10 @@ impl LLMClassifier {
         // Get API key from environment
         let api_key = std::env::var(&self.api_key_env)
             .unwrap_or_else(|_| String::new());
+
+        if api_key.is_empty() {
+            tracing::warn!("LLM classifier API key environment variable {} is empty or unset", self.api_key_env);
+        }
 
         // Build request
         let request = self.client
@@ -306,6 +314,10 @@ impl LLMClassifier {
 impl IntentClassify for LLMClassifier {
     async fn classify(&self, prompt: &str) -> ClassificationResult {
         self.classify_async(prompt).await
+    }
+
+    fn get_routing(&self) -> Option<&std::collections::HashMap<String, RouteEntry>> {
+        None
     }
 }
 

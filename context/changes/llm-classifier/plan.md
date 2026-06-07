@@ -305,6 +305,17 @@ Integration test with `httpmock` verifying the full LLM classification flow end-
 
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles. See `references/progress-format.md`.
 
+## Addendum: Test Framework Expansion (S-09a)
+
+During implementation review, an additional comprehensive test framework was added to `manual-test/test.sh` covering Shared Category Configuration (S-07b) scenarios alongside S-09 LLM classifier tests. This extended the test scope beyond the original plan:
+
+**Original scope:** LLM classifier integration tests (3 tests in test.sh)
+**Actual scope:** Combined S-07b category config + S-09 LLM classifier tests (10 total tests in test.sh)
+
+**Rationale:** The testing infrastructure for both features relies on identical server lifecycle management and HTTP request patterns, making a unified test framework more maintainable than separate test suites.
+
+**Impact:** Positive — provides comprehensive validation of both category configuration and LLM classifier features in realistic end-to-end scenarios.
+
 ### Phase 1: LLM Classifier Config
 
 #### Automated
