@@ -4,7 +4,7 @@ project: cerebrum
 version: 1
 status: draft
 created: 2026-05-26
-updated: 2026-06-07T14:30
+updated: 2026-06-07
 prd_version: 1
 main_goal: speed
 top_blocker: time
@@ -45,7 +45,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-05 | dashboard-mvp-rewrite | comprehensive dashboard rewrite: dedicated module, navigation, CSS styling, and integrated UI | F-03, S-02, S-03, S-04 | FR-006, FR-007, Secondary Success Criterion | implemented |
 | S-06 | dashboard-logs-page | dedicated logs page showing detailed inference logs and trace information | F-04, F-02, F-03, S-01e | FR-006, Observability | proposed |
 | S-07 | intent-classifier-trait | extract `IntentClassify` trait; rename `IntentClassifier` → `RegexClassifier` with own config; add fallback chain config (primary → fallback classifier when confidence low); enable pluggable backends | S-01a, S-01c | FR-002 | implemented |
-| S-07a | extract-generic-classifier-config | move generic config out of `RegexClassifier` to `main()`: routing loading (`ROUTING_CONFIG_PATH`, `hardcoded_routing()`), `BASELINE_MODEL` env, `ModelCosts` populating, `DEFAULT_MODEL*` env vars, `NVIDIA_ENDPOINT`, `SHORT_PROMPT_LEN`; `RegexClassifier` receives only patterns/weights/thresholds | S-07, S-01a | FR-002 | proposed |
+| S-07a | extract-generic-classifier-config | move generic config out of `RegexClassifier` to `main()`: routing loading (`ROUTING_CONFIG_PATH`, `hardcoded_routing()`), `BASELINE_MODEL` env, `ModelCosts` populating, `DEFAULT_MODEL*` env vars, `NVIDIA_ENDPOINT`, `SHORT_PROMPT_LEN`; `RegexClassifier` receives only patterns/weights/thresholds | S-07, S-01a | FR-002 | done |
 | S-07b | shared-category-config | extract shared `CategoryConfig` (names, descriptions, thresholds, priorities) consumed by both `RegexClassifier` and `LLMClassifier` from a single source of truth | S-07, S-01a | FR-002 | proposed |
 | S-08 | provider-url-derivation | ~~refactor routing config so endpoint URLs omit `v1/chat/*`; path suffix derived from `provider_type`~~ — descoped (research-only; not worth config complexity at current scale) | — | FR-003 | descoped |
 | S-09 | llm-classifier | implement `LLMClassifier` backend for `IntentClassify` trait: sends prompt to a small/cheap model, parses classification from response; config carries model, endpoint, `UPSTREAM_API_KEY`, classification prompt template | S-07, S-07b | FR-002 | proposed |
@@ -297,6 +297,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Blockers:** —
 - **Unknowns:** —
 - **Risk:** Low — these values are already surfaced to `AppState` fields (`baseline_model`, `model_costs`, `routing`). The extraction just moves their parsing from inside `RegexClassifier::from_env()` to `main()`, where they're immediately stored in `AppState`. No behavioral change. The `RegexClassifier` constructor signature changes (fewer params for what was already generic), but the test constructors (`from_values`) already accept injected routing — the same pattern extends to the other extracted config.
+- **Status:** done
 
 ### S-07b: Shared category configuration
 
@@ -409,6 +410,8 @@ All roadmap items are active or completed; no currently parked items.
 
 - **F-04: (foundation) Add structured logging statements to all critical code paths and support configurable logging level via RUST_LOG: authentication middleware, proxy classification, routing, streaming, and error handling. Uses `tracing` crate with appropriate levels (info, error) and includes request identifiers for correlation.** — Archived 2026-06-06 → `context/archive/2026-06-06-critical-logging/`. Lesson: —.
 - **S-02: user can view a table in the dashboard showing recent inference records, each row displaying: prompt snippet (minimized, no full body), assigned intent category, upstream model selected, and request duration.** — Archived 2026-06-07 → `context/archive/2026-06-01-inference-log-inspection/`. Lesson: —.
+
+- **S-07a: Generic configuration leaking from `RegexClassifier::from_env()` is lifted to `main()` so it's available to all classifier backends. After extraction, `RegexClassifier` receives only classifier-specific data (patterns, weights, thresholds, `CategoryConfig`).** — Archived 2026-06-07 → `context/archive/2026-06-07-extract-generic-classifier-config/`. Lesson: —.
 
 ---
 
