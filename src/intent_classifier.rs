@@ -107,7 +107,7 @@ pub trait IntentClassify: Send + Sync {
 #[async_trait]
 impl IntentClassify for RegexClassifier {
     async fn classify(&self, prompt: &str) -> ClassificationResult {
-        self.classify_sync(prompt)
+        self.classify_internal(prompt)
     }
 
     fn get_routing(&self) -> Option<&std::collections::HashMap<String, RouteEntry>> {
@@ -220,7 +220,8 @@ impl LLMClassifier {
                 {"role": "user", "content": user_message}
             ],
             "max_tokens": 20,
-            "temperature": 0.0
+            "temperature": 0.0,
+            "response_format": { "type": "json_object" }
         });
 
         // Get API key from environment
@@ -584,7 +585,7 @@ impl RegexClassifier {
     /// Classify a prompt string into one of the 4 intent categories.
     /// Never fails — returns Fallback tier for unmatched or ambiguous prompts.
     /// This is the synchronous implementation (used by the async wrapper).
-    pub fn classify_sync(&self, prompt: &str) -> ClassificationResult {
+    pub fn classify_internal(&self, prompt: &str) -> ClassificationResult {
         let sanitized = sanitize(prompt);
         let matches: Vec<usize> = self.set.matches(&sanitized).into_iter().collect();
 
