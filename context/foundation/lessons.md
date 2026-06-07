@@ -23,6 +23,13 @@
 - **Rule**: Prefer streaming upstream error bodies directly to the client (chunked transfer) or truncating early, rather than buffering the entire body before responding. Keep error-path latency and memory bounded.
 - **Applies to**: implement, impl-review
 
+## Document guard points with self-describing comments, not review cross-references
+
+- **Context**: Review follow-ups that touch handlers or modules with prior review findings (src/main.rs `completion_handler`, `classify_and_log`, and similar system-boundary functions).
+- **Problem**: Adding opaque review cross-references (e.g. `// F1`, `// F2`) to guard points creates cryptic markers that future developers reading the code cannot understand without digging through old review reports. The markers become noise, not documentation.
+- **Rule**: When documenting a guard point at a system boundary (input validation, auth, error handling), write a self-describing comment that explains WHAT invariant is protected and WHY — not a review ID. If a prior review finding is relevant, reference it by its rule in lessons.md, not by its finding number.
+- **Applies to**: implement, impl-review
+
 ## Favor dynamic WHERE clause building over duplicated SQL branches
 
 - **Context**: src/persistence.rs:135-224 (`fetch_inferences` method)

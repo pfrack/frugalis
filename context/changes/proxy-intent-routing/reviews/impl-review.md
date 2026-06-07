@@ -94,4 +94,4 @@
 - **Dimension**: Plan Adherence
 - **Location**: src/intent_classificator.rs:171
 - **Detail**: Plan says `-> &str` but allocation requires `-> String`. Necessary drift.
-- **Decision**: PENDING
+- **Decision**: ACCEPTED (necessary drift due to allocation)

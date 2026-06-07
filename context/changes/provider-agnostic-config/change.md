@@ -1,8 +1,7 @@
 ---
 id: provider-agnostic-config
-status: implemented
-created: 2026-06-01
-updated: 2026-06-01
+status: impl_reviewed
+updated: 2026-06-07
 user: pfrack
 tags: [upstream-routing, provider-agnostic, routing-config, toml, change-3-of-4]
 ---

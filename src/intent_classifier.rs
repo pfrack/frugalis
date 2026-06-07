@@ -38,7 +38,9 @@ impl ModelCosts {
 
     /// An empty cost table — all model lookups return None.
     pub fn empty() -> Self {
-        ModelCosts { costs: HashMap::new() }
+        ModelCosts {
+            costs: HashMap::new(),
+        }
     }
 
     #[cfg(test)]
@@ -266,10 +268,22 @@ const NEGATIVE: &[&str] = &[
 // ── Negative suppression metadata (parallel to NEGATIVE patterns) ──
 
 const NEGATIVE_META: &[NegativeMeta] = &[
-    NegativeMeta { suppressed: CAT_COMPLEX_REASONING, penalty: 2 },
-    NegativeMeta { suppressed: CAT_COMPLEX_REASONING, penalty: 2 },
-    NegativeMeta { suppressed: CAT_SYNTAX_FIX, penalty: 2 },
-    NegativeMeta { suppressed: CAT_FILE_READING, penalty: 2 },
+    NegativeMeta {
+        suppressed: CAT_COMPLEX_REASONING,
+        penalty: 2,
+    },
+    NegativeMeta {
+        suppressed: CAT_COMPLEX_REASONING,
+        penalty: 2,
+    },
+    NegativeMeta {
+        suppressed: CAT_SYNTAX_FIX,
+        penalty: 2,
+    },
+    NegativeMeta {
+        suppressed: CAT_FILE_READING,
+        penalty: 2,
+    },
 ];
 
 // ── Env-or-default helper ──
@@ -343,14 +357,10 @@ fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
 /// before forwarding the request to the provider.
 pub fn auth_headers_for(provider_type: &str, api_key: &str) -> Vec<(String, String)> {
     match provider_type {
-        "openai_compatible" | "" =>
-            vec![("authorization".into(), format!("Bearer {api_key}"))],
-        "anthropic" =>
-            vec![("x-api-key".into(), api_key.to_string())],
-        "ollama" | "local" =>
-            vec![],
-        _ =>
-            vec![("authorization".into(), format!("Bearer {api_key}"))],
+        "openai_compatible" | "" => vec![("authorization".into(), format!("Bearer {api_key}"))],
+        "anthropic" => vec![("x-api-key".into(), api_key.to_string())],
+        "ollama" | "local" => vec![],
+        _ => vec![("authorization".into(), format!("Bearer {api_key}"))],
     }
 }
 
@@ -422,45 +432,61 @@ fn build_all_patterns() -> (Vec<&'static str>, Vec<PatternMeta>) {
 // ── TOML Routing Loader ──
 
 fn load_routing_from_file(path: &str) -> Result<HashMap<String, RouteEntry>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Cannot read {}: {}", path, e))?;
-    let root: toml::Value = toml::from_str(&content)
-        .map_err(|e| format!("Invalid TOML in {}: {}", path, e))?;
-    let table = root.as_table()
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
+    let root: toml::Value =
+        toml::from_str(&content).map_err(|e| format!("Invalid TOML in {}: {}", path, e))?;
+    let table = root
+        .as_table()
         .ok_or_else(|| format!("Root must be a table in {}", path))?;
     let mut routing = HashMap::new();
     for (key, value) in table {
         if key == "fallback" {
             continue;
         }
-        let model = value.get("model")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| env_or_default("DEFAULT_MODEL", DEFAULT_MODEL));
-        let endpoint = value.get("endpoint")
+        let model = if let Some(m) = value.get("model").and_then(|v| v.as_str()) {
+            m.to_string()
+        } else {
+            warn!(category = %key, "routing.toml missing 'model' for category; using DEFAULT_MODEL");
+            env_or_default("DEFAULT_MODEL", DEFAULT_MODEL)
+        };
+        let endpoint = value
+            .get("endpoint")
             .and_then(|v| v.as_str())
             .unwrap_or(DEFAULT_ENDPOINT)
             .to_string();
-        let cost_per_1m_input_tokens = value.get("cost_per_1m_input_tokens")
+        let cost_per_1m_input_tokens = value
+            .get("cost_per_1m_input_tokens")
             .and_then(|v| v.as_float());
-        let provider_type = value.get("provider_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let api_key_env = value.get("api_key_env")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let provider_type = if let Some(pt) = value.get("provider_type").and_then(|v| v.as_str()) {
+            pt.to_string()
+        } else {
+            warn!(category = %key, "routing.toml missing 'provider_type' for category; defaulting to openai_compatible (empty)");
+            String::new()
+        };
+        let api_key_env = if let Some(ake) = value.get("api_key_env").and_then(|v| v.as_str()) {
+            Some(ake.to_string())
+        } else {
+            warn!(category = %key, "routing.toml missing 'api_key_env' for category; no API key will be resolved");
+            None
+        };
         routing.insert(
             key.to_uppercase(),
-            RouteEntry { model, endpoint, cost_per_1m_input_tokens, provider_type, api_key_env },
+            RouteEntry {
+                model,
+                endpoint,
+                cost_per_1m_input_tokens,
+                provider_type,
+                api_key_env,
+            },
         );
     }
     Ok(routing)
 }
 
 fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
-    let path = std::env::var("ROUTING_CONFIG_PATH")
-        .unwrap_or_else(|_| ROUTING_CONFIG_DEFAULT.to_string());
+    let path =
+        std::env::var("ROUTING_CONFIG_PATH").unwrap_or_else(|_| ROUTING_CONFIG_DEFAULT.to_string());
     let mut routing = match load_routing_from_file(&path) {
         Ok(r) => {
             info!("Routing: loaded from {path}");
@@ -483,7 +509,7 @@ fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
 
 // ── Implementations ──
 
-    impl ClassificationResult {
+impl ClassificationResult {
     /// Creates a CASUAL fallback result with Fallback tier.
     /// Used when no classifier chain is configured (graceful degradation).
     pub fn fallback() -> Self {
@@ -504,14 +530,13 @@ impl RegexClassifier {
     /// When routing.toml is missing, hardcoded defaults are used.
     pub fn from_env() -> Result<Self, String> {
         let (patterns, metadata) = build_all_patterns();
-        let set = RegexSet::new(&patterns)
-            .map_err(|e| format!("regex compilation failed: {e}"))?;
+        let set = RegexSet::new(&patterns).map_err(|e| format!("regex compilation failed: {e}"))?;
         let negative_start = FR_COUNT + CR_COUNT + SF_COUNT + CA_COUNT;
         let negative_idx = negative_start..(negative_start + NEG_COUNT);
         let (routing, fallback_entry) = load_routing();
 
-        let baseline_model = std::env::var("BASELINE_MODEL")
-            .unwrap_or_else(|_| DEFAULT_MODEL_COMPLEX.to_string());
+        let baseline_model =
+            std::env::var("BASELINE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_COMPLEX.to_string());
 
         // Merge routing.toml overrides into the hardcoded cost table.
         let mut costs = hardcoded_model_costs();
@@ -535,8 +560,7 @@ impl RegexClassifier {
     #[cfg(test)]
     pub fn from_values(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry) -> Self {
         let (patterns, metadata) = build_all_patterns();
-        let set = RegexSet::new(&patterns)
-            .expect("built-in patterns should always compile");
+        let set = RegexSet::new(&patterns).expect("built-in patterns should always compile");
         let negative_start = FR_COUNT + CR_COUNT + SF_COUNT + CA_COUNT;
         let negative_idx = negative_start..(negative_start + NEG_COUNT);
         let mut costs = hardcoded_model_costs();
@@ -579,134 +603,7 @@ impl RegexClassifier {
                     let neg = &NEGATIVE_META[neg_idx];
                     if let Some(score) = scores.get_mut(neg.suppressed) {
                         *score = score.saturating_sub(neg.penalty as u32);
-    // ── ClassifierChain Tests ────────────────────────────────────────────────────
-
-    struct StubClassifier {
-        result: ClassificationResult,
-    }
-
-    impl IntentClassify for StubClassifier {
-        fn classify(&self, _prompt: &str) -> ClassificationResult {
-            self.result.clone()
-        }
-    }
-
-    #[test]
-    fn chain_returns_first_regex_match() {
-        let stub1 = StubClassifier {
-            result: ClassificationResult {
-                category: "CAT1".to_string(),
-                model: "model1".to_string(),
-                endpoint: "ep1".to_string(),
-                tier: ClassificationTier::Regex,
-                provider_type: "prov1".to_string(),
-                api_key_env: None,
-            },
-        };
-        let stub2 = StubClassifier {
-            result: ClassificationResult {
-                category: "CAT2".to_string(),
-                model: "model2".to_string(),
-                endpoint: "ep2".to_string(),
-                tier: ClassificationTier::Regex,
-                provider_type: "prov2".to_string(),
-                api_key_env: None,
-            },
-        };
-        let chain = ClassifierChain::new(vec![
-            Arc::new(stub1),
-            Arc::new(stub2),
-        ]);
-        let result = chain.classify("any prompt");
-        assert_eq!(result.category, "CAT1");
-        assert_eq!(result.tier, ClassificationTier::Regex);
-    }
-
-    #[test]
-    fn chain_falls_through_to_next() {
-        let stub1 = StubClassifier {
-            result: ClassificationResult {
-                category: "CASUAL".to_string(),
-                model: "fallback1".to_string(),
-                endpoint: String::new(),
-                tier: ClassificationTier::Fallback,
-                provider_type: String::new(),
-                api_key_env: None,
-            },
-        };
-        let stub2 = StubClassifier {
-            result: ClassificationResult {
-                category: "COMPLEX_REASONING".to_string(),
-                model: "model2".to_string(),
-                endpoint: "ep2".to_string(),
-                tier: ClassificationTier::Regex,
-                provider_type: "prov2".to_string(),
-                api_key_env: None,
-            },
-        };
-        let chain = ClassifierChain::new(vec![
-            Arc::new(stub1),
-            Arc::new(stub2),
-        ]);
-        let result = chain.classify("prompt");
-        assert_eq!(result.category, "COMPLEX_REASONING");
-        assert_eq!(result.tier, ClassificationTier::Regex);
-    }
-
-    #[test]
-    fn chain_returns_last_on_all_fallback() {
-        let stub1 = StubClassifier {
-            result: ClassificationResult::fallback(),
-        };
-        let stub2 = StubClassifier {
-            result: ClassificationResult {
-                category: "CASUAL".to_string(),
-                model: "last".to_string(),
-                endpoint: String::new(),
-                tier: ClassificationTier::Fallback,
-                provider_type: String::new(),
-                api_key_env: None,
-            },
-        };
-        let chain = ClassifierChain::new(vec![
-            Arc::new(stub1),
-            Arc::new(stub2),
-        ]);
-        let result = chain.classify("any");
-        assert_eq!(result.category, "CASUAL");
-        assert_eq!(result.tier, ClassificationTier::Fallback);
-    }
-
-    #[test]
-    fn chain_handles_empty_backends() {
-        let chain = ClassifierChain::new(vec![]);
-        let result = chain.classify("prompt");
-        assert_eq!(result.tier, ClassificationTier::Fallback);
-        assert_eq!(result.category, "CASUAL");
-    }
-
-    #[test]
-    fn trait_boundary_compilation() {
-        struct AnotherStub;
-        impl IntentClassify for AnotherStub {
-            fn classify(&self, _prompt: &str) -> ClassificationResult {
-                ClassificationResult {
-                    category: "STUB".to_string(),
-                    model: "stub-model".to_string(),
-                    endpoint: "stub-endpoint".to_string(),
-                    tier: ClassificationTier::Regex,
-                    provider_type: "stub".to_string(),
-                    api_key_env: None,
-                }
-            }
-        }
-        // Verify it can be used as a trait object and wrapped in a chain
-        let stub = Arc::new(AnotherStub) as Arc<dyn IntentClassify + Send + Sync>;
-        let chain = ClassifierChain::new(vec![stub]);
-        let result = chain.classify("test");
-        assert_eq!(result.category, "STUB");
-    }
-}
+                    }
                 }
             }
         }
@@ -720,7 +617,8 @@ impl RegexClassifier {
         // Check thresholds per Section 9 algorithm
         let fr = *scores.get(CAT_FILE_READING).unwrap_or(&0) >= FR_THRESHOLD;
         let sf = *scores.get(CAT_SYNTAX_FIX).unwrap_or(&0) >= SF_THRESHOLD_HIGH
-            || (*scores.get(CAT_SYNTAX_FIX).unwrap_or(&0) >= SF_THRESHOLD_LOW && *scores.get(CAT_FILE_READING).unwrap_or(&0) == 0);
+            || (*scores.get(CAT_SYNTAX_FIX).unwrap_or(&0) >= SF_THRESHOLD_LOW
+                && *scores.get(CAT_FILE_READING).unwrap_or(&0) == 0);
         let cr = *scores.get(CAT_COMPLEX_REASONING).unwrap_or(&0) >= CR_THRESHOLD;
         let ca = *scores.get(CAT_CASUAL).unwrap_or(&0) >= CA_THRESHOLD;
 
@@ -777,19 +675,43 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             "FILE_READING".to_string(),
-            RouteEntry { model: "fr-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None },
+            RouteEntry {
+                model: "fr-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
         );
         routing.insert(
             "COMPLEX_REASONING".to_string(),
-            RouteEntry { model: "cr-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None },
+            RouteEntry {
+                model: "cr-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
         );
         routing.insert(
             "SYNTAX_FIX".to_string(),
-            RouteEntry { model: "sf-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None },
+            RouteEntry {
+                model: "sf-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
         );
         routing.insert(
             "CASUAL".to_string(),
-            RouteEntry { model: "ca-model".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None },
+            RouteEntry {
+                model: "ca-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
         );
         let fallback = RouteEntry {
             model: "fallback-model".to_string(),
@@ -948,10 +870,7 @@ mod tests {
                 api_key_env: None,
             },
         };
-        let chain = ClassifierChain::new(vec![
-            Arc::new(stub1),
-            Arc::new(stub2),
-        ]);
+        let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
         let result = chain.classify("any prompt");
         assert_eq!(result.category, "CAT1");
         assert_eq!(result.tier, ClassificationTier::Regex);
@@ -979,10 +898,7 @@ mod tests {
                 api_key_env: None,
             },
         };
-        let chain = ClassifierChain::new(vec![
-            Arc::new(stub1),
-            Arc::new(stub2),
-        ]);
+        let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
         let result = chain.classify("prompt");
         assert_eq!(result.category, "COMPLEX_REASONING");
         assert_eq!(result.tier, ClassificationTier::Regex);
@@ -1003,10 +919,7 @@ mod tests {
                 api_key_env: None,
             },
         };
-        let chain = ClassifierChain::new(vec![
-            Arc::new(stub1),
-            Arc::new(stub2),
-        ]);
+        let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
         let result = chain.classify("any");
         assert_eq!(result.category, "CASUAL");
         assert_eq!(result.tier, ClassificationTier::Fallback);
@@ -1040,5 +953,53 @@ mod tests {
         let chain = ClassifierChain::new(vec![stub]);
         let result = chain.classify("test");
         assert_eq!(result.category, "STUB");
+    }
+
+    #[test]
+    fn auth_headers_for_openai_compatible() {
+        let headers = auth_headers_for("openai_compatible", "sk-123");
+        assert_eq!(
+            headers,
+            vec![("authorization".to_string(), "Bearer sk-123".to_string())]
+        );
+    }
+
+    #[test]
+    fn auth_headers_for_empty_defaults_to_openai_compatible() {
+        let headers = auth_headers_for("", "sk-123");
+        assert_eq!(
+            headers,
+            vec![("authorization".to_string(), "Bearer sk-123".to_string())]
+        );
+    }
+
+    #[test]
+    fn auth_headers_for_anthropic() {
+        let headers = auth_headers_for("anthropic", "sk-ant-123");
+        assert_eq!(
+            headers,
+            vec![("x-api-key".to_string(), "sk-ant-123".to_string())]
+        );
+    }
+
+    #[test]
+    fn auth_headers_for_ollama() {
+        let headers = auth_headers_for("ollama", "dummy");
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn auth_headers_for_local() {
+        let headers = auth_headers_for("local", "dummy");
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn auth_headers_for_unknown() {
+        let headers = auth_headers_for("unknown_provider", "key");
+        assert_eq!(
+            headers,
+            vec![("authorization".to_string(), "Bearer key".to_string())]
+        );
     }
 }

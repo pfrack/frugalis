@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use sqlx::Row;
-use uuid::Uuid;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 /// Trait for looking up model costs by name.
 /// Allows persistence to query costs without depending on the classification module directly.
@@ -87,7 +87,7 @@ pub struct InferenceRecord {
     pub prompt_char_count: Option<i32>,
 }
 
-use sqlx::postgres::{PgConnectOptions};
+use sqlx::postgres::PgConnectOptions;
 use std::str::FromStr;
 
 impl PersistenceConfig {
@@ -106,12 +106,10 @@ impl PersistenceConfig {
 
         // Idempotent schema migration: add the prompt_char_count column if absent.
         let pool_for_migration = pool.clone();
-        sqlx::query(
-            "ALTER TABLE inferences ADD COLUMN IF NOT EXISTS prompt_char_count INTEGER"
-        )
-        .execute(&pool_for_migration)
-        .await
-        .map_err(|e| format!("Schema migration failed: {e}"))?;
+        sqlx::query("ALTER TABLE inferences ADD COLUMN IF NOT EXISTS prompt_char_count INTEGER")
+            .execute(&pool_for_migration)
+            .await
+            .map_err(|e| format!("Schema migration failed: {e}"))?;
         info!("Schema migration: prompt_char_count column ensured");
 
         Ok(Self {
@@ -143,9 +141,7 @@ impl PersistenceConfig {
         let data_sql = format!(
             "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
              FROM inferences{} ORDER BY created_at DESC LIMIT {} OFFSET {}",
-            where_clause,
-            limit_ph,
-            offset_ph,
+            where_clause, limit_ph, offset_ph,
         );
         let count_sql = format!("SELECT COUNT(*) FROM inferences{}", where_clause);
 
@@ -209,10 +205,7 @@ impl PersistenceConfig {
     /// Runs a single GROUP BY aggregation over all records in the window.
     /// Rows with a non-NULL category become the [`LatencySummaryRow`] list;
     /// the NULL-category row (if any) populates [`LatencySummary::unclassified_count`].
-    pub async fn fetch_latency_summary(
-        &self,
-        hours: u32,
-    ) -> Result<LatencySummary, QueryError> {
+    pub async fn fetch_latency_summary(&self, hours: u32) -> Result<LatencySummary, QueryError> {
         let rows = sqlx::query(
             "SELECT category, \
              COUNT(*)::BIGINT AS count, \
@@ -316,7 +309,11 @@ impl PersistenceConfig {
             classified_count += count;
 
             // Use actual prompt_char_count when available, fall back to snippet length.
-            let effective_chars = if total_chars > 0 { total_chars } else { total_fallback_chars };
+            let effective_chars = if total_chars > 0 {
+                total_chars
+            } else {
+                total_fallback_chars
+            };
             total_chars_all += effective_chars;
 
             if let Some(cost) = model_costs.get_cost(&model) {
@@ -326,7 +323,8 @@ impl PersistenceConfig {
             }
         }
 
-        let baseline_cost = model_costs.get_cost(baseline_model)
+        let baseline_cost = model_costs
+            .get_cost(baseline_model)
             .map(|cost_per_1m| {
                 let tokens = total_chars_all as f64 / 4.0;
                 tokens * cost_per_1m / 1_000_000.0
@@ -370,7 +368,10 @@ pub fn extract_last_user_message(body: &str) -> String {
         let messages = v.get("messages")?.as_array()?;
         // Prevent DoS via unbounded message arrays.
         if messages.len() > 1000 {
-            warn!("ignoring request with {} messages (limit 1000)", messages.len());
+            warn!(
+                "ignoring request with {} messages (limit 1000)",
+                messages.len()
+            );
             return Some(String::new());
         }
         let last_user = messages
@@ -443,12 +444,13 @@ pub fn log_inference(
 }
 
 async fn write_with_retry(pool: &PgPool, record: &InferenceRecord) -> Result<(), String> {
-    retry_once(|| insert_once(pool, record))
-        .await
-        .map_err(|e| {
-            error!("insert failed for request_id={} after retries: {:?}", record.request_id, e);
-            e.to_string()
-        })
+    retry_once(|| insert_once(pool, record)).await.map_err(|e| {
+        error!(
+            "insert failed for request_id={} after retries: {:?}",
+            record.request_id, e
+        );
+        e.to_string()
+    })
 }
 
 /// Retry an async operation exactly once.
@@ -782,7 +784,10 @@ mod tests {
         let has_alpha = records.iter().any(|r| r.prompt_snippet == "alpha snippet");
         let has_beta = records.iter().any(|r| r.prompt_snippet == "beta snippet");
         assert!(has_alpha, "CAT_ALPHA record should appear");
-        assert!(!has_beta, "CAT_BETA record should not appear when filtering by CAT_ALPHA");
+        assert!(
+            !has_beta,
+            "CAT_BETA record should not appear when filtering by CAT_ALPHA"
+        );
     }
 
     #[tokio::test]
@@ -892,7 +897,10 @@ mod tests {
         assert_eq!(test_rows.len(), 1, "expected exactly one test row");
         assert_eq!(test_rows[0].request_count, 1);
         assert_eq!(test_rows[0].avg_duration_ms, Some(100));
-        assert!(result.total_classified_count >= 1, "total should include test record");
+        assert!(
+            result.total_classified_count >= 1,
+            "total should include test record"
+        );
     }
 
     #[tokio::test]
@@ -973,7 +981,11 @@ mod tests {
             .await
             .ok();
 
-        let test_rows: Vec<_> = result.rows.iter().filter(|r| r.category.starts_with(&prefix)).collect();
+        let test_rows: Vec<_> = result
+            .rows
+            .iter()
+            .filter(|r| r.category.starts_with(&prefix))
+            .collect();
         assert!(!test_rows.is_empty(), "expected at least one test row");
 
         let row_a = test_rows
@@ -1009,7 +1021,9 @@ mod tests {
         let pool = match test_pool().await {
             Some(p) => p,
             None => {
-                eprintln!("SKIP test_fetch_latency_summary_unclassified_count: DATABASE_URL not set");
+                eprintln!(
+                    "SKIP test_fetch_latency_summary_unclassified_count: DATABASE_URL not set"
+                );
                 return;
             }
         };
@@ -1054,7 +1068,11 @@ mod tests {
             .await
             .ok();
 
-        assert!(result.unclassified_count >= 2, "expected at least 2 unclassified records, got {}", result.unclassified_count);
+        assert!(
+            result.unclassified_count >= 2,
+            "expected at least 2 unclassified records, got {}",
+            result.unclassified_count
+        );
     }
 
     // ── fetch_savings_estimate ──────────────────────────────────────────────
@@ -1069,7 +1087,9 @@ mod tests {
             }
         };
         let pc = make_persistence(pool.clone());
-        let mc = super::super::intent_classificator::ModelCosts::from_costs(super::super::intent_classificator::hardcoded_model_costs());
+        let mc = super::super::intent_classifier::ModelCosts::from_costs(
+            super::super::intent_classifier::hardcoded_model_costs(),
+        );
         let id = uuid::Uuid::new_v4();
         let model = format!("Z_TST_SAV_EMPTY_{}", uuid::Uuid::new_v4());
         sqlx::query(
@@ -1097,7 +1117,11 @@ mod tests {
             .await
             .expect("delete should succeed");
 
-        assert!(result.classified_count >= 1, "classified_count should be >= 1, got {}", result.classified_count);
+        assert!(
+            result.classified_count >= 1,
+            "classified_count should be >= 1, got {}",
+            result.classified_count
+        );
     }
 
     #[tokio::test]
@@ -1113,10 +1137,10 @@ mod tests {
         // Use unique model names to isolate from stale DB data.
         let model_a = format!("Z_TST_SAV_A_{}", uuid::Uuid::new_v4());
         let model_b = format!("Z_TST_SAV_B_{}", uuid::Uuid::new_v4());
-        let mut costs = super::super::intent_classificator::hardcoded_model_costs();
+        let mut costs = super::super::intent_classifier::hardcoded_model_costs();
         costs.insert(model_a.clone(), 0.15);
         costs.insert(model_b.clone(), 3.00);
-        let mc = super::super::intent_classificator::ModelCosts::from_costs(costs);
+        let mc = super::super::intent_classifier::ModelCosts::from_costs(costs);
         let baseline = model_b.clone();
 
         let id1 = uuid::Uuid::new_v4();
@@ -1165,8 +1189,16 @@ mod tests {
             .await
             .expect("delete should succeed");
 
-        assert!(result.classified_count >= 2, "classified_count should be >= 2, got {}", result.classified_count);
-        assert!(result.savings_usd > 0.0, "savings should be positive, got {}", result.savings_usd);
+        assert!(
+            result.classified_count >= 2,
+            "classified_count should be >= 2, got {}",
+            result.classified_count
+        );
+        assert!(
+            result.savings_usd > 0.0,
+            "savings should be positive, got {}",
+            result.savings_usd
+        );
     }
 
     #[tokio::test]
@@ -1174,12 +1206,16 @@ mod tests {
         let pool = match test_pool().await {
             Some(p) => p,
             None => {
-                eprintln!("SKIP test_fetch_savings_estimate_unknown_cost_model: DATABASE_URL not set");
+                eprintln!(
+                    "SKIP test_fetch_savings_estimate_unknown_cost_model: DATABASE_URL not set"
+                );
                 return;
             }
         };
         let pc = make_persistence(pool.clone());
-        let mc = super::super::intent_classificator::ModelCosts::from_costs(super::super::intent_classificator::hardcoded_model_costs());
+        let mc = super::super::intent_classifier::ModelCosts::from_costs(
+            super::super::intent_classifier::hardcoded_model_costs(),
+        );
         let id = uuid::Uuid::new_v4();
         let model = format!("Z_TST_SAV_UNK_{}", uuid::Uuid::new_v4());
 
@@ -1208,8 +1244,16 @@ mod tests {
             .await
             .expect("delete should succeed");
 
-        assert!(result.classified_count >= 1, "classified_count should be >= 1, got {}", result.classified_count);
-        assert!(result.unknown_cost_count >= 1, "unknown model should be counted, got {}", result.unknown_cost_count);
+        assert!(
+            result.classified_count >= 1,
+            "classified_count should be >= 1, got {}",
+            result.classified_count
+        );
+        assert!(
+            result.unknown_cost_count >= 1,
+            "unknown model should be counted, got {}",
+            result.unknown_cost_count
+        );
     }
 
     #[tokio::test]
@@ -1217,12 +1261,16 @@ mod tests {
         let pool = match test_pool().await {
             Some(p) => p,
             None => {
-                eprintln!("SKIP test_fetch_savings_estimate_filters_null_category: DATABASE_URL not set");
+                eprintln!(
+                    "SKIP test_fetch_savings_estimate_filters_null_category: DATABASE_URL not set"
+                );
                 return;
             }
         };
         let pc = make_persistence(pool.clone());
-        let mc = super::super::intent_classificator::ModelCosts::from_costs(super::super::intent_classificator::hardcoded_model_costs());
+        let mc = super::super::intent_classifier::ModelCosts::from_costs(
+            super::super::intent_classifier::hardcoded_model_costs(),
+        );
         let id = uuid::Uuid::new_v4();
 
         // Insert a record with NULL category — should be excluded from classified_count.
@@ -1260,16 +1308,18 @@ mod tests {
         let pool = match test_pool().await {
             Some(p) => p,
             None => {
-                eprintln!("SKIP test_fetch_savings_estimate_historical_fallback: DATABASE_URL not set");
+                eprintln!(
+                    "SKIP test_fetch_savings_estimate_historical_fallback: DATABASE_URL not set"
+                );
                 return;
             }
         };
         let pc = make_persistence(pool.clone());
         let id = uuid::Uuid::new_v4();
         let model = format!("Z_TST_SAV_FB_{}", uuid::Uuid::new_v4());
-        let mut costs = super::super::intent_classificator::hardcoded_model_costs();
+        let mut costs = super::super::intent_classifier::hardcoded_model_costs();
         costs.insert(model.clone(), 0.15);
-        let mc = super::super::intent_classificator::ModelCosts::from_costs(costs);
+        let mc = super::super::intent_classifier::ModelCosts::from_costs(costs);
 
         // Insert a record with NULL prompt_char_count (historical record).
         sqlx::query(
@@ -1296,8 +1346,15 @@ mod tests {
             .await
             .expect("delete should succeed");
 
-        assert!(result.classified_count >= 1, "classified_count should be >= 1, got {}", result.classified_count);
-        assert!(result.has_historical_fallback, "should detect fallback usage");
+        assert!(
+            result.classified_count >= 1,
+            "classified_count should be >= 1, got {}",
+            result.classified_count
+        );
+        assert!(
+            result.has_historical_fallback,
+            "should detect fallback usage"
+        );
     }
 
     #[tokio::test]
@@ -1343,6 +1400,9 @@ mod tests {
             .ok();
 
         let found = result.rows.iter().any(|r| r.category == cat);
-        assert!(!found, "old record should be excluded from 1-hour window, but found category {cat}");
+        assert!(
+            !found,
+            "old record should be excluded from 1-hour window, but found category {cat}"
+        );
     }
 }

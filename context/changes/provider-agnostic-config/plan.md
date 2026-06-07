@@ -4,6 +4,8 @@
 
 Add `provider_type` and `api_key_env` fields to `RouteEntry` and `ClassificationResult`, update TOML parsing to read them, enrich the `/v1/chat/completions` JSON response with endpoint/provider_type/api_key, and define an `auth_headers_for` lookup function. This makes the routing config final before SSE streaming (Change 4), replacing the single `UPSTREAM_API_KEY` assumption with per-category provider configuration.
 
+> **Implementation Note (2026-06-07)**: The `completion_handler` was later rewritten (in `reqwest-upstream-routing`) to perform actual upstream proxying instead of returning enriched JSON. The enriched response fields (`endpoint`, `provider_type`, `api_key`) are therefore not present in the final API. The `auth_headers_for` function is still used to construct headers for the upstream request. This deviation reflects the architecture's evolution toward a full proxy model (S-01 north star).
+
 ## Current State Analysis
 
 - **`RouteEntry`** (`src/intent_classificator.rs:10-14`) carries `model`, `endpoint`, `cost_per_1m_input_tokens` — but has no notion of which provider or auth scheme to use. All entries implicitly assume OpenRouter-compatible Bearer auth.

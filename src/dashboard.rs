@@ -1,14 +1,14 @@
-use std::sync::Arc;
+use askama::Template;
+use askama_web::WebTemplate;
 use axum::{
     extract::{Query, State},
     response::IntoResponse,
     routing::get,
     Router,
 };
-use tower_http::services::ServeDir;
-use askama::Template;
-use askama_web::WebTemplate;
 use std::collections::HashMap;
+use std::sync::Arc;
+use tower_http::services::ServeDir;
 
 use crate::{auth, persistence, AppState};
 
@@ -41,20 +41,39 @@ const ICON_CLOCK: &str = "<svg width='16' height='16' viewBox='0 0 24 24' fill='
 const ICON_DOLLAR: &str = "<svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><line x1='12' y1='1' x2='12' y2='23'/><path d='M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6'/></svg>";
 
 pub static PAGES: &[NavPage] = &[
-    NavPage { path: "", label: "Dashboard", icon: ICON_DASHBOARD },
-    NavPage { path: "inferences", label: "Inference Logs", icon: ICON_LIST },
-    NavPage { path: "latency", label: "Latency", icon: ICON_CLOCK },
-    NavPage { path: "savings", label: "Savings", icon: ICON_DOLLAR },
+    NavPage {
+        path: "",
+        label: "Dashboard",
+        icon: ICON_DASHBOARD,
+    },
+    NavPage {
+        path: "inferences",
+        label: "Inference Logs",
+        icon: ICON_LIST,
+    },
+    NavPage {
+        path: "latency",
+        label: "Latency",
+        icon: ICON_CLOCK,
+    },
+    NavPage {
+        path: "savings",
+        label: "Savings",
+        icon: ICON_DOLLAR,
+    },
 ];
 
 pub fn nav_for(current: &str) -> NavContext {
     NavContext {
-        pages: PAGES.iter().map(|p| NavItem {
-            path: p.path,
-            label: p.label,
-            icon: p.icon,
-            active: p.path == current,
-        }).collect(),
+        pages: PAGES
+            .iter()
+            .map(|p| NavItem {
+                path: p.path,
+                label: p.label,
+                icon: p.icon,
+                active: p.path == current,
+            })
+            .collect(),
     }
 }
 
@@ -113,9 +132,7 @@ dashboard_page! {
     }
 }
 
-async fn dashboard_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let db_connected = state.persistence.is_some();
     let classifier_active = state.classifier.is_some();
     let model_costs = state.model_costs.clone();
@@ -273,9 +290,7 @@ async fn latency_handler(
     }
 }
 
-async fn savings_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn savings_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let persistence = match &state.persistence {
         Some(p) => p,
         None => {
@@ -291,7 +306,10 @@ async fn savings_handler(
     let model_costs = state.model_costs.clone();
     let baseline_model = state.baseline_model.clone();
 
-    match persistence.fetch_savings_estimate(24, &model_costs, &baseline_model).await {
+    match persistence
+        .fetch_savings_estimate(24, &model_costs, &baseline_model)
+        .await
+    {
         Ok(est) => SavingsTemplate {
             nav: nav_for("savings"),
             estimate: Some(est),

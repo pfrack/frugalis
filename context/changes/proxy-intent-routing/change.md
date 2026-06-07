@@ -1,8 +1,7 @@
 ---
 id: proxy-intent-routing
-status: implemented
-created: 2026-06-01
-updated: 2026-06-01
+status: impl_reviewed
+updated: 2026-06-07
 user: pfrack
 tags: [intent-classification, onnx, proxy-routing, intent-classificator, regex-classifier]
 ---

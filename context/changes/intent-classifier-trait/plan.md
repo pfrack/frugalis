@@ -29,6 +29,7 @@ Extract the `IntentClassifier` concrete struct into an `IntentClassify` trait wi
 - Dashboard handlers duplicate the same costs-extraction pattern twice (dashboard.rs:114–117 and 286–289) — extracting costs to AppState fields eliminates both duplications.
 - `RouteEntry` does not derive `Clone`. Adding `#[derive(Clone)]` is required since `HashMap<String, RouteEntry>` is stored in `Arc`, and `RouteEntry` must be `Clone` for the `Arc` to be constructible from a `HashMap` (at least for test convenience). Production code can move the HashMap into the Arc.
 - The `from_values` test constructor hardcodes `baseline_model: "claude-3.5-sonnet"` (line 498) — after refactoring, test helpers that previously got baseline from the classifier must set it explicitly on `AppState`.
+- The `IntentClassify` trait gains a second method `get_routing()` with a default `None` implementation. This allows the chain to merge routing tables from all backends at startup without coupling `AppState` to a specific backend type. Only backends that hold a routing table (like `RegexClassifier`) override it. Future backends (S-09 LLM classifier) return `None`, making them invisible to routing merge. The alternative — extracting routing in `main()` via direct field access — would couple the startup code to `RegexClassifier`'s internals and break if a non-regex backend is added first.
 
 ## What We're NOT Doing
 
@@ -66,7 +67,7 @@ Create the `IntentClassify` trait in `intent_classificator.rs`, rename `IntentCl
 
 **Intent**: Define a public trait with a single synchronous method `fn classify(&self, prompt: &str) -> ClassificationResult` that all classifier backends implement. Place immediately after the public types section (before `ModelCosts`).
 
-**Contract**: The trait block exports one method signature. No associated types, no async, no default methods.
+**Contract**: The trait block exports one mandatory method `classify()` and one optional method `get_routing()` with a default `None` return. No associated types, no async, no other default methods.
 
 #### 2. Rename `IntentClassifier` to `RegexClassifier`
 
