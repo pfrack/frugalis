@@ -1,8 +1,9 @@
 ---
 id: classify-endpoint
-status: impl_reviewed
+status: archived
 created: 2026-06-01
-updated: 2026-06-06
+updated: 2026-06-07
+archived_at: 2026-06-07T11:28:45Z
 user: pfrack
 tags: [upstream-routing, classify, api, change-1-of-4]
 ---
