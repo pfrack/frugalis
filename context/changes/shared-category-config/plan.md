@@ -705,9 +705,9 @@ The `from_values()` already gained the `categories` parameter in Phase 1.
 
 #### Automated
 
-- [x] 2.1 Compiles: `cargo build`
-- [x] 2.2 All tests pass: `cargo test`
-- [x] 2.3 Works without config file (hardcoded fallback): `cargo test`
+- [x] 2.1 Compiles: `cargo build` — 02b6a73
+- [x] 2.2 All tests pass: `cargo test` — 02b6a73
+- [x] 2.3 Works without config file (hardcoded fallback): `cargo test` — 02b6a73
 
 #### Manual
 
@@ -719,10 +719,10 @@ The `from_values()` already gained the `categories` parameter in Phase 1.
 
 #### Automated
 
-- [ ] 3.1 All tests pass: `cargo test`
-- [ ] 3.2 Slow tests pass: `cargo test slow_tests`
-- [ ] 3.3 CI checks: `cargo test auth && cargo test routes_auth`
-- [ ] 3.4 Verification test catches key mismatches
+- [x] 3.1 All tests pass: `cargo test`
+- [x] 3.2 Slow tests pass: `cargo test slow_tests`
+- [x] 3.3 CI checks: `cargo test auth && cargo test routes_auth`
+- [x] 3.4 Verification test catches key mismatches
 
 #### Manual
 

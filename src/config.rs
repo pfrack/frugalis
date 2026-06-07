@@ -292,29 +292,25 @@ api_key_env = ""
 
     #[test]
     fn hardcoded_routing_produces_expected_defaults() {
-        let (routing, fallback) = hardcoded_routing(&hardcoded_categories());
+        let cats = hardcoded_categories();
+        let (routing, fallback) = hardcoded_routing(&cats);
 
-        assert_eq!(routing.len(), 4);
-        assert!(routing.contains_key("COMPLEX_REASONING"));
-        assert!(routing.contains_key("FILE_READING"));
-        assert!(routing.contains_key("SYNTAX_FIX"));
-        assert!(routing.contains_key("CASUAL"));
-
-        let cr = routing.get("COMPLEX_REASONING").unwrap();
-        assert_eq!(cr.model, DEFAULT_MODEL_COMPLEX);
-        assert!(cr.endpoint.contains("integrate.api.nvidia.com"));
-        assert_eq!(cr.provider_type, "nvidia_nim");
-        assert_eq!(cr.api_key_env, Some("NVIDIA_API_KEY".to_string()));
-        assert_eq!(cr.cost_per_1m_input_tokens, None);
-
-        let fr = routing.get("FILE_READING").unwrap();
-        assert_eq!(fr.model, DEFAULT_MODEL_READING);
-
-        let sf = routing.get("SYNTAX_FIX").unwrap();
-        assert_eq!(sf.model, DEFAULT_MODEL);
-
-        let ca = routing.get("CASUAL").unwrap();
-        assert_eq!(ca.model, DEFAULT_MODEL);
+        assert_eq!(routing.len(), cats.len());
+        for cat in &cats {
+            assert!(routing.contains_key(cat.name.as_str()), "routing missing key for {}", cat.name);
+            let entry = routing.get(cat.name.as_str()).unwrap();
+            let expected_model = match cat.model_env_var.as_deref() {
+                Some("DEFAULT_MODEL") => DEFAULT_MODEL,
+                Some("DEFAULT_MODEL_COMPLEX") => DEFAULT_MODEL_COMPLEX,
+                Some("DEFAULT_MODEL_READING") => DEFAULT_MODEL_READING,
+                _ => DEFAULT_MODEL,
+            };
+            assert_eq!(entry.model, expected_model);
+            assert!(entry.endpoint.contains("integrate.api.nvidia.com"));
+            assert_eq!(entry.provider_type, "nvidia_nim");
+            assert_eq!(entry.api_key_env, Some("NVIDIA_API_KEY".to_string()));
+            assert_eq!(entry.cost_per_1m_input_tokens, None);
+        }
 
         assert_eq!(fallback.model, DEFAULT_MODEL);
         assert!(fallback.endpoint.contains("integrate.api.nvidia.com"));

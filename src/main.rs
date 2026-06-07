@@ -746,6 +746,7 @@ mod tests {
     fn test_app_with_classifier() -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
+        let cats = intent_classifier::hardcoded_categories();
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
             "user",
@@ -753,7 +754,7 @@ mod tests {
         ));
         let mut routing = HashMap::new();
         routing.insert(
-            "SYNTAX_FIX".to_string(),
+            cats[1].name.clone(),
             intent_classifier::RouteEntry {
                 model: "sf-model".to_string(),
                 endpoint: String::new(),
@@ -763,7 +764,7 @@ mod tests {
             },
         );
         routing.insert(
-            "CASUAL".to_string(),
+            cats[3].name.clone(),
             intent_classifier::RouteEntry {
                 model: "ca-model".to_string(),
                 endpoint: String::new(),
@@ -780,7 +781,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, intent_classifier::hardcoded_categories());
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
         let app_state = make_test_app_state(regex_classifier, None, intent_classifier::ModelCosts::empty(), String::new());
         build_app(auth_config, app_state)
     }
@@ -863,6 +864,7 @@ mod tests {
     ) -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
+        let cats = intent_classifier::hardcoded_categories();
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
             "user",
@@ -870,7 +872,7 @@ mod tests {
         ));
         let mut routing = HashMap::new();
         routing.insert(
-            "SYNTAX_FIX".to_string(),
+            cats[1].name.clone(),
             intent_classifier::RouteEntry {
                 model: "sf-model".to_string(),
                 endpoint: "https://test.endpoint".to_string(),
@@ -880,7 +882,7 @@ mod tests {
             },
         );
         routing.insert(
-            "CASUAL".to_string(),
+            cats[3].name.clone(),
             intent_classifier::RouteEntry {
                 model: "ca-model".to_string(),
                 endpoint: String::new(),
@@ -897,7 +899,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, intent_classifier::hardcoded_categories());
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
         let app_state = make_test_app_state(regex_classifier, None, intent_classifier::ModelCosts::empty(), String::new());
         build_app(auth_config, app_state)
     }
@@ -1342,6 +1344,7 @@ mod tests {
     pub(crate) fn test_app_with_http_client(env_var_name: &str) -> (Router, httpmock::MockServer) {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
+        let cats = intent_classifier::hardcoded_categories();
         let server = httpmock::MockServer::start();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
@@ -1355,7 +1358,7 @@ mod tests {
         let endpoint = server.url("/v1/chat/completions");
         let mut routing = HashMap::new();
         routing.insert(
-            "SYNTAX_FIX".to_string(),
+            cats[1].name.clone(),
             intent_classifier::RouteEntry {
                 model: "sf-model".to_string(),
                 endpoint: endpoint.clone(),
@@ -1365,7 +1368,7 @@ mod tests {
             },
         );
         routing.insert(
-            "CASUAL".to_string(),
+            cats[3].name.clone(),
             intent_classifier::RouteEntry {
                 model: "ca-model".to_string(),
                 endpoint,
@@ -1382,7 +1385,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, intent_classifier::hardcoded_categories());
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
         let app_state = make_test_app_state(regex_classifier, Some(client), intent_classifier::ModelCosts::empty(), String::new());
         let app = build_app(auth_config, app_state);
         (app, server)
@@ -1391,6 +1394,7 @@ mod tests {
     fn test_app_with_dead_endpoint(env_var_name: &str) -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
+        let cats = intent_classifier::hardcoded_categories();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(1))
             .build()
@@ -1402,7 +1406,7 @@ mod tests {
         ));
         let mut routing = HashMap::new();
         routing.insert(
-            "SYNTAX_FIX".to_string(),
+            cats[1].name.clone(),
             intent_classifier::RouteEntry {
                 model: "sf-model".to_string(),
                 endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
@@ -1412,7 +1416,7 @@ mod tests {
             },
         );
         routing.insert(
-            "CASUAL".to_string(),
+            cats[3].name.clone(),
             intent_classifier::RouteEntry {
                 model: "ca-model".to_string(),
                 endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
@@ -1429,7 +1433,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, intent_classifier::hardcoded_categories());
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
         let app_state = make_test_app_state(regex_classifier, Some(client), intent_classifier::ModelCosts::empty(), String::new());
         build_app(auth_config, app_state)
     }
@@ -2114,9 +2118,10 @@ mod slow_tests {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap();
+        let cats = intent_classifier::hardcoded_categories();
         let mut routing = std::collections::HashMap::new();
         routing.insert(
-            "SYNTAX_FIX".to_string(),
+            cats[1].name.clone(),
             intent_classifier::RouteEntry {
                 model: "sf-model".to_string(),
                 endpoint: url,
@@ -2133,7 +2138,7 @@ mod slow_tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, intent_classifier::hardcoded_categories());
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
         let model_costs = intent_classifier::ModelCosts::empty();
         let baseline_model = String::new();
         let classifier_chain =

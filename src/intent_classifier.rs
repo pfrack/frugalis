@@ -503,9 +503,10 @@ mod tests {
     use super::*;
 
     fn test_classifier() -> RegexClassifier {
+        let cats = hardcoded_categories();
         let mut routing = HashMap::new();
         routing.insert(
-            "FILE_READING".to_string(),
+            cats[0].name.clone(),
             RouteEntry {
                 model: "fr-model".to_string(),
                 endpoint: String::new(),
@@ -515,17 +516,7 @@ mod tests {
             },
         );
         routing.insert(
-            "COMPLEX_REASONING".to_string(),
-            RouteEntry {
-                model: "cr-model".to_string(),
-                endpoint: String::new(),
-                cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
-            },
-        );
-        routing.insert(
-            "SYNTAX_FIX".to_string(),
+            cats[1].name.clone(),
             RouteEntry {
                 model: "sf-model".to_string(),
                 endpoint: String::new(),
@@ -535,7 +526,17 @@ mod tests {
             },
         );
         routing.insert(
-            "CASUAL".to_string(),
+            cats[2].name.clone(),
+            RouteEntry {
+                model: "cr-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
+        routing.insert(
+            cats[3].name.clone(),
             RouteEntry {
                 model: "ca-model".to_string(),
                 endpoint: String::new(),
@@ -551,7 +552,7 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        RegexClassifier::from_values(routing, fallback, 30, hardcoded_categories())
+        RegexClassifier::from_values(routing, fallback, 30, cats)
     }
 
     #[test]
@@ -605,6 +606,15 @@ mod tests {
         let c = test_classifier();
         let result = c.classify("read the architecture document");
         assert_ne!(result.category, "COMPLEX_REASONING");
+    }
+
+    #[test]
+    fn hardcoded_categories_match_test_routing_keys() {
+        let classifier = test_classifier();
+        let cats = hardcoded_categories();
+        let routing_keys: std::collections::HashSet<&str> = classifier.routing.keys().map(|s| s.as_str()).collect();
+        let cat_names: std::collections::HashSet<&str> = cats.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(routing_keys, cat_names, "test_classifier routing keys must match hardcoded_categories names");
     }
 
     // ── ClassifierChain Tests ────────────────────────────────────────────────────
