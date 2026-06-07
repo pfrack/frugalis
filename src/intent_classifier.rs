@@ -956,4 +956,156 @@ mod tests {
             vec![("authorization".to_string(), "Bearer key".to_string())]
         );
     }
+
+    #[tokio::test]
+    async fn llm_classifier_success() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions");
+            then.status(200)
+                .json_body(serde_json::json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "SYNTAX_FIX"
+                            }
+                        }
+                    ]
+                }));
+        });
+
+        let config = LlmClassifierConfig {
+            enabled: true,
+            model: "gpt-4o-mini".to_string(),
+            endpoint: server.url("/v1/chat/completions"),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            provider_type: "openai_compatible".to_string(),
+            prompt_template_path: None,
+            timeout_secs: 3,
+        };
+
+        let cats = hardcoded_categories();
+        let client = reqwest::Client::new();
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+        
+        let llm = LLMClassifier::new(config, client, cats);
+        let result = llm.classify("fix this bug").await;
+
+        assert_eq!(result.category, "SYNTAX_FIX");
+        assert_eq!(result.tier, ClassificationTier::Regex);
+    }
+
+    #[tokio::test]
+    async fn llm_classifier_malformed_response() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions");
+            then.status(200)
+                .json_body(serde_json::json!({
+                    "choices": []
+                }));
+        });
+
+        let config = LlmClassifierConfig {
+            enabled: true,
+            model: "gpt-4o-mini".to_string(),
+            endpoint: server.url("/v1/chat/completions"),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            provider_type: "openai_compatible".to_string(),
+            prompt_template_path: None,
+            timeout_secs: 3,
+        };
+
+        let cats = hardcoded_categories();
+        let client = reqwest::Client::new();
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+
+        let llm = LLMClassifier::new(config, client, cats);
+        let result = llm.classify("test").await;
+
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+        assert_eq!(result.category, "CASUAL");
+    }
+
+    #[tokio::test]
+    async fn llm_classifier_network_error() {
+        let config = LlmClassifierConfig {
+            enabled: true,
+            model: "gpt-4o-mini".to_string(),
+            endpoint: "http://127.0.0.1:1/nonexistent".to_string(), // Invalid endpoint
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            provider_type: "openai_compatible".to_string(),
+            prompt_template_path: None,
+            timeout_secs: 1,
+        };
+
+        let cats = hardcoded_categories();
+        let client = reqwest::Client::new();
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+
+        let llm = LLMClassifier::new(config, client, cats);
+        let result = llm.classify("test").await;
+
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+        assert_eq!(result.category, "CASUAL");
+    }
+
+    #[tokio::test]
+    async fn llm_classifier_unknown_category() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions");
+            then.status(200)
+                .json_body(serde_json::json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "UNKNOWN_CATEGORY"
+                            }
+                        }
+                    ]
+                }));
+        });
+
+        let config = LlmClassifierConfig {
+            enabled: true,
+            model: "gpt-4o-mini".to_string(),
+            endpoint: server.url("/v1/chat/completions"),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            provider_type: "openai_compatible".to_string(),
+            prompt_template_path: None,
+            timeout_secs: 3,
+        };
+
+        let cats = hardcoded_categories();
+        let client = reqwest::Client::new();
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+
+        let llm = LLMClassifier::new(config, client, cats);
+        let result = llm.classify("test").await;
+
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+        assert_eq!(result.category, "CASUAL");
+    }
+
+    #[tokio::test]
+    async fn build_llm_classifier_prompt_has_categories() {
+        let cats = hardcoded_categories();
+        let prompt = build_llm_classifier_prompt(&cats, None);
+
+        assert!(prompt.contains("FILE_READING"));
+        assert!(prompt.contains("SYNTAX_FIX"));
+        assert!(prompt.contains("COMPLEX_REASONING"));
+        assert!(prompt.contains("CASUAL"));
+        assert!(prompt.contains("Examples:"));
+    }
 }

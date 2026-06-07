@@ -343,17 +343,17 @@ Integration test with `httpmock` verifying the full LLM classification flow end-
 
 #### Manual
 
-- [ ] 3.4 Server with [llm_classifier] → "LLM classifier enabled" in logs
-- [ ] 3.5 Server without section → regex-only works
-- [ ] 3.6 Ambiguous prompt → LLM classifier fires
+- [x] 3.4 Server with [llm_classifier] → "LLM classifier enabled" in logs — 8dfc5ee
+- [x] 3.5 Server without section → regex-only works — 8dfc5ee
+- [x] 3.6 Ambiguous prompt → LLM classifier fires — 8dfc5ee
 
 ### Phase 4: Testing
 
 #### Automated
 
-- [ ] 4.1 cargo test all green including integration tests
-- [ ] 4.2 cargo clippy clean
-- [ ] 4.3 All 4 error scenarios tested
+- [x] 4.1 cargo test all green including integration tests
+- [x] 4.2 cargo clippy clean (12 pre-existing warnings unrelated to this change)
+- [x] 4.3 All 4 error scenarios tested
 
 #### Manual
 
