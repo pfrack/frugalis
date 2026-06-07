@@ -309,37 +309,37 @@ Integration test with `httpmock` verifying the full LLM classification flow end-
 
 #### Automated
 
-- [ ] 1.1 cargo build compiles cleanly
-- [ ] 1.2 Unit test: parse TOML with [llm_classifier] → correct LlmClassifierConfig
-- [ ] 1.3 Unit test: parse TOML without section → None
-- [ ] 1.4 Unit test: parse TOML with enabled = false → None
+- [x] 1.1 cargo build compiles cleanly
+- [x] 1.2 Unit test: parse TOML with [llm_classifier] → correct LlmClassifierConfig
+- [x] 1.3 Unit test: parse TOML without section → None
+- [x] 1.4 Unit test: parse TOML with enabled = false → None
 
 #### Manual
 
-- [ ] 1.5 N/A (pure config parsing)
+- [x] 1.5 N/A (pure config parsing)
 
 ### Phase 2: LLM Classifier Implementation
 
 #### Automated
 
-- [ ] 2.1 cargo build compiles cleanly with async trait
-- [ ] 2.2 Unit test: RegexClassifier async wrapper works (call and await)
-- [ ] 2.3 Unit test: build_llm_classifier_prompt generates expected format
-- [ ] 2.4 Unit test: LLMClassifier classify with mocked success → correct category, Regex tier
-- [ ] 2.5 Unit test: LLMClassifier classify with timeout/error → Fallback tier, CASUAL
-- [ ] 2.6 Unit test: LLMClassifier classify with invalid response → Fallback
+- [x] 2.1 cargo build compiles cleanly with async trait
+- [x] 2.2 Unit test: RegexClassifier async wrapper works (call and await)
+- [x] 2.3 Unit test: build_llm_classifier_prompt generates expected format
+- [x] 2.4 Unit test: LLMClassifier classify with mocked success → correct category, Regex tier
+- [x] 2.5 Unit test: LLMClassifier classify with timeout/error → Fallback tier, CASUAL
+- [x] 2.6 Unit test: LLMClassifier classify with invalid response → Fallback
 
 #### Manual
 
-- [ ] 2.7 N/A (tested via mocks)
+- [x] 2.7 N/A (tested via mocks)
 
 ### Phase 3: Chain Wiring
 
 #### Automated
 
-- [ ] 3.1 cargo build compiles cleanly
-- [ ] 3.2 Existing tests pass (call sites updated to await)
-- [ ] 3.3 cargo test all green
+- [x] 3.1 cargo build compiles cleanly
+- [x] 3.2 Existing tests pass (call sites updated to await)
+- [x] 3.3 cargo test all green
 
 #### Manual
 

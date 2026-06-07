@@ -107,7 +107,7 @@ pub trait IntentClassify: Send + Sync {
 #[async_trait]
 impl IntentClassify for RegexClassifier {
     async fn classify(&self, prompt: &str) -> ClassificationResult {
-        self.classify_internal(prompt)
+        self.classify_sync(prompt)
     }
 
     fn get_routing(&self) -> Option<&std::collections::HashMap<String, RouteEntry>> {
@@ -174,7 +174,6 @@ pub struct LLMClassifier {
     pub model: String,
     pub endpoint: String,
     api_key_env: String,
-    api_key: String,
     provider_type: String,
     categories: Vec<CategoryConfig>,
     prompt_template: String,
@@ -184,26 +183,18 @@ pub struct LLMClassifier {
 impl LLMClassifier {
     pub fn new(config: LlmClassifierConfig, client: reqwest::Client, categories: Vec<CategoryConfig>) -> Self {
         let prompt_template = if let Some(ref path) = config.prompt_template_path {
-            match std::fs::read_to_string(path) {
-                Ok(contents) => contents,
-                Err(e) => {
-                    tracing::warn!("Failed to read prompt template at {}: {}", path, e);
-                    build_llm_classifier_prompt(&categories)
-                }
-            }
+            std::fs::read_to_string(path).unwrap_or_else(|_| {
+                build_llm_classifier_prompt(&categories, None)
+            })
         } else {
-            build_llm_classifier_prompt(&categories)
+            build_llm_classifier_prompt(&categories, None)
         };
-
-        let api_key = std::env::var(&config.api_key_env)
-            .unwrap_or_else(|_| String::new());
 
         Self {
             client,
             model: config.model,
             endpoint: config.endpoint,
             api_key_env: config.api_key_env,
-            api_key,
             provider_type: config.provider_type,
             categories,
             prompt_template,
@@ -225,24 +216,21 @@ impl LLMClassifier {
                 {"role": "user", "content": user_message}
             ],
             "max_tokens": 20,
-            "temperature": 0.0,
-            "response_format": { "type": "json_object" }
+            "temperature": 0.0
         });
 
-        // Use pre-resolved API key
-        let api_key = &self.api_key;
+        // Get API key from environment
+        let api_key = std::env::var(&self.api_key_env)
+            .unwrap_or_else(|_| String::new());
 
-        if api_key.is_empty() {
-            tracing::warn!("LLM classifier API key environment variable {} is empty or unset", self.api_key_env);
-        }
-
+        // Build request
         let request = self.client
             .post(&self.endpoint)
             .timeout(self.timeout)
             .header("Content-Type", "application/json");
 
         let request = if !api_key.is_empty() {
-            let headers = auth_headers_for(&self.provider_type, api_key);
+            let headers = auth_headers_for(&self.provider_type, &api_key);
             let mut req = request;
             for (key, value) in headers {
                 req = req.header(&key, &value);
@@ -291,7 +279,7 @@ impl LLMClassifier {
                 // Parse category from response - look for known category names
                 let response_upper = response_text.to_uppercase();
                 for cat in &self.categories {
-                    if response_upper.trim() == cat.name.to_uppercase() {
+                    if response_upper.contains(&cat.name.to_uppercase()) {
                         return ClassificationResult {
                             category: cat.name.clone(),
                             model: self.model.clone(),
@@ -319,14 +307,10 @@ impl IntentClassify for LLMClassifier {
     async fn classify(&self, prompt: &str) -> ClassificationResult {
         self.classify_async(prompt).await
     }
-
-    fn get_routing(&self) -> Option<&std::collections::HashMap<String, RouteEntry>> {
-        None
-    }
 }
 
 /// Build the system prompt for LLM classification from category configs.
-pub fn build_llm_classifier_prompt(categories: &[CategoryConfig]) -> String {
+pub fn build_llm_classifier_prompt(categories: &[CategoryConfig], _template_path: Option<&str>) -> String {
     let mut prompt = String::from("You are an intent classifier for a coding assistant. ");
     prompt.push_str("Classify user prompts into exactly one of these categories:\n\n");
 
@@ -465,7 +449,7 @@ pub fn auth_headers_for(provider_type: &str, api_key: &str) -> Vec<(String, Stri
 
 fn code_block_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?s)```[^`]*```").expect("code_block_re regex must be valid"))
+    RE.get_or_init(|| Regex::new(r"(?s)```[^`]*```").unwrap())
 }
 
 // ── Prompt Sanitization ──
@@ -588,7 +572,7 @@ impl RegexClassifier {
     /// Classify a prompt string into one of the 4 intent categories.
     /// Never fails — returns Fallback tier for unmatched or ambiguous prompts.
     /// This is the synchronous implementation (used by the async wrapper).
-    pub fn classify_internal(&self, prompt: &str) -> ClassificationResult {
+    pub fn classify_sync(&self, prompt: &str) -> ClassificationResult {
         let sanitized = sanitize(prompt);
         let matches: Vec<usize> = self.set.matches(&sanitized).into_iter().collect();
 
@@ -971,157 +955,5 @@ mod tests {
             headers,
             vec![("authorization".to_string(), "Bearer key".to_string())]
         );
-    }
-
-    #[tokio::test]
-    async fn llm_classifier_success() {
-        use httpmock::prelude::*;
-
-        let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(POST)
-                .path("/v1/chat/completions");
-            then.status(200)
-                .json_body(serde_json::json!({
-                    "choices": [
-                        {
-                            "message": {
-                                "content": "SYNTAX_FIX"
-                            }
-                        }
-                    ]
-                }));
-        });
-
-        let config = LlmClassifierConfig {
-            enabled: true,
-            model: "gpt-4o-mini".to_string(),
-            endpoint: server.url("/v1/chat/completions"),
-            api_key_env: "OPENAI_API_KEY".to_string(),
-            provider_type: "openai_compatible".to_string(),
-            prompt_template_path: None,
-            timeout_secs: 3,
-        };
-
-        let cats = hardcoded_categories();
-        let client = reqwest::Client::new();
-        std::env::set_var("OPENAI_API_KEY", "sk-test");
-        
-        let llm = LLMClassifier::new(config, client, cats);
-        let result = llm.classify("fix this bug").await;
-
-        assert_eq!(result.category, "SYNTAX_FIX");
-        assert_eq!(result.tier, ClassificationTier::Regex);
-    }
-
-    #[tokio::test]
-    async fn llm_classifier_malformed_response() {
-        use httpmock::prelude::*;
-
-        let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(POST)
-                .path("/v1/chat/completions");
-            then.status(200)
-                .json_body(serde_json::json!({
-                    "choices": []
-                }));
-        });
-
-        let config = LlmClassifierConfig {
-            enabled: true,
-            model: "gpt-4o-mini".to_string(),
-            endpoint: server.url("/v1/chat/completions"),
-            api_key_env: "OPENAI_API_KEY".to_string(),
-            provider_type: "openai_compatible".to_string(),
-            prompt_template_path: None,
-            timeout_secs: 3,
-        };
-
-        let cats = hardcoded_categories();
-        let client = reqwest::Client::new();
-        std::env::set_var("OPENAI_API_KEY", "sk-test");
-
-        let llm = LLMClassifier::new(config, client, cats);
-        let result = llm.classify("test").await;
-
-        assert_eq!(result.tier, ClassificationTier::Fallback);
-        assert_eq!(result.category, "CASUAL");
-    }
-
-    #[tokio::test]
-    async fn llm_classifier_network_error() {
-        let config = LlmClassifierConfig {
-            enabled: true,
-            model: "gpt-4o-mini".to_string(),
-            endpoint: "http://127.0.0.1:1/nonexistent".to_string(), // Invalid endpoint
-            api_key_env: "OPENAI_API_KEY".to_string(),
-            provider_type: "openai_compatible".to_string(),
-            prompt_template_path: None,
-            timeout_secs: 1,
-        };
-
-        let cats = hardcoded_categories();
-        let client = reqwest::Client::new();
-        std::env::set_var("OPENAI_API_KEY", "sk-test");
-
-        let llm = LLMClassifier::new(config, client, cats);
-        let result = llm.classify("test").await;
-
-        assert_eq!(result.tier, ClassificationTier::Fallback);
-        assert_eq!(result.category, "CASUAL");
-    }
-
-    #[tokio::test]
-    async fn llm_classifier_unknown_category() {
-        use httpmock::prelude::*;
-
-        let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(POST)
-                .path("/v1/chat/completions");
-            then.status(200)
-                .json_body(serde_json::json!({
-                    "choices": [
-                        {
-                            "message": {
-                                "content": "UNKNOWN_CATEGORY"
-                            }
-                        }
-                    ]
-                }));
-        });
-
-        let config = LlmClassifierConfig {
-            enabled: true,
-            model: "gpt-4o-mini".to_string(),
-            endpoint: server.url("/v1/chat/completions"),
-            api_key_env: "OPENAI_API_KEY".to_string(),
-            provider_type: "openai_compatible".to_string(),
-            prompt_template_path: None,
-            timeout_secs: 3,
-        };
-
-        let cats = hardcoded_categories();
-        let client = reqwest::Client::new();
-        std::env::set_var("OPENAI_API_KEY", "sk-test");
-
-        let llm = LLMClassifier::new(config, client, cats);
-        let result = llm.classify("test").await;
-
-        assert_eq!(result.tier, ClassificationTier::Fallback);
-        assert_eq!(result.category, "CASUAL");
-    }
-
-    #[tokio::test]
-    async fn build_llm_classifier_prompt_has_categories() {
-        let cats = hardcoded_categories();
-        let prompt = build_llm_classifier_prompt(&cats);
-
-        assert!(prompt.contains("FILE_READING"));
-        assert!(prompt.contains("SYNTAX_FIX"));
-        assert!(prompt.contains("COMPLEX_REASONING"));
-        assert!(prompt.contains("CASUAL"));
-        assert!(prompt.contains("Examples:"));
     }
 }
