@@ -64,7 +64,6 @@ pub struct LatencySummary {
     pub rows: Vec<LatencySummaryRow>,
     pub unclassified_count: i64,
     pub total_classified_count: i64,
-    pub hours: u32,
 }
 
 /// Shared persistence configuration injected into the app router.
@@ -254,7 +253,6 @@ impl PersistenceConfig {
             rows: summary_rows,
             unclassified_count,
             total_classified_count,
-            hours,
         })
     }
 

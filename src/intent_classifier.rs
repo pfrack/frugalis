@@ -4,50 +4,9 @@ use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use regex::RegexSet;
-use tracing::{info, warn};
 
-// ── Public Types ──
-
-#[derive(Clone)]
-pub struct RouteEntry {
-    pub model: String,
-    pub endpoint: String,
-    pub cost_per_1m_input_tokens: Option<f64>,
-    pub provider_type: String,
-    pub api_key_env: Option<String>,
-}
-
-/// Maps model names to their cost per 1M input tokens.
-/// Defaults are hardcoded; routing.toml entries can override.
-#[derive(Clone)]
-pub struct ModelCosts {
-    costs: HashMap<String, f64>,
-}
-
-impl crate::persistence::CostProvider for ModelCosts {
-    fn get_cost(&self, model: &str) -> Option<f64> {
-        self.get(model)
-    }
-}
-
-impl ModelCosts {
-    /// Look up a model's cost per 1M input tokens.
-    pub fn get(&self, model: &str) -> Option<f64> {
-        self.costs.get(model).copied()
-    }
-
-    /// An empty cost table — all model lookups return None.
-    pub fn empty() -> Self {
-        ModelCosts {
-            costs: HashMap::new(),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn from_costs(costs: HashMap<String, f64>) -> Self {
-        ModelCosts { costs }
-    }
-}
+#[allow(unused_imports)]
+pub use crate::routing::{RouteEntry, ModelCosts, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX, DEFAULT_MODEL_READING};
 
 /// Hardcoded default costs per 1M input tokens for known models.
 pub(crate) fn hardcoded_model_costs() -> HashMap<String, f64> {
@@ -102,8 +61,7 @@ pub struct RegexClassifier {
     pub negative_idx: Range<usize>,
     pub routing: HashMap<String, RouteEntry>,
     pub fallback_entry: RouteEntry,
-    pub model_costs: ModelCosts,
-    pub baseline_model: String,
+    pub short_prompt_len: usize,
 }
 
 // Backward compatibility alias until Phase 3 updates consumers
@@ -158,11 +116,6 @@ struct NegativeMeta {
 
 // ── Defaults ──
 
-const DEFAULT_MODEL: &str = "meta/llama-3.1-8b-instruct";
-const DEFAULT_MODEL_COMPLEX: &str = "meta/llama-3.3-70b-instruct";
-const DEFAULT_MODEL_READING: &str = "meta/llama-3.1-70b-instruct";
-const DEFAULT_ENDPOINT: &str = "";
-
 // ── Category Name Constants ──
 
 const CAT_FILE_READING: &str = "FILE_READING";
@@ -188,19 +141,14 @@ const CA_WEIGHTS: &[u8] = &[3, 2, 1, 1, 1];
 
 // ── Classification Thresholds ──
 
-const SHORT_PROMPT_LEN: usize = 30;
+pub const SHORT_PROMPT_LEN: usize = 30;
 const FR_THRESHOLD: u32 = 3;
 const SF_THRESHOLD_HIGH: u32 = 4;
 const SF_THRESHOLD_LOW: u32 = 3;
 const CR_THRESHOLD: u32 = 3;
 const CA_THRESHOLD: u32 = 1;
 
-// ── Config Defaults ──
-
-const ROUTING_CONFIG_DEFAULT: &str = "routing.toml";
-
 // ── Pattern Constants ──
-// Section 8 from research.md — 44 positive + 4 negative = 48 patterns
 
 const FILE_READING: &[&str] = &[
     r"(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b",
@@ -286,70 +234,6 @@ const NEGATIVE_META: &[NegativeMeta] = &[
     },
 ];
 
-// ── Env-or-default helper ──
-
-fn env_or_default(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-// ── Hardcoded routing defaults ──
-
-fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
-    let endpoint = env_or_default(
-        "NVIDIA_ENDPOINT",
-        "https://integrate.api.nvidia.com/v1/chat/completions",
-    );
-    let mut routing = HashMap::new();
-    routing.insert(
-        CAT_COMPLEX_REASONING.to_string(),
-        RouteEntry {
-            model: env_or_default("DEFAULT_MODEL_COMPLEX", DEFAULT_MODEL_COMPLEX),
-            endpoint: endpoint.clone(),
-            cost_per_1m_input_tokens: None,
-            provider_type: "nvidia_nim".to_string(),
-            api_key_env: Some("NVIDIA_API_KEY".to_string()),
-        },
-    );
-    routing.insert(
-        CAT_FILE_READING.to_string(),
-        RouteEntry {
-            model: env_or_default("DEFAULT_MODEL_READING", DEFAULT_MODEL_READING),
-            endpoint: endpoint.clone(),
-            cost_per_1m_input_tokens: None,
-            provider_type: "nvidia_nim".to_string(),
-            api_key_env: Some("NVIDIA_API_KEY".to_string()),
-        },
-    );
-    routing.insert(
-        CAT_SYNTAX_FIX.to_string(),
-        RouteEntry {
-            model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
-            endpoint: endpoint.clone(),
-            cost_per_1m_input_tokens: None,
-            provider_type: "nvidia_nim".to_string(),
-            api_key_env: Some("NVIDIA_API_KEY".to_string()),
-        },
-    );
-    routing.insert(
-        CAT_CASUAL.to_string(),
-        RouteEntry {
-            model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
-            endpoint: endpoint.clone(),
-            cost_per_1m_input_tokens: None,
-            provider_type: "nvidia_nim".to_string(),
-            api_key_env: Some("NVIDIA_API_KEY".to_string()),
-        },
-    );
-    let fallback = RouteEntry {
-        model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
-        endpoint,
-        cost_per_1m_input_tokens: None,
-        provider_type: "nvidia_nim".to_string(),
-        api_key_env: Some("NVIDIA_API_KEY".to_string()),
-    };
-    (routing, fallback)
-}
-
 // ── Auth Header Lookup ──
 
 /// Maps a provider_type string and resolved API key to HTTP auth header tuples.
@@ -429,84 +313,6 @@ fn build_all_patterns() -> (Vec<&'static str>, Vec<PatternMeta>) {
     (patterns, metadata)
 }
 
-// ── TOML Routing Loader ──
-
-fn load_routing_from_file(path: &str) -> Result<HashMap<String, RouteEntry>, String> {
-    let content =
-        std::fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
-    let root: toml::Value =
-        toml::from_str(&content).map_err(|e| format!("Invalid TOML in {}: {}", path, e))?;
-    let table = root
-        .as_table()
-        .ok_or_else(|| format!("Root must be a table in {}", path))?;
-    let mut routing = HashMap::new();
-    for (key, value) in table {
-        if key == "fallback" {
-            continue;
-        }
-        let model = if let Some(m) = value.get("model").and_then(|v| v.as_str()) {
-            m.to_string()
-        } else {
-            warn!(category = %key, "routing.toml missing 'model' for category; using DEFAULT_MODEL");
-            env_or_default("DEFAULT_MODEL", DEFAULT_MODEL)
-        };
-        let endpoint = value
-            .get("endpoint")
-            .and_then(|v| v.as_str())
-            .unwrap_or(DEFAULT_ENDPOINT)
-            .to_string();
-        let cost_per_1m_input_tokens = value
-            .get("cost_per_1m_input_tokens")
-            .and_then(|v| v.as_float());
-        let provider_type = if let Some(pt) = value.get("provider_type").and_then(|v| v.as_str()) {
-            pt.to_string()
-        } else {
-            warn!(category = %key, "routing.toml missing 'provider_type' for category; defaulting to openai_compatible (empty)");
-            String::new()
-        };
-        let api_key_env = if let Some(ake) = value.get("api_key_env").and_then(|v| v.as_str()) {
-            Some(ake.to_string())
-        } else {
-            warn!(category = %key, "routing.toml missing 'api_key_env' for category; no API key will be resolved");
-            None
-        };
-        routing.insert(
-            key.to_uppercase(),
-            RouteEntry {
-                model,
-                endpoint,
-                cost_per_1m_input_tokens,
-                provider_type,
-                api_key_env,
-            },
-        );
-    }
-    Ok(routing)
-}
-
-fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
-    let path =
-        std::env::var("ROUTING_CONFIG_PATH").unwrap_or_else(|_| ROUTING_CONFIG_DEFAULT.to_string());
-    let mut routing = match load_routing_from_file(&path) {
-        Ok(r) => {
-            info!("Routing: loaded from {path}");
-            r
-        }
-        Err(e) => {
-            warn!("{e}; using hardcoded routing defaults (no routing.toml)");
-            return hardcoded_routing();
-        }
-    };
-    let fallback_entry = routing.remove("FALLBACK").unwrap_or_else(|| RouteEntry {
-        model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
-        endpoint: String::new(),
-        cost_per_1m_input_tokens: None,
-        provider_type: String::new(),
-        api_key_env: None,
-    });
-    (routing, fallback_entry)
-}
-
 // ── Implementations ──
 
 impl ClassificationResult {
@@ -515,7 +321,7 @@ impl ClassificationResult {
     pub fn fallback() -> Self {
         ClassificationResult {
             category: CAT_CASUAL.to_string(),
-            model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
+            model: crate::config::env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
             endpoint: String::new(),
             tier: ClassificationTier::Fallback,
             provider_type: String::new(),
@@ -528,23 +334,11 @@ impl RegexClassifier {
     /// Build the classifier from built-in patterns and environment configuration.
     /// Always succeeds — regex compilation errors are the only failure mode.
     /// When routing.toml is missing, hardcoded defaults are used.
-    pub fn from_env() -> Result<Self, String> {
+    pub fn from_env(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry, short_prompt_len: usize) -> Result<Self, String> {
         let (patterns, metadata) = build_all_patterns();
         let set = RegexSet::new(&patterns).map_err(|e| format!("regex compilation failed: {e}"))?;
         let negative_start = FR_COUNT + CR_COUNT + SF_COUNT + CA_COUNT;
         let negative_idx = negative_start..(negative_start + NEG_COUNT);
-        let (routing, fallback_entry) = load_routing();
-
-        let baseline_model =
-            std::env::var("BASELINE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_COMPLEX.to_string());
-
-        // Merge routing.toml overrides into the hardcoded cost table.
-        let mut costs = hardcoded_model_costs();
-        for (_category, entry) in &routing {
-            if let Some(override_cost) = entry.cost_per_1m_input_tokens {
-                costs.insert(entry.model.clone(), override_cost);
-            }
-        }
 
         Ok(IntentClassifier {
             set,
@@ -552,31 +346,23 @@ impl RegexClassifier {
             negative_idx,
             routing,
             fallback_entry,
-            model_costs: ModelCosts { costs },
-            baseline_model,
+            short_prompt_len,
         })
     }
 
     #[cfg(test)]
-    pub fn from_values(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry) -> Self {
+    pub fn from_values(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry, short_prompt_len: usize) -> Self {
         let (patterns, metadata) = build_all_patterns();
         let set = RegexSet::new(&patterns).expect("built-in patterns should always compile");
         let negative_start = FR_COUNT + CR_COUNT + SF_COUNT + CA_COUNT;
         let negative_idx = negative_start..(negative_start + NEG_COUNT);
-        let mut costs = hardcoded_model_costs();
-        for (_category, entry) in &routing {
-            if let Some(override_cost) = entry.cost_per_1m_input_tokens {
-                costs.insert(entry.model.clone(), override_cost);
-            }
-        }
         IntentClassifier {
             set,
             metadata,
             negative_idx,
             routing,
             fallback_entry,
-            model_costs: ModelCosts { costs },
-            baseline_model: "claude-3.5-sonnet".to_string(),
+            short_prompt_len,
         }
     }
 
@@ -608,9 +394,9 @@ impl RegexClassifier {
             }
         }
 
-        // Short prompts (<30 chars, no matches) → CASUAL
+        // Short prompts (< short_prompt_len chars, no matches) → CASUAL
         let all_zero = scores.values().all(|&s| s == 0);
-        if sanitized.len() < SHORT_PROMPT_LEN && all_zero {
+        if sanitized.len() < self.short_prompt_len && all_zero {
             return self.route_fallback(CAT_CASUAL);
         }
 
@@ -720,7 +506,7 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        RegexClassifier::from_values(routing, fallback)
+        RegexClassifier::from_values(routing, fallback, 30)
     }
 
     #[test]
@@ -774,66 +560,6 @@ mod tests {
         let c = test_classifier();
         let result = c.classify("read the architecture document");
         assert_ne!(result.category, "COMPLEX_REASONING");
-    }
-
-    // ── ModelCosts ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn model_costs_returns_some_for_hardcoded_models() {
-        let c = test_classifier();
-        assert_eq!(c.model_costs.get("claude-3.5-sonnet"), Some(3.00));
-        assert_eq!(c.model_costs.get("gpt-4o"), Some(2.50));
-        assert_eq!(c.model_costs.get("gpt-4o-mini"), Some(0.15));
-        assert_eq!(c.model_costs.get("deepseek-chat"), Some(0.14));
-    }
-
-    #[test]
-    fn model_costs_returns_none_for_unknown_model() {
-        let c = test_classifier();
-        assert_eq!(c.model_costs.get("nonexistent-model"), None);
-    }
-
-    #[test]
-    fn model_costs_override_via_route_entry() {
-        let mut routing = HashMap::new();
-        routing.insert(
-            "COMPLEX_REASONING".to_string(),
-            RouteEntry {
-                model: "claude-3.5-sonnet".to_string(),
-                endpoint: String::new(),
-                cost_per_1m_input_tokens: Some(5.0),
-                provider_type: String::new(),
-                api_key_env: None,
-            },
-        );
-        routing.insert(
-            "CASUAL".to_string(),
-            RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint: String::new(),
-                cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
-            },
-        );
-        let fallback = RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
-            cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
-        };
-        let classifier = RegexClassifier::from_values(routing, fallback);
-        // claude-3.5-sonnet should be 5.0 (override), not 3.00 (hardcoded)
-        assert_eq!(classifier.model_costs.get("claude-3.5-sonnet"), Some(5.0));
-        // ca-model gets no override and is not in hardcoded table → None
-        assert_eq!(classifier.model_costs.get("ca-model"), None);
-    }
-
-    #[test]
-    fn model_costs_baseline_model_default() {
-        let c = test_classifier();
-        assert_eq!(c.baseline_model, "claude-3.5-sonnet");
     }
 
     // ── ClassifierChain Tests ────────────────────────────────────────────────────
