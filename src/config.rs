@@ -1,0 +1,381 @@
+use std::collections::HashMap;
+use tracing::warn;
+
+use crate::routing::*;
+
+pub(crate) const ROUTING_CONFIG_DEFAULT: &str = "routing.toml";
+pub(crate) const NVIDIA_ENDPOINT_DEFAULT: &str = "https://integrate.api.nvidia.com/v1/chat/completions";
+
+pub(crate) fn env_or_default(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+pub(crate) fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
+    let endpoint = env_or_default(
+        "NVIDIA_ENDPOINT",
+        NVIDIA_ENDPOINT_DEFAULT,
+    );
+    let mut routing = HashMap::new();
+    routing.insert(
+        "COMPLEX_REASONING".to_string(),
+        RouteEntry {
+            model: env_or_default("DEFAULT_MODEL_COMPLEX", DEFAULT_MODEL_COMPLEX),
+            endpoint: endpoint.clone(),
+            cost_per_1m_input_tokens: None,
+            provider_type: "nvidia_nim".to_string(),
+            api_key_env: Some("NVIDIA_API_KEY".to_string()),
+        },
+    );
+    routing.insert(
+        "FILE_READING".to_string(),
+        RouteEntry {
+            model: env_or_default("DEFAULT_MODEL_READING", DEFAULT_MODEL_READING),
+            endpoint: endpoint.clone(),
+            cost_per_1m_input_tokens: None,
+            provider_type: "nvidia_nim".to_string(),
+            api_key_env: Some("NVIDIA_API_KEY".to_string()),
+        },
+    );
+    routing.insert(
+        "SYNTAX_FIX".to_string(),
+        RouteEntry {
+            model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
+            endpoint: endpoint.clone(),
+            cost_per_1m_input_tokens: None,
+            provider_type: "nvidia_nim".to_string(),
+            api_key_env: Some("NVIDIA_API_KEY".to_string()),
+        },
+    );
+    routing.insert(
+        "CASUAL".to_string(),
+        RouteEntry {
+            model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
+            endpoint: endpoint.clone(),
+            cost_per_1m_input_tokens: None,
+            provider_type: "nvidia_nim".to_string(),
+            api_key_env: Some("NVIDIA_API_KEY".to_string()),
+        },
+    );
+    let fallback = RouteEntry {
+        model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
+        endpoint,
+        cost_per_1m_input_tokens: None,
+        provider_type: "nvidia_nim".to_string(),
+        api_key_env: Some("NVIDIA_API_KEY".to_string()),
+    };
+    (routing, fallback)
+}
+
+pub(crate) fn load_routing_from_file(path: &str) -> Result<HashMap<String, RouteEntry>, String> {
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
+    let root: toml::Value =
+        toml::from_str(&content).map_err(|e| format!("Invalid TOML in {}: {}", path, e))?;
+    let table = root
+        .as_table()
+        .ok_or_else(|| format!("Root must be a table in {}", path))?;
+    let mut routing = HashMap::new();
+    for (key, value) in table {
+        if key == "fallback" {
+            continue;
+        }
+        let model = if let Some(m) = value.get("model").and_then(|v| v.as_str()) {
+            m.to_string()
+        } else {
+            warn!(category = %key, "routing.toml missing 'model' for category; using DEFAULT_MODEL");
+            env_or_default("DEFAULT_MODEL", DEFAULT_MODEL)
+        };
+        let endpoint = value
+            .get("endpoint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let cost_per_1m_input_tokens = value
+            .get("cost_per_1m_input_tokens")
+            .and_then(|v| v.as_float());
+        let provider_type = if let Some(pt) = value.get("provider_type").and_then(|v| v.as_str()) {
+            pt.to_string()
+        } else {
+            warn!(category = %key, "routing.toml missing 'provider_type' for category; defaulting to openai_compatible (empty)");
+            String::new()
+        };
+        let api_key_env = if let Some(ake) = value.get("api_key_env").and_then(|v| v.as_str()) {
+            Some(ake.to_string())
+        } else {
+            warn!(category = %key, "routing.toml missing 'api_key_env' for category; no API key will be resolved");
+            None
+        };
+        routing.insert(
+            key.to_uppercase(),
+            RouteEntry {
+                model,
+                endpoint,
+                cost_per_1m_input_tokens,
+                provider_type,
+                api_key_env,
+            },
+        );
+    }
+    Ok(routing)
+}
+
+pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
+    let path =
+        std::env::var("ROUTING_CONFIG_PATH").unwrap_or_else(|_| ROUTING_CONFIG_DEFAULT.to_string());
+    let mut routing = match load_routing_from_file(&path) {
+        Ok(r) => {
+            tracing::info!("Routing: loaded from {path}");
+            r
+        }
+        Err(e) => {
+            tracing::warn!("{e}; using hardcoded routing defaults (no routing.toml)");
+            return hardcoded_routing();
+        }
+    };
+    let fallback_entry = routing.remove("FALLBACK").unwrap_or_else(|| RouteEntry {
+        model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
+        endpoint: String::new(),
+        cost_per_1m_input_tokens: None,
+        provider_type: String::new(),
+        api_key_env: None,
+    });
+    (routing, fallback_entry)
+}
+
+pub(crate) fn build_model_costs(routing: &HashMap<String, RouteEntry>) -> ModelCosts {
+    let mut costs = crate::intent_classifier::hardcoded_model_costs();
+    for (_category, entry) in routing {
+        if let Some(override_cost) = entry.cost_per_1m_input_tokens {
+            costs.insert(entry.model.clone(), override_cost);
+        }
+    }
+    ModelCosts::from_costs(costs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routing::RouteEntry;
+    use std::collections::HashMap;
+
+    #[test]
+    fn env_or_default_returns_env_var_when_set() {
+        std::env::set_var("TEST_CONFIG_VAR", "override");
+        assert_eq!(env_or_default("TEST_CONFIG_VAR", "default"), "override");
+        std::env::remove_var("TEST_CONFIG_VAR");
+    }
+
+    #[test]
+    fn env_or_default_returns_default_when_unset() {
+        std::env::remove_var("UNSET_CONFIG_VAR");
+        assert_eq!(env_or_default("UNSET_CONFIG_VAR", "default"), "default");
+    }
+
+    #[test]
+    fn load_routing_from_file_success() {
+        // Create temporary TOML content
+        let toml_content = r#"
+[SYNTAX_FIX]
+model = "test-sf-model"
+endpoint = "https://test.endpoint"
+provider_type = "openai_compatible"
+api_key_env = "TEST_API_KEY"
+cost_per_1m_input_tokens = 1.23
+
+[COMPLEX_REASONING]
+model = "test-cr-model"
+endpoint = "https://test.cr"
+provider_type = "openai_compatible"
+api_key_env = "TEST_API_KEY_CR"
+
+[fallback]
+model = "test-fallback"
+endpoint = ""
+provider_type = ""
+api_key_env = ""
+"#;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_routing.toml");
+        std::fs::write(&file_path, toml_content).expect("write temp file");
+
+        let result = load_routing_from_file(file_path.to_str().unwrap());
+        assert!(result.is_ok(), "load_routing_from_file should succeed");
+        let routing = result.unwrap();
+
+        assert_eq!(routing.len(), 2);
+        assert_eq!(routing.get("SYNTAX_FIX").unwrap().model, "test-sf-model");
+        assert_eq!(routing.get("SYNTAX_FIX").unwrap().endpoint, "https://test.endpoint");
+        assert_eq!(routing.get("SYNTAX_FIX").unwrap().provider_type, "openai_compatible");
+        assert_eq!(routing.get("SYNTAX_FIX").unwrap().api_key_env, Some("TEST_API_KEY".to_string()));
+        assert_eq!(routing.get("SYNTAX_FIX").unwrap().cost_per_1m_input_tokens, Some(1.23));
+
+        assert_eq!(routing.get("COMPLEX_REASONING").unwrap().model, "test-cr-model");
+    }
+
+    #[test]
+    fn load_routing_from_file_missing() {
+        let result = load_routing_from_file("/nonexistent/path/routing.toml");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Cannot read"));
+    }
+
+    #[test]
+    fn load_routing_from_file_invalid_toml() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("invalid_routing.toml");
+        let mut file = std::fs::File::create(&file_path).expect("create temp file");
+        file.write_all(b"not valid toml {{").expect("write");
+        drop(file);
+
+        let result = load_routing_from_file(file_path.to_str().unwrap());
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.contains("Invalid TOML"));
+        } else {
+            panic!("expected error");
+        }
+    }
+
+    #[test]
+    fn hardcoded_routing_produces_expected_defaults() {
+        let (routing, fallback) = hardcoded_routing();
+
+        assert_eq!(routing.len(), 4);
+        assert!(routing.contains_key("COMPLEX_REASONING"));
+        assert!(routing.contains_key("FILE_READING"));
+        assert!(routing.contains_key("SYNTAX_FIX"));
+        assert!(routing.contains_key("CASUAL"));
+
+        let cr = routing.get("COMPLEX_REASONING").unwrap();
+        assert_eq!(cr.model, DEFAULT_MODEL_COMPLEX);
+        assert!(cr.endpoint.contains("integrate.api.nvidia.com"));
+        assert_eq!(cr.provider_type, "nvidia_nim");
+        assert_eq!(cr.api_key_env, Some("NVIDIA_API_KEY".to_string()));
+        assert_eq!(cr.cost_per_1m_input_tokens, None);
+
+        let fr = routing.get("FILE_READING").unwrap();
+        assert_eq!(fr.model, DEFAULT_MODEL_READING);
+
+        let sf = routing.get("SYNTAX_FIX").unwrap();
+        assert_eq!(sf.model, DEFAULT_MODEL);
+
+        let ca = routing.get("CASUAL").unwrap();
+        assert_eq!(ca.model, DEFAULT_MODEL);
+
+        assert_eq!(fallback.model, DEFAULT_MODEL);
+        assert!(fallback.endpoint.contains("integrate.api.nvidia.com"));
+        assert_eq!(fallback.provider_type, "nvidia_nim");
+        assert_eq!(fallback.api_key_env, Some("NVIDIA_API_KEY".to_string()));
+    }
+
+    #[test]
+    fn hardcoded_routing_respects_nvidia_endpoint_env() {
+        std::env::set_var("NVIDIA_ENDPOINT", "https://custom.endpoint.example.com/v1/chat/completions");
+        let (_, fallback) = hardcoded_routing();
+        assert_eq!(fallback.endpoint, "https://custom.endpoint.example.com/v1/chat/completions");
+        std::env::remove_var("NVIDIA_ENDPOINT");
+    }
+
+    #[test]
+    fn load_routing_behavior() {
+        // 1. When ROUTING_CONFIG_PATH points to a valid file, load_routing returns parsed routing and fallback
+        let toml_content = r#"
+[SYNTAX_FIX]
+model = "file-sf-model"
+endpoint = "https://file.endpoint"
+provider_type = "openai_compatible"
+api_key_env = "FILE_API_KEY"
+
+[FALLBACK]
+model = "file-fallback"
+endpoint = ""
+provider_type = ""
+api_key_env = ""
+"#;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_valid_routing.toml");
+        std::fs::write(&file_path, toml_content).expect("write temp file");
+
+        std::env::set_var("ROUTING_CONFIG_PATH", file_path.to_str().unwrap());
+        let (routing, fallback) = load_routing();
+
+        assert_eq!(routing.len(), 1);
+        assert_eq!(routing.get("SYNTAX_FIX").unwrap().model, "file-sf-model");
+        // fallback should be the file-defined fallback
+        assert_eq!(fallback.model, "file-fallback");
+
+        std::env::remove_var("ROUTING_CONFIG_PATH");
+
+        // 2. When file is missing, fall back to hardcoded defaults
+        std::env::set_var("ROUTING_CONFIG_PATH", "/nonexistent/routing.toml");
+        let (routing, fallback) = load_routing();
+
+        assert_eq!(routing.len(), 4);
+        assert!(routing.contains_key("SYNTAX_FIX"));
+        assert_eq!(fallback.model, DEFAULT_MODEL);
+
+        std::env::remove_var("ROUTING_CONFIG_PATH");
+
+        // 3. When file exists but TOML is invalid, fall back to hardcoded defaults
+        use std::io::Write;
+        let file_path_invalid = temp_dir.join("invalid_routing.toml");
+        let mut file = std::fs::File::create(&file_path_invalid).expect("create temp file");
+        file.write_all(b"not valid toml {{").expect("write");
+        drop(file);
+
+        std::env::set_var("ROUTING_CONFIG_PATH", file_path_invalid.to_str().unwrap());
+        let (routing, fallback) = load_routing();
+
+        assert_eq!(routing.len(), 4);
+        assert!(routing.contains_key("SYNTAX_FIX"));
+        assert_eq!(fallback.model, DEFAULT_MODEL);
+
+        std::env::remove_var("ROUTING_CONFIG_PATH");
+    }
+
+    #[test]
+    fn build_model_costs_seeds_with_hardcoded_and_applies_overrides() {
+        let mut routing = HashMap::new();
+        routing.insert(
+            "SYNTAX_FIX".to_string(),
+            RouteEntry {
+                model: "claude-3.5-sonnet".to_string(),
+                endpoint: "".to_string(),
+                cost_per_1m_input_tokens: Some(5.00), // Override
+                provider_type: "".to_string(),
+                api_key_env: None,
+            },
+        );
+        routing.insert(
+            "COMPLEX_REASONING".to_string(),
+            RouteEntry {
+                model: "gpt-4o".to_string(),
+                endpoint: "".to_string(),
+                cost_per_1m_input_tokens: None, // Use hardcoded
+                provider_type: "".to_string(),
+                api_key_env: None,
+            },
+        );
+        routing.insert(
+            "CASUAL".to_string(),
+            RouteEntry {
+                model: "unknown-model".to_string(), // Not in hardcoded, should be absent
+                endpoint: "".to_string(),
+                cost_per_1m_input_tokens: Some(2.50),
+                provider_type: "".to_string(),
+                api_key_env: None,
+            },
+        );
+
+        let costs = build_model_costs(&routing);
+
+        // Hardcoded defaults
+        assert_eq!(costs.get("claude-3.5-sonnet"), Some(5.00)); // Overridden
+        assert_eq!(costs.get("gpt-4o"), Some(2.50)); // Hardcoded
+        assert_eq!(costs.get("gpt-4o-mini"), Some(0.15));
+        assert_eq!(costs.get("deepseek-chat"), Some(0.14));
+        // Unknown model with override
+        assert_eq!(costs.get("unknown-model"), Some(2.50));
+    }
+}

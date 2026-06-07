@@ -13,11 +13,13 @@ use axum::{
 };
 use tokio_stream::StreamExt;
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod auth;
 mod dashboard;
+mod routing;
+mod config;
 mod intent_classifier;
 mod persistence;
 
@@ -68,15 +70,22 @@ async fn main() {
             None
         }
     };
-    let (classifier, routing, model_costs, baseline_model) =
-        match intent_classifier::RegexClassifier::from_env() {
+    let (classifier, routing, model_costs, baseline_model) = {
+        let (routing_map, fallback_entry) = config::load_routing();
+        let model_costs = config::build_model_costs(&routing_map);
+        let baseline_model =
+            config::env_or_default("BASELINE_MODEL", intent_classifier::DEFAULT_MODEL_COMPLEX);
+        match intent_classifier::RegexClassifier::from_env(
+            routing_map.clone(),
+            fallback_entry.clone(),
+            intent_classifier::SHORT_PROMPT_LEN,
+        ) {
             Ok(regex_classifier) => {
                 info!("Intent classifier initialized");
-                let model_costs = regex_classifier.model_costs.clone();
-                let baseline_model = regex_classifier.baseline_model.clone();
                 // Build classifier chain; currently only one backend (RegexClassifier)
-                let chain =
-                    intent_classifier::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
+                let chain = intent_classifier::ClassifierChain::new(vec![Arc::new(
+                    regex_classifier,
+                )]);
                 let classifier = Arc::new(chain);
                 // Merge routing tables from all backends (currently just one)
                 let mut merged_routing = HashMap::new();
@@ -97,7 +106,8 @@ async fn main() {
                     String::new(),
                 )
             }
-        };
+        }
+    };
     let classify_db_log = std::env::var("CLASSIFY_DB_LOG")
         .ok()
         .and_then(|v| v.parse::<bool>().ok())
@@ -685,9 +695,9 @@ mod tests {
     fn make_test_app_state(
         classifier: intent_classifier::RegexClassifier,
         http_client: Option<reqwest::Client>,
+        model_costs: intent_classifier::ModelCosts,
+        baseline_model: String,
     ) -> Arc<AppState> {
-        let model_costs = classifier.model_costs.clone();
-        let baseline_model = classifier.baseline_model.clone();
         let classifier_chain =
             intent_classifier::ClassifierChain::new(vec![Arc::new(classifier)]);
         let classifier_arc = Some(Arc::new(classifier_chain));
@@ -768,8 +778,8 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback);
-        let app_state = make_test_app_state(regex_classifier, None);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30);
+        let app_state = make_test_app_state(regex_classifier, None, intent_classifier::ModelCosts::empty(), String::new());
         build_app(auth_config, app_state)
     }
 
@@ -885,8 +895,8 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback);
-        let app_state = make_test_app_state(regex_classifier, None);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30);
+        let app_state = make_test_app_state(regex_classifier, None, intent_classifier::ModelCosts::empty(), String::new());
         build_app(auth_config, app_state)
     }
 
@@ -1370,8 +1380,8 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback);
-        let app_state = make_test_app_state(regex_classifier, Some(client));
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30);
+        let app_state = make_test_app_state(regex_classifier, Some(client), intent_classifier::ModelCosts::empty(), String::new());
         let app = build_app(auth_config, app_state);
         (app, server)
     }
@@ -1417,8 +1427,8 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback);
-        let app_state = make_test_app_state(regex_classifier, Some(client));
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30);
+        let app_state = make_test_app_state(regex_classifier, Some(client), intent_classifier::ModelCosts::empty(), String::new());
         build_app(auth_config, app_state)
     }
 
@@ -2121,9 +2131,9 @@ mod slow_tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback);
-        let model_costs = regex_classifier.model_costs.clone();
-        let baseline_model = regex_classifier.baseline_model.clone();
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30);
+        let model_costs = intent_classifier::ModelCosts::empty();
+        let baseline_model = String::new();
         let classifier_chain =
             intent_classifier::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
         let classifier = Some(Arc::new(classifier_chain));
