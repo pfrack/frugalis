@@ -75,10 +75,12 @@ async fn main() {
         let model_costs = config::build_model_costs(&routing_map);
         let baseline_model =
             config::env_or_default("BASELINE_MODEL", intent_classifier::DEFAULT_MODEL_COMPLEX);
+        let categories = intent_classifier::hardcoded_categories();
         match intent_classifier::RegexClassifier::from_env(
             routing_map.clone(),
             fallback_entry.clone(),
             intent_classifier::SHORT_PROMPT_LEN,
+            categories,
         ) {
             Ok(regex_classifier) => {
                 info!("Intent classifier initialized");
@@ -778,7 +780,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, intent_classifier::hardcoded_categories());
         let app_state = make_test_app_state(regex_classifier, None, intent_classifier::ModelCosts::empty(), String::new());
         build_app(auth_config, app_state)
     }
@@ -895,7 +897,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, intent_classifier::hardcoded_categories());
         let app_state = make_test_app_state(regex_classifier, None, intent_classifier::ModelCosts::empty(), String::new());
         build_app(auth_config, app_state)
     }
@@ -1380,7 +1382,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, intent_classifier::hardcoded_categories());
         let app_state = make_test_app_state(regex_classifier, Some(client), intent_classifier::ModelCosts::empty(), String::new());
         let app = build_app(auth_config, app_state);
         (app, server)
@@ -1427,7 +1429,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, intent_classifier::hardcoded_categories());
         let app_state = make_test_app_state(regex_classifier, Some(client), intent_classifier::ModelCosts::empty(), String::new());
         build_app(auth_config, app_state)
     }
@@ -2131,7 +2133,7 @@ mod slow_tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, intent_classifier::hardcoded_categories());
         let model_costs = intent_classifier::ModelCosts::empty();
         let baseline_model = String::new();
         let classifier_chain =

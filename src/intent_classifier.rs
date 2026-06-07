@@ -18,6 +18,61 @@ pub(crate) fn hardcoded_model_costs() -> HashMap<String, f64> {
     m
 }
 
+/// Single source of truth for intent category definitions.
+/// Consumed by RegexClassifier (patterns, thresholds, routing) and
+/// LLMClassifier (prompt template descriptions).
+///
+/// External files hardcoding category name strings:
+/// - routing_examples/routing-*.toml (4 files) — section names
+/// - openapi/completions.yaml — enum constraint values (line 44, 111)
+/// - manual-test/run.sh — x-cerebrum-category header (line 179)
+/// - templates/dashboard/inferences.html — placeholder text (line 19)
+/// Category names are a PUBLIC API contract. Renaming any value here
+/// is a breaking change requiring updates to all listed consumers.
+/// Names must stay [A-Z_]+ for compatibility with key.to_uppercase()
+/// normalization in the routing config loader.
+#[derive(Clone, Debug)]
+pub(crate) struct CategoryConfig {
+    pub name: String,
+    pub description: String,
+    pub threshold: u32,
+    pub priority: u8,
+    pub model_env_var: Option<String>,
+}
+
+pub(crate) fn hardcoded_categories() -> Vec<CategoryConfig> {
+    vec![
+        CategoryConfig {
+            name: "FILE_READING".to_string(),
+            description: "Reading, viewing, inspecting, searching, or navigating files or code".to_string(),
+            threshold: 3,
+            priority: 1,
+            model_env_var: Some("DEFAULT_MODEL_READING".to_string()),
+        },
+        CategoryConfig {
+            name: "SYNTAX_FIX".to_string(),
+            description: "Fixing bugs, errors, typos, compilation issues, or broken code".to_string(),
+            threshold: 3,
+            priority: 2,
+            model_env_var: Some("DEFAULT_MODEL".to_string()),
+        },
+        CategoryConfig {
+            name: "COMPLEX_REASONING".to_string(),
+            description: "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization".to_string(),
+            threshold: 3,
+            priority: 3,
+            model_env_var: Some("DEFAULT_MODEL_COMPLEX".to_string()),
+        },
+        CategoryConfig {
+            name: "CASUAL".to_string(),
+            description: "Simple questions, greetings, general conversation, or short prompts".to_string(),
+            threshold: 1,
+            priority: 4,
+            model_env_var: Some("DEFAULT_MODEL".to_string()),
+        },
+    ]
+}
+
 #[derive(Clone)]
 pub struct ClassificationResult {
     pub category: String,
@@ -62,6 +117,7 @@ pub struct RegexClassifier {
     pub routing: HashMap<String, RouteEntry>,
     pub fallback_entry: RouteEntry,
     pub short_prompt_len: usize,
+    pub categories: Vec<CategoryConfig>,
 }
 
 // Backward compatibility alias until Phase 3 updates consumers
@@ -116,20 +172,8 @@ struct NegativeMeta {
 
 // ── Defaults ──
 
-// ── Category Name Constants ──
-
-const CAT_FILE_READING: &str = "FILE_READING";
-const CAT_COMPLEX_REASONING: &str = "COMPLEX_REASONING";
-const CAT_SYNTAX_FIX: &str = "SYNTAX_FIX";
-const CAT_CASUAL: &str = "CASUAL";
-const CAT_NEG: &str = "NEG";
-
 // ── Pattern Counts ──
 
-const FR_COUNT: usize = 12;
-const CR_COUNT: usize = 16;
-const SF_COUNT: usize = 11;
-const CA_COUNT: usize = 5;
 const NEG_COUNT: usize = 4;
 
 // ── Weight Arrays ──
@@ -142,11 +186,6 @@ const CA_WEIGHTS: &[u8] = &[3, 2, 1, 1, 1];
 // ── Classification Thresholds ──
 
 pub const SHORT_PROMPT_LEN: usize = 30;
-const FR_THRESHOLD: u32 = 3;
-const SF_THRESHOLD_HIGH: u32 = 4;
-const SF_THRESHOLD_LOW: u32 = 3;
-const CR_THRESHOLD: u32 = 3;
-const CA_THRESHOLD: u32 = 1;
 
 // ── Pattern Constants ──
 
@@ -216,22 +255,10 @@ const NEGATIVE: &[&str] = &[
 // ── Negative suppression metadata (parallel to NEGATIVE patterns) ──
 
 const NEGATIVE_META: &[NegativeMeta] = &[
-    NegativeMeta {
-        suppressed: CAT_COMPLEX_REASONING,
-        penalty: 2,
-    },
-    NegativeMeta {
-        suppressed: CAT_COMPLEX_REASONING,
-        penalty: 2,
-    },
-    NegativeMeta {
-        suppressed: CAT_SYNTAX_FIX,
-        penalty: 2,
-    },
-    NegativeMeta {
-        suppressed: CAT_FILE_READING,
-        penalty: 2,
-    },
+    NegativeMeta { suppressed: "COMPLEX_REASONING", penalty: 2 },
+    NegativeMeta { suppressed: "COMPLEX_REASONING", penalty: 2 },
+    NegativeMeta { suppressed: "SYNTAX_FIX",         penalty: 2 },
+    NegativeMeta { suppressed: "FILE_READING",       penalty: 2 },
 ];
 
 // ── Auth Header Lookup ──
@@ -266,51 +293,59 @@ fn sanitize(text: &str) -> String {
 
 // ── Pattern assembly ──
 
-fn build_all_patterns() -> (Vec<&'static str>, Vec<PatternMeta>) {
+fn build_all_patterns(categories: &[CategoryConfig]) -> (Vec<&'static str>, Vec<PatternMeta>, Range<usize>) {
     let mut patterns = Vec::new();
     let mut metadata = Vec::new();
 
-    for (i, p) in FILE_READING.iter().enumerate() {
-        patterns.push(*p);
-        metadata.push(PatternMeta {
-            category: CAT_FILE_READING,
-            weight: FR_WEIGHTS[i],
-        });
+    for config in categories {
+        match config.name.as_str() {
+            "FILE_READING" => {
+                for (i, p) in FILE_READING.iter().enumerate() {
+                    patterns.push(*p);
+                    metadata.push(PatternMeta { category: "FILE_READING", weight: FR_WEIGHTS[i] });
+                }
+            }
+            "COMPLEX_REASONING" => {
+                for (i, p) in COMPLEX_REASONING.iter().enumerate() {
+                    patterns.push(*p);
+                    metadata.push(PatternMeta { category: "COMPLEX_REASONING", weight: CR_WEIGHTS[i] });
+                }
+            }
+            "SYNTAX_FIX" => {
+                for (i, p) in SYNTAX_FIX.iter().enumerate() {
+                    patterns.push(*p);
+                    metadata.push(PatternMeta { category: "SYNTAX_FIX", weight: SF_WEIGHTS[i] });
+                }
+            }
+            "CASUAL" => {
+                for (i, p) in CASUAL.iter().enumerate() {
+                    patterns.push(*p);
+                    metadata.push(PatternMeta { category: "CASUAL", weight: CA_WEIGHTS[i] });
+                }
+            }
+            unknown => {
+                tracing::warn!(category = %unknown, "CategoryConfig name has no pattern array");
+            }
+        }
     }
 
-    for (i, p) in COMPLEX_REASONING.iter().enumerate() {
-        patterns.push(*p);
-        metadata.push(PatternMeta {
-            category: CAT_COMPLEX_REASONING,
-            weight: CR_WEIGHTS[i],
-        });
-    }
-
-    for (i, p) in SYNTAX_FIX.iter().enumerate() {
-        patterns.push(*p);
-        metadata.push(PatternMeta {
-            category: CAT_SYNTAX_FIX,
-            weight: SF_WEIGHTS[i],
-        });
-    }
-
-    for (i, p) in CASUAL.iter().enumerate() {
-        patterns.push(*p);
-        metadata.push(PatternMeta {
-            category: CAT_CASUAL,
-            weight: CA_WEIGHTS[i],
-        });
-    }
+    let positive_count = metadata.len();
+    let negative_start = positive_count;
 
     for p in NEGATIVE.iter() {
         patterns.push(*p);
-        metadata.push(PatternMeta {
-            category: CAT_NEG,
-            weight: 0,
-        });
+        metadata.push(PatternMeta { category: "NEG", weight: 0 });
     }
+    let negative_idx = negative_start..(negative_start + NEG_COUNT);
 
-    (patterns, metadata)
+    (patterns, metadata, negative_idx)
+}
+
+fn fallback_category(categories: &[CategoryConfig]) -> &str {
+    categories.iter()
+        .max_by_key(|c| c.priority)
+        .map(|c| c.name.as_str())
+        .unwrap_or("CASUAL")
 }
 
 // ── Implementations ──
@@ -320,7 +355,7 @@ impl ClassificationResult {
     /// Used when no classifier chain is configured (graceful degradation).
     pub fn fallback() -> Self {
         ClassificationResult {
-            category: CAT_CASUAL.to_string(),
+            category: "CASUAL".to_string(),
             model: crate::config::env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
             endpoint: String::new(),
             tier: ClassificationTier::Fallback,
@@ -334,11 +369,9 @@ impl RegexClassifier {
     /// Build the classifier from built-in patterns and environment configuration.
     /// Always succeeds — regex compilation errors are the only failure mode.
     /// When routing.toml is missing, hardcoded defaults are used.
-    pub fn from_env(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry, short_prompt_len: usize) -> Result<Self, String> {
-        let (patterns, metadata) = build_all_patterns();
+    pub fn from_env(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry, short_prompt_len: usize, categories: Vec<CategoryConfig>) -> Result<Self, String> {
+        let (patterns, metadata, negative_idx) = build_all_patterns(&categories);
         let set = RegexSet::new(&patterns).map_err(|e| format!("regex compilation failed: {e}"))?;
-        let negative_start = FR_COUNT + CR_COUNT + SF_COUNT + CA_COUNT;
-        let negative_idx = negative_start..(negative_start + NEG_COUNT);
 
         Ok(IntentClassifier {
             set,
@@ -347,15 +380,14 @@ impl RegexClassifier {
             routing,
             fallback_entry,
             short_prompt_len,
+            categories,
         })
     }
 
     #[cfg(test)]
-    pub fn from_values(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry, short_prompt_len: usize) -> Self {
-        let (patterns, metadata) = build_all_patterns();
+    pub fn from_values(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry, short_prompt_len: usize, categories: Vec<CategoryConfig>) -> Self {
+        let (patterns, metadata, negative_idx) = build_all_patterns(&categories);
         let set = RegexSet::new(&patterns).expect("built-in patterns should always compile");
-        let negative_start = FR_COUNT + CR_COUNT + SF_COUNT + CA_COUNT;
-        let negative_idx = negative_start..(negative_start + NEG_COUNT);
         IntentClassifier {
             set,
             metadata,
@@ -363,6 +395,7 @@ impl RegexClassifier {
             routing,
             fallback_entry,
             short_prompt_len,
+            categories,
         }
     }
 
@@ -397,39 +430,51 @@ impl RegexClassifier {
         // Short prompts (< short_prompt_len chars, no matches) → CASUAL
         let all_zero = scores.values().all(|&s| s == 0);
         if sanitized.len() < self.short_prompt_len && all_zero {
-            return self.route_fallback(CAT_CASUAL);
+            return self.route_fallback(fallback_category(&self.categories));
         }
 
-        // Check thresholds per Section 9 algorithm
-        let fr = *scores.get(CAT_FILE_READING).unwrap_or(&0) >= FR_THRESHOLD;
-        let sf = *scores.get(CAT_SYNTAX_FIX).unwrap_or(&0) >= SF_THRESHOLD_HIGH
-            || (*scores.get(CAT_SYNTAX_FIX).unwrap_or(&0) >= SF_THRESHOLD_LOW
-                && *scores.get(CAT_FILE_READING).unwrap_or(&0) == 0);
-        let cr = *scores.get(CAT_COMPLEX_REASONING).unwrap_or(&0) >= CR_THRESHOLD;
-        let ca = *scores.get(CAT_CASUAL).unwrap_or(&0) >= CA_THRESHOLD;
+        // Check thresholds per config-driven algorithm
+        let mut met: Vec<(&CategoryConfig, bool)> = self.categories.iter()
+            .map(|c| {
+                let score = *scores.get(c.name.as_str()).unwrap_or(&0);
+                (c, score >= c.threshold)
+            })
+            .collect();
 
-        let met = [fr, sf, cr, ca].iter().filter(|&&b| b).count();
+        // SF dual-threshold special case (SYNTAX_FIX only)
+        let sf_score = *scores.get("SYNTAX_FIX").unwrap_or(&0);
+        let fr_score = *scores.get("FILE_READING").unwrap_or(&0);
+        let sf_met = sf_score >= 4 || (sf_score >= 3 && fr_score == 0);
 
-        if met == 0 {
-            return self.route_fallback(CAT_CASUAL);
-        }
-        if met >= 2 {
-            return self.route_fallback(CAT_CASUAL);
+        // Update the met flag for SYNTAX_FIX
+        if let Some(entry) = met.iter_mut().find(|(c, _)| c.name == "SYNTAX_FIX") {
+            entry.1 = sf_met;
         }
 
-        if fr {
-            return self.route_match(CAT_FILE_READING);
+        let met_count = met.iter().filter(|(_, m)| *m).count();
+
+        if met_count == 0 {
+            return self.route_fallback(fallback_category(&self.categories));
         }
-        if sf {
-            return self.route_match(CAT_SYNTAX_FIX);
+        if met_count >= 2 {
+            return self.route_fallback(fallback_category(&self.categories));
         }
-        if cr {
-            return self.route_match(CAT_COMPLEX_REASONING);
+
+        // Sort by priority (lower = higher), pick first that met
+        met.sort_by_key(|(c, _)| c.priority);
+        for (config, is_met) in &met {
+            if *is_met {
+                return self.route_match(&config.name);
+            }
         }
-        self.route_match(CAT_CASUAL)
+
+        self.route_fallback(fallback_category(&self.categories))
     }
 
     fn route_match(&self, category: &str) -> ClassificationResult {
+        if category != "CASUAL" && !self.routing.contains_key(category) {
+            tracing::warn!(%category, "route_match: category not in routing table — falling back");
+        }
         let route = self.routing.get(category).unwrap_or(&self.fallback_entry);
         ClassificationResult {
             category: category.to_string(),
@@ -506,7 +551,7 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        RegexClassifier::from_values(routing, fallback, 30)
+        RegexClassifier::from_values(routing, fallback, 30, hardcoded_categories())
     }
 
     #[test]
