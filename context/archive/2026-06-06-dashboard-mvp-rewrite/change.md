@@ -1,9 +1,10 @@
 # Change: dashboard-mvp-rewrite
 
 **ID:** dashboard-mvp-rewrite
-**Status:** impl_reviewed
+**Status:** archived
 **Created:** 2026-06-06
-**Updated:** 2026-06-06
+**Updated:** 2026-06-07
+**Archived at:** 2026-06-07T11:28:45Z
 
 ## Summary
 
