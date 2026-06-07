@@ -398,9 +398,9 @@ All tests in `src/main.rs` (routes auth, completion handler, classify handler, u
 
 #### Automated
 
-- [ ] 1.1 `cargo build` passes
-- [ ] 1.2 `cargo test` passes (includes new config.rs unit tests)
-- [ ] 1.3 `cargo check` passes (type checking)
+- [x] 1.1 `cargo build` passes
+- [x] 1.2 `cargo test` passes (includes new config.rs unit tests)
+- [x] 1.3 `cargo check` passes (type checking)
 
 #### Manual
 
@@ -410,11 +410,11 @@ All tests in `src/main.rs` (routes auth, completion handler, classify handler, u
 
 #### Automated
 
-- [ ] 2.1 `cargo build` passes with no warnings
-- [ ] 2.2 `cargo test` all fast tests pass
-- [ ] 2.3 `cargo test auth` passes
-- [ ] 2.4 `cargo test routes_auth` passes
-- [ ] 2.5 `cargo test slow_tests` passes
+- [x] 2.1 `cargo build` passes with no warnings
+- [x] 2.2 `cargo test` all fast tests pass
+- [x] 2.3 `cargo test auth` passes
+- [x] 2.4 `cargo test routes_auth` passes
+- [x] 2.5 `cargo test slow_tests` passes
 
 #### Manual
 
