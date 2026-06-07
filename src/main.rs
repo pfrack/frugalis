@@ -70,7 +70,7 @@ async fn main() {
             None
         }
     };
-    let (classifier, routing, model_costs, baseline_model) = {
+    let (classifier, routing, model_costs, baseline_model, _llm_classifier_enabled) = {
         let (routing_map, fallback_entry) = config::load_routing();
         let model_costs = config::build_model_costs(&routing_map);
         let baseline_model =
@@ -80,11 +80,12 @@ async fn main() {
             routing_map.clone(),
             fallback_entry.clone(),
             intent_classifier::SHORT_PROMPT_LEN,
-            categories,
+            categories.clone(),
         ) {
             Ok(regex_classifier) => {
                 info!("Intent classifier initialized");
                 // Build classifier chain; currently only one backend (RegexClassifier)
+                // LLMClassifier will be added after http_client is created
                 let chain = intent_classifier::ClassifierChain::new(vec![Arc::new(
                     regex_classifier,
                 )]);
@@ -97,7 +98,7 @@ async fn main() {
                     }
                 }
                 let routing = Arc::new(merged_routing);
-                (Some(classifier), routing, model_costs, baseline_model)
+                (Some(classifier), routing, model_costs, baseline_model, false)
             }
             Err(e) => {
                 warn!("intent classification disabled: {e}");
@@ -106,6 +107,7 @@ async fn main() {
                     Arc::new(HashMap::new()),
                     intent_classifier::ModelCosts::empty(),
                     String::new(),
+                    false,
                 )
             }
         }
@@ -118,6 +120,45 @@ async fn main() {
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .expect("reqwest client should build");
+
+    // If LLM classifier is configured, add it to the chain
+    let (classifier, routing) = if let Some(config_path) = std::env::var("CONFIG_PATH").ok() {
+        if let Some(llm_config) = config::load_llm_classifier_config(&config_path) {
+            let categories = config::load_categories();
+            let llm_classifier = intent_classifier::LLMClassifier::new(
+                llm_config,
+                http_client.clone(),
+                categories,
+            );
+            info!(
+                "LLM classifier enabled: model={}, endpoint={}",
+                llm_classifier.model, llm_classifier.endpoint
+            );
+            // Add LLMClassifier as second backend in the chain
+            if let Some(chain) = classifier {
+                let mut backends = chain.backends().to_vec();
+                backends.push(Arc::new(llm_classifier));
+                let new_chain = intent_classifier::ClassifierChain::new(backends);
+                // Merge routing tables from all backends
+                let mut merged_routing = HashMap::new();
+                for backend in new_chain.backends().iter() {
+                    if let Some(r) = backend.get_routing() {
+                        merged_routing.extend(r.clone());
+                    }
+                }
+                (Some(Arc::new(new_chain)), Arc::new(merged_routing))
+            } else {
+                (classifier, routing)
+            }
+        } else {
+            debug!("LLM classifier not configured or disabled");
+            (classifier, routing)
+        }
+    } else {
+        debug!("No config path set, LLM classifier disabled");
+        (classifier, routing)
+    };
+
     let app_state = Arc::new(AppState {
         persistence: persistence_state,
         classifier,
@@ -189,7 +230,7 @@ fn log_classification(
 /// Shared classify-and-log logic. Validates Content-Type, extracts the prompt,
 /// classifies intent, builds the JSON response, and optionally enqueues a
 /// fire-and-forget inference record with the given `log_status`.
-fn classify_and_log(
+async fn classify_and_log(
     headers: &HeaderMap,
     body_str: &str,
     start: std::time::Instant,
@@ -210,11 +251,10 @@ fn classify_and_log(
 
     let prompt = persistence::extract_last_user_message(body_str);
 
-    let classification = state
-        .classifier
-        .as_ref()
-        .map(|c| c.classify(&prompt))
-        .unwrap_or_else(intent_classifier::ClassificationResult::fallback);
+    let classification = match state.classifier.as_ref() {
+        Some(c) => c.classify(&prompt).await,
+        None => intent_classifier::ClassificationResult::fallback(),
+    };
 
     let response_body = serde_json::json!({
         "status": "classified",
@@ -299,11 +339,10 @@ async fn completion_handler(
             },
             None => {
                 warn!("X-Cerebrum-Category '{category}' not found in routing configuration; degrading to classification JSON");
-                let fallback = state
-                    .classifier
-                    .as_ref()
-                    .map(|c| c.classify(""))
-                    .unwrap_or_else(intent_classifier::ClassificationResult::fallback);
+                let fallback = match state.classifier.as_ref() {
+                    Some(c) => c.classify("").await,
+                    None => intent_classifier::ClassificationResult::fallback(),
+                };
                 let response_body = serde_json::json!({
                     "status": "classified",
                     "category": fallback.category,
@@ -317,11 +356,10 @@ async fn completion_handler(
         }
     } else {
         let prompt = persistence::extract_last_user_message(body_str);
-        state
-            .classifier
-            .as_ref()
-            .map(|c| c.classify(&prompt))
-            .unwrap_or_else(intent_classifier::ClassificationResult::fallback)
+        match state.classifier.as_ref() {
+            Some(c) => c.classify(&prompt).await,
+            None => intent_classifier::ClassificationResult::fallback(),
+        }
     };
 
     let client = match &state.http_client {
@@ -643,7 +681,7 @@ async fn classify_handler(
     } else {
         None
     };
-    classify_and_log(&headers, body_str, start, &state, log_status)
+    classify_and_log(&headers, body_str, start, &state, log_status).await
 }
 
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
