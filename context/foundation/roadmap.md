@@ -48,7 +48,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-07a | extract-generic-classifier-config | move generic config out of `RegexClassifier` to `main()`: routing loading (`ROUTING_CONFIG_PATH`, `hardcoded_routing()`), `BASELINE_MODEL` env, `ModelCosts` populating, `DEFAULT_MODEL*` env vars, `NVIDIA_ENDPOINT`, `SHORT_PROMPT_LEN`; `RegexClassifier` receives only patterns/weights/thresholds | S-07, S-01a | FR-002 | done |
 | S-07b | shared-category-config | extract shared `CategoryConfig` (names, descriptions, thresholds, priorities) consumed by both `RegexClassifier` and `LLMClassifier` from a single source of truth | S-07, S-01a | FR-002 | done |
 | S-08 | provider-url-derivation | ~~refactor routing config so endpoint URLs omit `v1/chat/*`; path suffix derived from `provider_type`~~ — descoped (research-only; not worth config complexity at current scale) | — | FR-003 | descoped |
-| S-09 | llm-classifier | implement `LLMClassifier` backend for `IntentClassify` trait: sends prompt to a small/cheap model, parses classification from response; config carries model, endpoint, `UPSTREAM_API_KEY`, classification prompt template | S-07, S-07b | FR-002 | done |
+| S-09 | llm-classifier | implement `LLMClassifier` backend for `IntentClassify` trait: sends prompt to a small/cheap model, parses classification from response; config carries model, endpoint, `UPSTREAM_API_KEY`, classification prompt template | S-07, S-07b | FR-002 | proposed |
 | S-09a | classifier-config-boundary | extract generic classifier boundary config: per-backend enable/disable flags, clear separation of generic settings (CategoryConfig, chain construction) from backend-specific settings (RegexClassifier: patterns/weights; LLMClassifier: model/endpoint/API key/prompt) | S-07b, S-09 | FR-002 | proposed |
 
 ## Streams
@@ -415,8 +415,6 @@ All roadmap items are active or completed; no currently parked items.
 - **S-07a: Generic configuration leaking from `RegexClassifier::from_env()` is lifted to `main()` so it's available to all classifier backends. After extraction, `RegexClassifier` receives only classifier-specific data (patterns, weights, thresholds, `CategoryConfig`).** — Archived 2026-06-07 → `context/archive/2026-06-07-extract-generic-classifier-config/`. Lesson: —.
 
 - **S-07b: A `CategoryConfig` struct is defined with `name`, `description`, `regex_threshold`, and `priority` fields. A static `CATEGORIES: &[CategoryConfig]` array serves as the single source of truth for all four intent categories. `RegexClassifier` consumes `CategoryConfig` at construction time (replacing scattered `CAT_*` constants, thresholds, and hardcoded priority ordering). The same `CategoryConfig` array feeds `LLMClassifier`'s prompt template generation (iterating `.description` fields) so both classifiers operate on the same category set without drift.** — Archived 2026-06-08 → `context/archive/2026-06-07-shared-category-config/`. Lesson: —.
-
-- **S-09: An `LLMClassifier` struct implements `IntentClassify`, sending the user prompt to a small/cheap classification model (e.g., `gpt-4o-mini`) and parsing the intent category from the response. Its config carries: model name, endpoint, `UPSTREAM_API_KEY` env var, and a classification prompt template that instructs the model to output one of the known categories. The `AppState` can hold either `RegexClassifier` or `LLMClassifier` behind the same `Arc<dyn IntentClassify>`.** — Archived 2026-06-08 → `context/archive/2026-06-07-llm-classifier/`. Lesson: —.
 
 ---
 
