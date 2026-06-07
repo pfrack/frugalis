@@ -288,7 +288,7 @@ impl LLMClassifier {
                 // Parse category from response - look for known category names
                 let response_upper = response_text.to_uppercase();
                 for cat in &self.categories {
-                    if response_upper.contains(&cat.name.to_uppercase()) {
+                    if response_upper.trim() == cat.name.to_uppercase() {
                         return ClassificationResult {
                             category: cat.name.clone(),
                             model: self.model.clone(),
@@ -462,7 +462,7 @@ pub fn auth_headers_for(provider_type: &str, api_key: &str) -> Vec<(String, Stri
 
 fn code_block_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?s)```[^`]*```").unwrap())
+    RE.get_or_init(|| Regex::new(r"(?s)```[^`]*```").expect("code_block_re regex must be valid"))
 }
 
 // ── Prompt Sanitization ──
