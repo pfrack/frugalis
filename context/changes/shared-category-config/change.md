@@ -1,0 +1,10 @@
+# Change: Shared Category Configuration (S-07b)
+
+- **id**: shared-category-config
+- **status**: preparing
+- **created**: 2026-06-07
+- **updated**: 2026-06-07
+- **roadmap**: S-07b
+- **prerequisites**: S-07 (IntentClassify trait — already implemented), S-01a (Regex classifier working)
+- **unlocks**: S-09 (LLMClassifier needs category descriptions for prompt)
+- **research**: research.md — detailed analysis of where categories are defined, proposed CategoryConfig struct, and migration plan
