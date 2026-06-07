@@ -148,6 +148,7 @@ async fn main() {
                 }
                 (Some(Arc::new(new_chain)), Arc::new(merged_routing))
             } else {
+                warn!("LLM classifier configuration enabled but no regex classifier available; disabling LLM classifier");
                 (classifier, routing)
             }
         } else {
