@@ -699,7 +699,7 @@ The `from_values()` already gained the `categories` parameter in Phase 1.
 
 #### Manual
 
-- [x] 1.5 Classification output identical to pre-refactor for representative prompts
+- [x] 1.5 Classification output identical to pre-refactor for representative prompts — 06b44fb
 
 ### Phase 2: config.toml support
 
@@ -711,9 +711,9 @@ The `from_values()` already gained the `categories` parameter in Phase 1.
 
 #### Manual
 
-- [x] 2.3 config.toml with overridden thresholds: classification respects override
-- [x] 2.4 Legacy routing.toml without config.toml: works with info log
-- [x] 2.5 Neither file present: hardcoded defaults with zero errors
+- [x] 2.3 config.toml with overridden thresholds: classification respects override — 06b44fb
+- [x] 2.4 Legacy routing.toml without config.toml: works with info log — 06b44fb
+- [x] 2.5 Neither file present: hardcoded defaults with zero errors — 06b44fb
 
 ### Phase 3: Tests + docs
 
@@ -726,5 +726,5 @@ The `from_values()` already gained the `categories` parameter in Phase 1.
 
 #### Manual
 
-- [x] 3.5 Classification test output shows all tests pass unchanged
-- [x] 3.6 No string mismatch failures in test assertions
+- [x] 3.5 Classification test output shows all tests pass unchanged — 06b44fb
+- [x] 3.6 No string mismatch failures in test assertions — 06b44fb
