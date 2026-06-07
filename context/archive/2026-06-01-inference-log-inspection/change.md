@@ -1,9 +1,10 @@
 # Change: inference-log-inspection
 
 **ID:** inference-log-inspection
-**Status:** impl_reviewed
+**Status:** archived
 **Created:** 2026-06-01
 **Updated:** 2026-06-07
+**Archived at:** 2026-06-07T08:28:58Z
 
 ## Summary
 
