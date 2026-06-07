@@ -31,6 +31,7 @@ pub(crate) fn hardcoded_model_costs() -> HashMap<String, f64> {
 /// is a breaking change requiring updates to all listed consumers.
 /// Names must stay [A-Z_]+ for compatibility with key.to_uppercase()
 /// normalization in the routing config loader.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct CategoryConfig {
     pub name: String,

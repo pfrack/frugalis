@@ -719,10 +719,10 @@ The `from_values()` already gained the `categories` parameter in Phase 1.
 
 #### Automated
 
-- [x] 3.1 All tests pass: `cargo test`
-- [x] 3.2 Slow tests pass: `cargo test slow_tests`
-- [x] 3.3 CI checks: `cargo test auth && cargo test routes_auth`
-- [x] 3.4 Verification test catches key mismatches
+- [x] 3.1 All tests pass: `cargo test` — 13ae23b
+- [x] 3.2 Slow tests pass: `cargo test slow_tests` — 13ae23b
+- [x] 3.3 CI checks: `cargo test auth && cargo test routes_auth` — 13ae23b
+- [x] 3.4 Verification test catches key mismatches — 13ae23b
 
 #### Manual
 
