@@ -1,7 +1,7 @@
 # Change: Shared Category Configuration (S-07b)
 
 - **id**: shared-category-config
-- **status**: impl_review
+- **status**: implementing
 - **created**: 2026-06-07
 - **updated**: 2026-06-07
 - **roadmap**: S-07b

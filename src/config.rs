@@ -196,7 +196,7 @@ fn load_categories_from_file(path: &str) -> Result<Vec<CategoryConfig>, String> 
 
 pub(crate) fn build_model_costs(routing: &HashMap<String, RouteEntry>) -> ModelCosts {
     let mut costs = crate::intent_classifier::hardcoded_model_costs();
-    for (_category, entry) in routing {
+    for entry in routing.values() {
         if let Some(override_cost) = entry.cost_per_1m_input_tokens {
             costs.insert(entry.model.clone(), override_cost);
         }
@@ -207,6 +207,7 @@ pub(crate) fn build_model_costs(routing: &HashMap<String, RouteEntry>) -> ModelC
 /// Configuration for the LLM classifier backend.
 #[derive(Clone, Debug)]
 pub(crate) struct LlmClassifierConfig {
+    #[allow(dead_code)]
     pub enabled: bool,
     pub model: String,
     pub endpoint: String,
@@ -219,10 +220,21 @@ pub(crate) struct LlmClassifierConfig {
 /// Load LLM classifier config from config.toml.
 /// Returns None if section is absent or enabled = false.
 pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConfig> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let root: toml::Value = toml::from_str(&content).ok()?;
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Cannot read config for LLM classifier: {e}");
+            return None;
+        }
+    };
+    let root: toml::Value = match toml::from_str(&content) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Invalid TOML for LLM classifier section: {e}");
+            return None;
+        }
+    };
     let table = root.as_table()?;
-
     let llm_section = table.get("llm_classifier")?.as_table()?;
 
     // Check enabled first
@@ -237,11 +249,15 @@ pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConf
         .unwrap_or("gpt-4o-mini")
         .to_string();
 
-    let endpoint = llm_section
-        .get("endpoint")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+// NOTE: LLM classifier requires explicit endpoint configuration (no default).
+        // Unlike routing which has provider-specific defaults, LLM classifiers must
+        // always specify their endpoint — an empty default ensures misconfiguration
+        // fails loudly rather than silently routing to the wrong provider.
+        let endpoint = llm_section
+            .get("endpoint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
     let api_key_env = llm_section
         .get("api_key_env")
