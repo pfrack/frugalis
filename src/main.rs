@@ -75,7 +75,7 @@ async fn main() {
         let model_costs = config::build_model_costs(&routing_map);
         let baseline_model =
             config::env_or_default("BASELINE_MODEL", intent_classifier::DEFAULT_MODEL_COMPLEX);
-        let categories = intent_classifier::hardcoded_categories();
+        let categories = config::load_categories();
         match intent_classifier::RegexClassifier::from_env(
             routing_map.clone(),
             fallback_entry.clone(),

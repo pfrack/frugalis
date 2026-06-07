@@ -692,10 +692,10 @@ The `from_values()` already gained the `categories` parameter in Phase 1.
 
 #### Automated
 
-- [x] 1.1 Compiles: `cargo build`
-- [x] 1.2 All classifier unit tests pass: `cargo test intent_classify`
-- [x] 1.3 All auth tests pass: `cargo test auth`
-- [x] 1.4 All route auth tests pass: `cargo test routes_auth`
+- [x] 1.1 Compiles: `cargo build` — ce916fd
+- [x] 1.2 All classifier unit tests pass: `cargo test intent_classify` — ce916fd
+- [x] 1.3 All auth tests pass: `cargo test auth` — ce916fd
+- [x] 1.4 All route auth tests pass: `cargo test routes_auth` — ce916fd
 
 #### Manual
 
@@ -705,9 +705,9 @@ The `from_values()` already gained the `categories` parameter in Phase 1.
 
 #### Automated
 
-- [ ] 2.1 Compiles: `cargo build`
-- [ ] 2.2 All tests pass: `cargo test`
-- [ ] 2.3 Works without config file (hardcoded fallback): `cargo test`
+- [x] 2.1 Compiles: `cargo build`
+- [x] 2.2 All tests pass: `cargo test`
+- [x] 2.3 Works without config file (hardcoded fallback): `cargo test`
 
 #### Manual
 
