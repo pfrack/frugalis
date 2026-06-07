@@ -1,7 +1,7 @@
 # Change: Extract Generic Classifier Config (S-07a)
 
 - **id**: extract-generic-classifier-config
- - **status**: implementing
+ - **status**: implemented
  - **created**: 2026-06-07
  - **updated**: 2026-06-07
  - **roadmap**: S-07a
