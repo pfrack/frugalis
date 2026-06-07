@@ -1,0 +1,13 @@
+[[categories]]
+name = "FILE_READING"
+description = "Reading files"
+threshold = 3
+priority = 1
+model_env_var = "DEFAULT_MODEL_READING"
+
+[[categories]]
+name = "CASUAL"
+description = "Simple questions"
+threshold = 1
+priority = 4
+model_env_var = "DEFAULT_MODEL"

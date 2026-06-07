@@ -11,6 +11,7 @@ last_updated: 2026-06-07
 last_updated_by: pfrack
 last_updated_note: "Added critical migration note for NEGATIVE_META references to CAT_* constants"
 last_updated_note: "Added classification of generic vs. classifier-specific settings, and per-backend enable/disable flags"
+last_updated_note: "Edge case validation: identified 42+ raw string locations, 7 external files with hardcoded category values, 4 silent-failure scenarios, and 2 cross-category coupling risks"
 ---
 
 # Research: Shared Category Configuration (S-07b)
@@ -328,6 +329,24 @@ The pattern count per category can be derived from the pattern array lengths (wh
 
 4. **Scope: separate change or folded into S-09?** This is small enough (~80-100 lines) to be either. The roadmap treats it as a separate slice (S-07b) because it has distinct verification criteria (all tests pass, no behavioral change) and unblocks S-09 planning.
 
+## Mitigation Recommendations (from Edge Case Validation)
+
+These items should be tracked in the implementation plan for S-07b:
+
+1. **Use `HashMap<&str, u32>` for scores, not index-based arrays.** The SF/FR cross-category check (`scores.get("FILE_READING")`) depends on name-based lookups. Index-based lookups would break silently on category reordering in `CATEGORIES`.
+
+2. **Add `tracing::warn!` in `route_match()` for non-CASUAL HashMap misses.** Currently a classifier-category/routing-key mismatch fails silently. A warning log would catch this at runtime.
+
+3. **Derive fallback category from `CATEGORIES` by priority.** Replace both `ClassificationResult::fallback()` and the short-prompt shortcut's `CAT_CASUAL` with `CATEGORIES.iter().max_by_key(|c| c.priority).unwrap().name` — self-correcting, no hardcoded fallback category.
+
+4. **Document that category names are a PUBLIC API contract.** The OpenAPI spec, HTTP header values, TOML config section names, and dashboard text all depend on stable category name strings. Add a comment on `CategoryConfig` and `CATEGORIES` warning that renaming is a breaking change.
+
+5. **Do NOT add non-[A-Z_] characters to category names.** The `key.to_uppercase()` normalization in `config.rs:109` relies on this. A category named `"file-reading"` would normalize to `"FILE-READING"` which would never match a `CategoryConfig.name` value of `"file-reading"`.
+
+6. **Update all 7 external files as part of the S-07b implementation** if any category name changes. Even if names don't change now, add comments in each file pointing to `CATEGORIES` as the source of truth.
+
+7. **Tests: export `CATEGORIES` publicly (or `pub(crate)`) so tests can use `CATEGORIES[0].name` instead of raw `"FILE_READING"`.** This gives compile-time protection against renames. Use `#[cfg(test)]` re-exports if the slice shouldn't be part of the public API.
+
 ## Critical Migration: NEGATIVE_META References CAT_* Constants
 
 `src/intent_classifier.rs:270-287` defines `NEGATIVE_META` as:
@@ -355,3 +374,220 @@ const NEGATIVE_META: &[NegativeMeta] = &[
 **Verification:** After refactoring, run `cargo test` — all existing tests must pass. The `NEGATIVE_META` suppression behavior (reducing scores for `read the architecture document` to avoid COMPLEX_REASONING false positives) must be unchanged.
 
 **Why this matters:** If `NEGATIVE_META` is not updated, the code will fail to compile with "cannot find value `CAT_COMPLEX_REASONING`" errors. This is a compile-time blocker, not a runtime regression — easy to catch but must be explicitly tracked.
+
+## Follow-up Research: Edge Case Validation (2026-06-07)
+
+The original research identified the primary migration surface (~6 definition points, ~17 test locations). A deeper audit against the live code (commit `a4c22bd`, main branch) found **significant gaps** — 42+ raw string occurrences across 8 files, 7 external consumers of category values, and 4 silent-failure scenarios.
+
+### Finding A: Raw String Literal Count is ~42, Not ~17
+
+The original research counted ~17 category string references in `src/main.rs` only. The actual count across the entire project is **~42**:
+
+| File | Count | Type |
+|------|-------|------|
+| `src/intent_classifier.rs` (tests) | ~16 | Assertions, routing keys, stub classifiers |
+| `src/main.rs` (tests) | ~11 | Routing keys, assertions, header values |
+| `src/config.rs` (production + tests) | ~15 | `hardcoded_routing()` inserts, test assertions |
+| `routing_examples/*.toml` (4 files) | 20 | Section names (`[FILE_READING]`, etc.) |
+| `openapi/completions.yaml` | 4 | `enum` constraint values |
+| `manual-test/run.sh` | ~2 | Header values, comments |
+| `templates/dashboard/inferences.html` | 1 | Placeholder text |
+
+After the refactor, the **production code** strings (config.rs `hardcoded_routing()` + intent_classifier.rs constants) will reference `CategoryConfig.name`. But **every test assertion and every external file** remains a string literal point that must match `CategoryConfig.name`. A future rename of any category would require touching ~35+ locations.
+
+### Finding B: 7 External Files Hardcode Category Names — Missed Entirely
+
+The original research only mentioned `routing_examples/*.toml`. The full set:
+
+1. **`routing_examples/routing-unreachable.toml:3,9,15,21,27`** — section names `[FILE_READING]`, `[COMPLEX_REASONING]`, `[SYNTAX_FIX]`, `[CASUAL]`, `[FALLBACK]`
+2. **`routing_examples/routing-manual-tests.toml:5,11,17,23,29`** — same
+3. **`routing_examples/routing-openrouter.toml:4,10,16,22,28`** — same
+4. **`routing_examples/routing-nvidia-nim.toml:5,10,15,20,25`** — same
+5. **`openapi/completions.yaml:44,111`** — `enum: [COMPLEX_REASONING, FILE_READING, SYNTAX_FIX, CASUAL]` — OpenAPI schema constraint
+6. **`manual-test/run.sh:179`** — passes `COMPLEX_REASONING` as `x-cerebrum-category` header
+7. **`templates/dashboard/inferences.html:19`** — `placeholder="e.g. COMPLEX_REASONING"`
+
+**Impact**: Category names are a **public API contract**, not just an internal detail. The OpenAPI spec, HTTP headers, TOML configs, and UI text all depend on these exact strings. Any rename is a **breaking change** to the API surface, the config format, and the dashboard UX.
+
+### Finding C: `key.to_uppercase()` in Config Loader Creates Silent Mismatch Risk
+
+`src/config.rs:109` normalizes TOML section keys with `key.to_uppercase()`. This means:
+- TOML `[FILE_READING]` → stored as `"FILE_READING"` ✓
+- TOML `[file_reading]` → stored as `"FILE_READING"` ✓ (same result after uppercasing)
+- **But**: If a `CategoryConfig.name` were changed to contain non-alpha characters (e.g., `"file-reading"` or `"FILE_READING_V2"`), `key.to_uppercase()` would NOT match the `ClassificationResult.category` produced by `route_match()`. The routing lookup would silently fall back — **no error, no log, just cascaded fallback**.
+
+This is not a risk for the current four categories (all uppercase alpha-only), but any future category name that deviates from `[A-Z_]+` would break silently.
+
+### Finding D: `ClassificationResult::fallback()` Hardcodes `CAT_CASUAL` in Two Separate Places
+
+The original research noted `ClassificationResult::fallback()` (line 9 of the migration table) but missed that `CAT_CASUAL` appears as the fallback destination in **two independent code paths**:
+
+1. **`ClassificationResult::fallback()`** (`intent_classifier.rs:322-323`) — constructs `ClassificationResult { category: CAT_CASUAL.to_string(), ... }` when no classifier matches
+2. **`classify()` short-prompt shortcut** (`intent_classifier.rs:398-401`) — returns `self.route_fallback(CAT_CASUAL)` for `<30 char prompts with zero regex matches`
+
+Both independently hardcode `CAT_CASUAL`. If CASUAL were renamed to something with a different priority (e.g., a new catch-all category), both locations must change together. The `CATEGORIES` slice approach (iterate sorted by priority, use lowest-priority entry as fallback destination) would make this self-correcting.
+
+### Finding E: SF Dual-Threshold Has Undocumented Cross-Category Coupling
+
+Beyond the single/dual-threshold design question (Section 8), there's a **deeper coupling risk**: the SF low-threshold check at `intent_classifier.rs:405-407` uses `CAT_FILE_READING` **by name**:
+
+```rust
+*scores.get(CAT_FILE_READING).unwrap_or(&0) == 0
+```
+
+If the `CategoryConfig` refactor replaces `CAT_FILE_READING` with a string lookup by name, this line breaks cleanly (compile error if the constant is removed). But if the CategoryConfig approach uses **index-based** category lookups (e.g., `categories[0].name` instead of name-based `scores.get("FILE_READING")`), this coupling becomes fragile — changing category order would point to the wrong category's score.
+
+**Recommendation**: Keep `scores` as a `HashMap<&str, u32>` keyed by category name string, not by index. This makes the SF/FR coupling resilient to ordering changes in `CATEGORIES`.
+
+### Finding F: Routing Key Mismatch = Silent Fallback (Not Compile Error)
+
+Every location where `ClassificationResult.category` is used to look up the routing table (`route_match()`, `completion_handler` header bypass) does:
+
+```rust
+self.routing.get(category)  // HashMap lookup by String
+```
+
+If the classifier outputs a category name that doesn't exist in the routing table (e.g., typo in `CategoryConfig.name`, or mismatch with TOML section keys), the HashMap returns `None` and the request silently falls back to the `fallback_entry`. There is **no log, no error, no telemetry** for "classifier produced unknown category" — the request just routes to the fallback model.
+
+**Mitigation**: Add an `debug_assert!` or `tracing::warn!` in `route_match()` when the HashMap lookup misses for a non-CASUAL category.
+
+### Finding G: Test Code Uses Raw Strings, Not CAT_* Constants — No Compile-Time Protection
+
+Every test assertion (`assert_eq!(result.category, "FILE_READING")`) and every test routing insert (`routing.insert("SYNTAX_FIX".to_string(), entry)`) uses string literals, not `CAT_SYNTAX_FIX` etc. This means:
+
+- Renaming a category constant silently breaks tests (assertion failures), but does **not** produce a compile error.
+- The tests and production code share no import of category names — they're independently maintained string literals.
+- The `ClassifyBuilder` test helper constructs `RegexClassifier` with `routing: HashMap::new()`, using `"FILE_READING"` etc. as raw keys. If the classifier constructor changes signature in the refactor, `ClassifyBuilder` tests break at compile time (good). But if only the string values change, they fail at runtime (worse).
+
+### Edge Case Severity Summary
+
+| # | Risk | Severity | Mechanism |
+|---|------|----------|-----------|
+| 1 | 42+ string literal occurrences split across 8 files — any rename touches ~35 locations | **HIGH** | Manual audit burden; no single `use` import |
+| 2 | `key.to_uppercase()` vs `CategoryConfig.name` — silent mismatch if names contain non-[A-Z_] chars | **HIGH** | HashMap miss → fallback routing; no log |
+| 3 | `build_all_patterns` iteration order determines `negative_idx` range — reordering breaks negative suppression | **HIGH** | Wrong patterns treated as negative |
+| 4 | 7 external files (TOML, YAML, shell, HTML) hardcode category values — not covered in migration table | **HIGH** | Breaking API/UX/config changes if names change |
+| 5 | `route_match()` HashMap miss = silent fallback; no telemetry for unknown category | **MEDIUM** | Undetected routing errors |
+| 6 | SF dual-threshold name-couples `CAT_FILE_READING` — index-based lookup would break on reorder | **MEDIUM** | Cross-category score dependency |
+| 7 | Two independent fallback-to-CASUAL code paths — both must agree on fallback category | **MEDIUM** | Divergent fallback behavior |
+| 8 | Test assertions use raw strings, not constants — no compile error on rename | **MEDIUM** | Silent test breakage |
+| 9 | DB `category` column is free-text — no validation, historical data skew on rename | **LOW** | Permanent data inconsistency |
+| 10 | Dashboard placeholder `"e.g. COMPLEX_REASONING"` in HTML template | **LOW** | Cosmetic |
+
+## Follow-up Research: Constructor, Merge, and Fallback Details (2026-06-07)
+
+Deeper investigation of the classifier construction pipeline, routing map merge, fallback entry duplication, and streaming path — areas the original research left as open questions.
+
+### Finding H: `from_env()`/`from_values()` Hardcode `FR_COUNT + CR_COUNT + SF_COUNT + CA_COUNT`
+
+Both constructor methods at `src/intent_classifier.rs:337-367` compute `negative_start` from the four pattern count constants:
+
+```rust
+// from_env() line 340
+let negative_start = FR_COUNT + CR_COUNT + SF_COUNT + CA_COUNT;
+// from_values() line 357 — identical
+let negative_start = FR_COUNT + CR_COUNT + SF_COUNT + CA_COUNT;
+```
+
+After removing `FR_COUNT` etc., this must become:
+
+```rust
+let positive_count: usize = CATEGORIES.iter()
+    .filter(|c| c.regex_threshold.is_some())  // only regex-enabled categories
+    .map(|c| /* pattern array length per category */)
+    .sum();
+let negative_start = positive_count;
+```
+
+But `CATEGORIES` doesn't carry pattern counts. The pattern arrays (`FILE_READING`, `COMPLEX_REASONING`, etc.) remain as standalone `&[&str]` static arrays. Two approaches:
+1. Add `pattern_count: usize` to `CategoryConfig` (couples category config to regex internals)
+2. Keep a separate `const REGEX_CATEGORY_PATTERN_COUNTS: &[usize]` parallel array — fragile
+3. Compute negative_start in `build_all_patterns()` and return it as part of the result tuple — cleanest
+
+**Recommendation**: `build_all_patterns()` returns `(Vec<&'static str>, Vec<PatternMeta>, Range<usize>)` — it knows when it starts appending negative patterns, so it can return the correct range directly. No need for `negative_start` in the constructor.
+
+### Finding I: `test_classifier()` — Single Test Helper, Not a Builder Pattern
+
+There is no `ClassifyBuilder` pattern in the codebase. The only test helper that constructs a `RegexClassifier` directly is `fn test_classifier()` at `src/intent_classifier.rs:460-510`.
+
+It constructs a routing HashMap with **4 hardcoded string keys**: `"FILE_READING"`, `"COMPLEX_REASONING"`, `"SYNTAX_FIX"`, `"CASUAL"` (lines 463, 473, 483, 493), plus a fallback entry (line 502-508). These are raw string literals — they compile regardless of whether `CAT_FILE_READING` exists.
+
+After CategoryConfig refactor: the `test_classifier()` helper should either:
+- Iterate `CATEGORIES` to populate the routing map dynamically
+- Or keep raw strings but add a test assertion that the map has exactly 4 keys matching `CATEGORIES`
+
+### Finding J: `make_test_app_state()` Merge Path Is Unchanged by CategoryConfig
+
+`src/main.rs:695-722` wraps a `RegexClassifier` in `ClassifierChain`, then merges routing via `backend.get_routing()` which returns `Some(&self.routing)` (`src/intent_classifier.rs:53-55`). The routing map was injected at construction time — what changes is **who constructs it**, not how it's extracted.
+
+The merge at `src/main.rs:91-96` (production) is identical:
+```rust
+for backend in classifier.backends().iter() {
+    if let Some(r) = backend.get_routing() {
+        merged_routing.extend(r.clone());
+    }
+}
+```
+
+**No merge logic changes needed.** The routing map content is determined by who calls `RegexClassifier::from_env()` — currently `config::load_routing()` + `config::hardcoded_routing()`, after refactor same callers but with CategoryConfig-driven key generation.
+
+### Finding K: Fallback Entry Constructed at 12 Locations — Not a CategoryConfig Concern
+
+A fallback `RouteEntry` struct is constructed in **12 separate locations** across 3 files:
+
+| File | Lines | Context |
+|------|-------|---------|
+| `config.rs:59-65` | `hardcoded_routing()` | Production: nvidia_nim fallback |
+| `config.rs:135-141` | `load_routing()` | Production: when TOML `[FALLBACK]` absent |
+| `intent_classifier.rs:502-508` | `test_classifier()` | Test helper |
+| `main.rs:773-779` | `test_app_with_classifier()` | Test |
+| `main.rs:890-896` | `test_app_with_enriched_classifier()` | Test |
+| `main.rs:1375-1381` | `test_app_with_http_client()` | Test |
+| `main.rs:1422-1428` | `test_app_with_dead_endpoint()` | Test |
+| `main.rs:2126-2132` | `test_streaming_keepalive_injected()` | Test |
+
+There are two separate "fallback" concepts:
+1. **`RouteEntry` fallback** — the model/endpoint used when a category has no routing entry (used by `route_match()` as `unwrap_or` and `route_fallback()`)
+2. **`ClassificationResult::fallback()`** — static constructor for when no classifier is configured at all (uses `CAT_CASUAL` hardcoded)
+
+**The fallback `RouteEntry` is NOT a CategoryConfig concern.** It belongs to the routing layer. CategoryConfig should NOT carry fallback model/endpoint — those come from the router, not the category definitions.
+
+**But `ClassificationResult::fallback()` hardcoding `CAT_CASUAL` IS a CategoryConfig concern** — it should derive the fallback category from `CATEGORIES` by lowest priority (see Finding G #3).
+
+### Finding L: Streaming Path Uses Identical Routing — No Separate Concern
+
+The SSE streaming response path in `src/main.rs:436-531` goes through the **exact same** `completion_handler` as non-streaming requests. Classification and routing happen at lines 275-323 (streaming vs non-streaming routing is identical), and the stream check happens later at line 394. The upstream URL and model are already determined by the time the streaming begins.
+
+**No streaming-specific category edge cases exist.** The `x-cerebrum-category` header bypass works the same for streaming and non-streaming.
+
+### Finding M: `hardcoded_routing()` in config.rs Creates 4 RouteEntry Per Category
+
+`src/config.rs:13-67` is the production fallback when no `routing.toml` exists. It constructs a `HashMap<String, RouteEntry>` with 4 hardcoded entries:
+
+| Line | Category Key | Model Env Var |
+|------|-------------|---------------|
+| 18-27 | `"COMPLEX_REASONING"` | `DEFAULT_MODEL_COMPLEX` |
+| 29-37 | `"FILE_READING"` | `DEFAULT_MODEL_READING` |
+| 39-47 | `"SYNTAX_FIX"` | `DEFAULT_MODEL` |
+| 49-57 | `"CASUAL"` | `DEFAULT_MODEL` |
+| 59-65 | `(fallback)` | `DEFAULT_MODEL` |
+
+After CategoryConfig refactor, this function should iterate `CATEGORIES` and map model env vars via a lookup table `CategoryConfig.name → env_var_name`. The simplest approach: add an optional `model_env_var: Option<&'static str>` field to `CategoryConfig`.
+
+### Finding N: `build_all_patterns()` Iteration Order Is the Critical Migration Point
+
+The current `build_all_patterns()` at `src/intent_classifier.rs:269-314` iterates categories in hardcoded order: FR → CR → SF → CA → NEG. After CategoryConfig refactor, this becomes a loop over `CATEGORIES` entries with `regex_threshold.is_some()`, followed by NEGATIVE appended last.
+
+The iteration order of `CATEGORIES` determines the index positions assigned to each category's patterns. The `classify()` function at line 376 uses `scores: HashMap<&str, u32>` keyed by category name (`meta.category` at line 378), so **pattern index order doesn't affect scores** — the HashMap aggregates by name. But `negative_idx` at line 378 (`i < self.negative_idx.start`) relies on NEGATIVE patterns being the LAST entries in the flat arrays. As long as NEGATIVE is always appended last, this is order-independent of the positive categories.
+
+**Conclusion**: `CATEGORIES` iteration order for `build_all_patterns()` is **flexible** — any order works for scoring, provided NEGATIVE patterns come last. The `classify()` priority chain (lines 420-428) handles tie-breaking independently.
+
+### Constructor Change Summary
+
+| Constructor | File:Line | Current Signature | After Refactor |
+|-------------|-----------|-------------------|----------------|
+| `from_env()` | intent_classifier.rs:337 | `(routing, fallback_entry, short_prompt_len)` | Same signature; internally reads `CATEGORIES` for thresholds + pattern building |
+| `from_values()` | intent_classifier.rs:354 | `(routing, fallback_entry, short_prompt_len)` | Same signature; same internal change |
+| `test_classifier()` | intent_classifier.rs:460 | Builds routing + fallback inline | Builds routing from `CATEGORIES` names; same constructor call |
+| `make_test_app_state()` | main.rs:695 | Takes `RegexClassifier` directly | Unchanged; wraps whatever classifier it receives |
+| All test app builders | main.rs:744+ | Construct `HashMap<String, RouteEntry>` inline | String keys in test routing maps match `CATEGORIES[].name` |

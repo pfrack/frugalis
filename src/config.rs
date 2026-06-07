@@ -1,61 +1,50 @@
 use std::collections::HashMap;
 use tracing::warn;
 
+use crate::intent_classifier::{CategoryConfig, hardcoded_categories};
 use crate::routing::*;
 
-pub(crate) const ROUTING_CONFIG_DEFAULT: &str = "routing.toml";
+pub(crate) const CONFIG_DEFAULT: &str = "config.toml";
+pub(crate) const ROUTING_CONFIG_LEGACY: &str = "routing.toml";
 pub(crate) const NVIDIA_ENDPOINT_DEFAULT: &str = "https://integrate.api.nvidia.com/v1/chat/completions";
 
 pub(crate) fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-pub(crate) fn hardcoded_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
+fn hardcoded_model_default(env_var: &str) -> &'static str {
+    match env_var {
+        "DEFAULT_MODEL" => DEFAULT_MODEL,
+        "DEFAULT_MODEL_COMPLEX" => DEFAULT_MODEL_COMPLEX,
+        "DEFAULT_MODEL_READING" => DEFAULT_MODEL_READING,
+        _ => DEFAULT_MODEL,
+    }
+}
+
+pub(crate) fn hardcoded_routing(categories: &[CategoryConfig]) -> (HashMap<String, RouteEntry>, RouteEntry) {
     let endpoint = env_or_default(
         "NVIDIA_ENDPOINT",
         NVIDIA_ENDPOINT_DEFAULT,
     );
     let mut routing = HashMap::new();
-    routing.insert(
-        "COMPLEX_REASONING".to_string(),
-        RouteEntry {
-            model: env_or_default("DEFAULT_MODEL_COMPLEX", DEFAULT_MODEL_COMPLEX),
-            endpoint: endpoint.clone(),
-            cost_per_1m_input_tokens: None,
-            provider_type: "nvidia_nim".to_string(),
-            api_key_env: Some("NVIDIA_API_KEY".to_string()),
-        },
-    );
-    routing.insert(
-        "FILE_READING".to_string(),
-        RouteEntry {
-            model: env_or_default("DEFAULT_MODEL_READING", DEFAULT_MODEL_READING),
-            endpoint: endpoint.clone(),
-            cost_per_1m_input_tokens: None,
-            provider_type: "nvidia_nim".to_string(),
-            api_key_env: Some("NVIDIA_API_KEY".to_string()),
-        },
-    );
-    routing.insert(
-        "SYNTAX_FIX".to_string(),
-        RouteEntry {
-            model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
-            endpoint: endpoint.clone(),
-            cost_per_1m_input_tokens: None,
-            provider_type: "nvidia_nim".to_string(),
-            api_key_env: Some("NVIDIA_API_KEY".to_string()),
-        },
-    );
-    routing.insert(
-        "CASUAL".to_string(),
-        RouteEntry {
-            model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
-            endpoint: endpoint.clone(),
-            cost_per_1m_input_tokens: None,
-            provider_type: "nvidia_nim".to_string(),
-            api_key_env: Some("NVIDIA_API_KEY".to_string()),
-        },
-    );
+
+    for cat in categories {
+        let model = match &cat.model_env_var {
+            Some(env_var) => env_or_default(env_var, hardcoded_model_default(env_var)),
+            None => DEFAULT_MODEL.to_string(),
+        };
+        routing.insert(
+            cat.name.clone(),
+            RouteEntry {
+                model,
+                endpoint: endpoint.clone(),
+                cost_per_1m_input_tokens: None,
+                provider_type: "nvidia_nim".to_string(),
+                api_key_env: Some("NVIDIA_API_KEY".to_string()),
+            },
+        );
+    }
+
     let fallback = RouteEntry {
         model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
         endpoint,
@@ -76,7 +65,7 @@ pub(crate) fn load_routing_from_file(path: &str) -> Result<HashMap<String, Route
         .ok_or_else(|| format!("Root must be a table in {}", path))?;
     let mut routing = HashMap::new();
     for (key, value) in table {
-        if key == "fallback" {
+        if key == "fallback" || key == "categories" {
             continue;
         }
         let model = if let Some(m) = value.get("model").and_then(|v| v.as_str()) {
@@ -120,16 +109,29 @@ pub(crate) fn load_routing_from_file(path: &str) -> Result<HashMap<String, Route
 }
 
 pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
-    let path =
-        std::env::var("ROUTING_CONFIG_PATH").unwrap_or_else(|_| ROUTING_CONFIG_DEFAULT.to_string());
+    let config_path = std::env::var("CONFIG_PATH")
+        .or_else(|_| std::env::var("ROUTING_CONFIG_PATH"))
+        .unwrap_or_else(|_| CONFIG_DEFAULT.to_string());
+
+    // Try config.toml first, then routing.toml for backward compat
+    let path = if std::path::Path::new(&config_path).exists() {
+        config_path
+    } else if std::path::Path::new(ROUTING_CONFIG_LEGACY).exists() {
+        tracing::info!("Using legacy routing.toml; consider renaming to config.toml");
+        ROUTING_CONFIG_LEGACY.to_string()
+    } else {
+        tracing::warn!("No config.toml or routing.toml found; using hardcoded routing defaults");
+        return hardcoded_routing(&hardcoded_categories());
+    };
+
     let mut routing = match load_routing_from_file(&path) {
         Ok(r) => {
             tracing::info!("Routing: loaded from {path}");
             r
         }
         Err(e) => {
-            tracing::warn!("{e}; using hardcoded routing defaults (no routing.toml)");
-            return hardcoded_routing();
+            tracing::warn!("{e}; using hardcoded routing defaults");
+            return hardcoded_routing(&hardcoded_categories());
         }
     };
     let fallback_entry = routing.remove("FALLBACK").unwrap_or_else(|| RouteEntry {
@@ -140,6 +142,56 @@ pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
         api_key_env: None,
     });
     (routing, fallback_entry)
+}
+
+pub(crate) fn load_categories() -> Vec<CategoryConfig> {
+    let path = std::env::var("CONFIG_PATH")
+        .unwrap_or_else(|_| CONFIG_DEFAULT.to_string());
+    match load_categories_from_file(&path) {
+        Ok(cats) => cats,
+        Err(e) => {
+            tracing::warn!("{e}; using hardcoded category defaults");
+            hardcoded_categories()
+        }
+    }
+}
+
+fn load_categories_from_file(path: &str) -> Result<Vec<CategoryConfig>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("Cannot read {path}: {e}"))?;
+    let root: toml::Value = toml::from_str(&content)
+        .map_err(|e| format!("Invalid TOML in {path}: {e}"))?;
+    let table = root.as_table()
+        .ok_or_else(|| format!("Root must be a table in {path}"))?;
+
+    let cats_array = match table.get("categories") {
+        Some(toml::Value::Array(arr)) => arr,
+        _ => return Err("No [[categories]] section found".to_string()),
+    };
+
+    let mut categories = Vec::new();
+    for (i, cat) in cats_array.iter().enumerate() {
+        let t = cat.as_table()
+            .ok_or_else(|| format!("categories[{i}] must be a table"))?;
+        let name = t.get("name").and_then(|v| v.as_str())
+            .ok_or_else(|| format!("categories[{i}]: missing 'name'"))?
+            .to_string();
+        let description = t.get("description").and_then(|v| v.as_str())
+            .unwrap_or("").to_string();
+        let threshold = t.get("threshold").and_then(|v| v.as_integer())
+            .unwrap_or(1) as u32;
+        let priority = t.get("priority").and_then(|v| v.as_integer())
+            .unwrap_or(99) as u8;
+        let model_env_var = t.get("model_env_var").and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        categories.push(CategoryConfig { name, description, threshold, priority, model_env_var });
+    }
+
+    if categories.is_empty() {
+        return Err("[[categories]] is empty".to_string());
+    }
+    Ok(categories)
 }
 
 pub(crate) fn build_model_costs(routing: &HashMap<String, RouteEntry>) -> ModelCosts {
@@ -155,6 +207,7 @@ pub(crate) fn build_model_costs(routing: &HashMap<String, RouteEntry>) -> ModelC
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::intent_classifier::hardcoded_categories;
     use crate::routing::RouteEntry;
     use std::collections::HashMap;
 
@@ -239,29 +292,25 @@ api_key_env = ""
 
     #[test]
     fn hardcoded_routing_produces_expected_defaults() {
-        let (routing, fallback) = hardcoded_routing();
+        let cats = hardcoded_categories();
+        let (routing, fallback) = hardcoded_routing(&cats);
 
-        assert_eq!(routing.len(), 4);
-        assert!(routing.contains_key("COMPLEX_REASONING"));
-        assert!(routing.contains_key("FILE_READING"));
-        assert!(routing.contains_key("SYNTAX_FIX"));
-        assert!(routing.contains_key("CASUAL"));
-
-        let cr = routing.get("COMPLEX_REASONING").unwrap();
-        assert_eq!(cr.model, DEFAULT_MODEL_COMPLEX);
-        assert!(cr.endpoint.contains("integrate.api.nvidia.com"));
-        assert_eq!(cr.provider_type, "nvidia_nim");
-        assert_eq!(cr.api_key_env, Some("NVIDIA_API_KEY".to_string()));
-        assert_eq!(cr.cost_per_1m_input_tokens, None);
-
-        let fr = routing.get("FILE_READING").unwrap();
-        assert_eq!(fr.model, DEFAULT_MODEL_READING);
-
-        let sf = routing.get("SYNTAX_FIX").unwrap();
-        assert_eq!(sf.model, DEFAULT_MODEL);
-
-        let ca = routing.get("CASUAL").unwrap();
-        assert_eq!(ca.model, DEFAULT_MODEL);
+        assert_eq!(routing.len(), cats.len());
+        for cat in &cats {
+            assert!(routing.contains_key(cat.name.as_str()), "routing missing key for {}", cat.name);
+            let entry = routing.get(cat.name.as_str()).unwrap();
+            let expected_model = match cat.model_env_var.as_deref() {
+                Some("DEFAULT_MODEL") => DEFAULT_MODEL,
+                Some("DEFAULT_MODEL_COMPLEX") => DEFAULT_MODEL_COMPLEX,
+                Some("DEFAULT_MODEL_READING") => DEFAULT_MODEL_READING,
+                _ => DEFAULT_MODEL,
+            };
+            assert_eq!(entry.model, expected_model);
+            assert!(entry.endpoint.contains("integrate.api.nvidia.com"));
+            assert_eq!(entry.provider_type, "nvidia_nim");
+            assert_eq!(entry.api_key_env, Some("NVIDIA_API_KEY".to_string()));
+            assert_eq!(entry.cost_per_1m_input_tokens, None);
+        }
 
         assert_eq!(fallback.model, DEFAULT_MODEL);
         assert!(fallback.endpoint.contains("integrate.api.nvidia.com"));
@@ -272,7 +321,7 @@ api_key_env = ""
     #[test]
     fn hardcoded_routing_respects_nvidia_endpoint_env() {
         std::env::set_var("NVIDIA_ENDPOINT", "https://custom.endpoint.example.com/v1/chat/completions");
-        let (_, fallback) = hardcoded_routing();
+        let (_, fallback) = hardcoded_routing(&hardcoded_categories());
         assert_eq!(fallback.endpoint, "https://custom.endpoint.example.com/v1/chat/completions");
         std::env::remove_var("NVIDIA_ENDPOINT");
     }

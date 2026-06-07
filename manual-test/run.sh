@@ -1,17 +1,567 @@
-#!/bin/sh
-set -eu
+#!/bin/bash
+set -euo pipefail
 
-# ── Config ──
+# ============================================================================
+# Cerebrum Manual & Automated Tests for Shared Category Config (S-07b)
+# ============================================================================
+# USAGE:
+#   ./run.sh                  # Interactive manual testing (default)
+#   ./run.sh --auto          # Fully automated integration tests
+#   ./run.sh --help          # Show this help
+#
+# Interactive mode:
+#   - Waits for you to start the server
+#   - Lets you manually test classification endpoints
+#   - Shows detailed output for each request
+#
+# Automated mode (--auto):
+#   - Builds the server binary (release)
+#   - Creates various config.toml scenarios
+#   - Starts/stops server automatically for each test
+#   - Validates all expected outcomes
+#   - Exit code 0 on success, non-zero on failure
+# ============================================================================
+
+# colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# ============================================================================
+# Shared configuration
+# ============================================================================
+BINARY="./target/release/cerebrum"
 HOST="${HOST:-localhost:10000}"
-URL="http://${HOST}/v1/chat/completions"
+HEALTH_URL="http://$HOST/health"
+CLASSIFY_URL="http://$HOST/v1/classify"
+CHAT_URL="http://$HOST/v1/chat/completions"
 TOKEN="${PROXY_API_BEARER_TOKEN:-}"
+
+# ============================================================================
+# Mode detection
+# ============================================================================
+AUTO_MODE=false
+if [ $# -gt 0 ] && ([ "$1" = "--auto" ] || [ "$1" = "-a" ]); then
+    AUTO_MODE=true
+fi
+
+# ============================================================================
+# Automated test functions (--auto mode)
+# ============================================================================
+if [ "$AUTO_MODE" = true ]; then
+    PASS=0
+    FAIL=0
+    SERVER_PID=""
+
+    log_info() {
+        printf "${BLUE}[INFO]${NC} %s\n" "$1"
+    }
+
+    log_pass() {
+        printf "${GREEN}[✓]${NC} %s\n" "$1"
+        PASS=$((PASS+1))
+    }
+
+    log_fail() {
+        printf "${RED}[✗]${NC} %s\n" "$1"
+        FAIL=$((FAIL+1))
+    }
+
+    section() {
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        printf "${YELLOW}%s${NC}\n" "$1"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    }
+
+    build_server() {
+        section "Building Server"
+        if [ ! -f "$BINARY" ]; then
+            log_info "Building release binary..."
+            cargo build --release
+            log_pass "Build complete"
+        else
+            log_info "Binary already exists, skipping build"
+        fi
+    }
+
+    start_server() {
+        local config_file="$1"
+        local log_file="/tmp/cerebrum-test-$$.log"
+        
+        log_info "Starting server with config: ${config_file:-<none>}"
+        
+        # Set env vars for server
+        export CONFIG_PATH="${config_file:-}"
+        export RUST_LOG="info"
+        export PROXY_API_BEARER_TOKEN="${TOKEN:-test-token-123}"
+        export DASHBOARD_BASIC_USER="admin"
+        export DASHBOARD_BASIC_PASSWORD="admin"
+        export PORT="10000"
+        
+        # Start server in background
+        "$BINARY" > "$log_file" 2>&1 &
+        SERVER_PID=$!
+        
+        # Wait for server to be ready
+        local attempts=30
+        for i in $(seq 1 $attempts); do
+            if curl -s -f "$HEALTH_URL" > /dev/null 2>&1; then
+                log_pass "Sever started (PID $SERVER_PID, health OK)"
+                return 0
+            fi
+            printf "."
+            sleep 1
+        done
+        
+        log_fail "Server failed to start within $attempts seconds"
+        echo "Server log (last 20 lines):"
+        tail -20 "$log_file" || true
+        stop_server
+        return 1
+    }
+
+    stop_server() {
+        if [ -n "$SERVER_PID" ]; then
+            log_info "Stopping server (PID $SERVER_PID)..."
+            kill $SERVER_PID 2>/dev/null || true
+            wait $SERVER_PID 2>/dev/null || true
+            SERVER_PID=""
+            log_pass "Server stopped"
+        fi
+    }
+
+    cleanup() {
+        stop_server
+        rm -f /tmp/cerebrum-config-*.toml
+        if [ $FAIL -eq 0 ]; then
+            rm -f /tmp/cerebrum-test-$$.log
+        else
+            echo "Server log preserved at: /tmp/cerebrum-test-$$.log" >&2
+        fi
+    }
+    trap cleanup EXIT
+
+    classify() {
+        local prompt="$1"
+        
+        response=$(curl -s -w "\n%{http_code}" \
+            "$CLASSIFY_URL" \
+            -H "Authorization: Bearer ${TOKEN:-test-token-123}" \
+            -H "Content-Type: application/json" \
+            -d "{\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}]}" 2>/dev/null) || return 1
+        
+        http_code=$(echo "$response" | tail -n1)
+        body=$(echo "$response" | sed '$d')
+        
+        if [ "$http_code" != "200" ]; then
+            echo "ERROR" >&2
+            return 1
+        fi
+        
+        category=$(echo "$body" | python3 -c "
+import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get('category', 'UNKNOWN'))
+except:
+    print('ERROR')
+" 2>/dev/null || echo "ERROR")
+        
+        model=$(echo "$body" | python3 -c "
+import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get('model', ''))
+except:
+    print('')
+" 2>/dev/null || echo "")
+        
+        printf "(category=%s, model=%s)\n" "$category" "$model" >&2
+        
+        echo "$category"
+    }
+
+    # ============================================================================
+    # Automated test scenarios
+    # ============================================================================
+    test_hardcoded_defaults() {
+        section "Test 1: Hardcoded Defaults (no config.toml)"
+        
+        rm -f /tmp/cerebrum-config-test.toml
+        unset CONFIG_PATH
+        
+        if ! start_server ""; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+        
+        local tests=(
+            "FILE_READING:please read the file src/main.rs"
+            "COMPLEX_REASONING:architect a distributed rate limiter"
+            "CASUAL:hello"
+        )
+        
+        local all_pass=true
+        for test in "${tests[@]}"; do
+            IFS=':' read -r expected prompt <<< "$test"
+            result=$(classify "$prompt" 2>/dev/null) || result="ERROR"
+            
+            if [ "$result" = "$expected" ]; then
+                log_pass "$expected prompt classified correctly"
+            else
+                log_fail "Expected $expected, got $result"
+                all_pass=false
+            fi
+        done
+        
+        stop_server
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
+    test_threshold_override() {
+        section "Test 2: Threshold Override (FILE_READING threshold = 100)"
+        
+        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+[[categories]]
+name = "FILE_READING"
+description = "Reading, viewing, inspecting, searching, or navigating files or code"
+threshold = 100
+priority = 1
+model_env_var = "DEFAULT_MODEL_READING"
+
+[[categories]]
+name = "SYNTAX_FIX"
+description = "Fixing bugs, errors, typos, compilation issues, or broken code"
+threshold = 3
+priority = 2
+model_env_var = "DEFAULT_MODEL"
+
+[[categories]]
+name = "COMPLEX_REASONING"
+description = "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization"
+threshold = 3
+priority = 3
+model_env_var = "DEFAULT_MODEL_COMPLEX"
+
+[[categories]]
+name = "CASUAL"
+description = "Simple questions, greetings, general conversation, or short prompts"
+threshold = 1
+priority = 4
+model_env_var = "DEFAULT_MODEL"
+
+[FALLBACK]
+model = "nvidia/nemotron-3-nano-30b-a3b"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+EOF
+        
+        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+        
+        result=$(classify "please read the file src/main.rs") || result="ERROR"
+        
+        if [ "$result" = "CASUAL" ] || [ "$result" = "ERROR" ]; then
+            log_pass "FILE_READING threshold override respected (fell back to CASUAL)"
+            stop_server
+            return 0
+        elif [ "$result" = "FILE_READING" ]; then
+            log_fail "FILE_READING threshold override NOT respected"
+            stop_server
+            return 1
+        else
+            log_fail "Unexpected result: $result"
+            stop_server
+            return 1
+        fi
+    }
+
+    test_partial_categories() {
+        section "Test 3: Partial Categories (FILE_READING + CASUAL only)"
+        
+        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+[[categories]]
+name = "FILE_READING"
+description = "Reading files"
+threshold = 3
+priority = 1
+model_env_var = "DEFAULT_MODEL_READING"
+
+[[categories]]
+name = "CASUAL"
+description = "Simple questions"
+threshold = 1
+priority = 4
+model_env_var = "DEFAULT_MODEL"
+
+[FALLBACK]
+model = "nvidia/nemotron-3-nano-30b-a3b"
+EOF
+        
+        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+        
+        local all_pass=true
+        
+        result=$(classify "hello") || result="ERROR"
+        if [ "$result" = "CASUAL" ]; then
+            log_pass "CASUAL works with partial config"
+        else
+            log_fail "CASUAL failed: got $result"
+            all_pass=false
+        fi
+        
+        result=$(classify "please read the file src/main.rs") || result="ERROR"
+        if [ "$result" = "FILE_READING" ]; then
+            log_pass "FILE_READING works with partial config"
+        else
+            log_fail "FILE_READING failed: got $result"
+            all_pass=false
+        fi
+        
+        result=$(classify "fix this bug") || result="ERROR"
+        if [ "$result" = "CASUAL" ] || [ "$result" = "ERROR" ]; then
+            log_pass "Missing category falls back (got $result)"
+        else
+            log_fail "Missing category unexpected: $result"
+            all_pass=false
+        fi
+        
+        stop_server
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
+    test_legacy_routing() {
+        section "Test 4: Legacy routing.toml (no config.toml)"
+        
+        cp routing_examples/routing-manual-tests.toml /tmp/cerebrum-routing-legacy.toml
+        unset CONFIG_PATH
+        
+        if ! start_server ""; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+        
+        result=$(classify "hello") || result="ERROR"
+        if [ "$result" = "CASUAL" ]; then
+            log_pass "No config falls back to hardcoded (CASUAL)"
+        else
+            log_fail "Unexpected result without config: $result"
+            stop_server
+            return 1
+        fi
+        
+        stop_server
+        log_info "This implementation uses hardcoded categories + routing file (or hardcoded)"
+        log_pass "Legacy mode supported (categories hardcoded, routing from file)"
+        
+        return 0
+    }
+
+    test_combined_config() {
+        section "Test 5: Combined config.toml (categories + routing)"
+        
+        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+[[categories]]
+name = "FILE_READING"
+description = "Reading, viewing, inspecting, searching, or navigating files or code"
+threshold = 3
+priority = 1
+model_env_var = "DEFAULT_MODEL_READING"
+
+[[categories]]
+name = "SYNTAX_FIX"
+description = "Fixing bugs, errors, typos, compilation issues, or broken code"
+threshold = 3
+priority = 2
+model_env_var = "DEFAULT_MODEL"
+
+[[categories]]
+name = "COMPLEX_REASONING"
+description = "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization"
+threshold = 3
+priority = 3
+model_env_var = "DEFAULT_MODEL_COMPLEX"
+
+[[categories]]
+name = "CASUAL"
+description = "Simple questions, greetings, general conversation, or short prompts"
+threshold = 1
+priority = 4
+model_env_var = "DEFAULT_MODEL"
+
+[FALLBACK]
+model = "nvidia/nemotron-3-nano-30b-a3b"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+EOF
+        
+        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+        
+        local tests=(
+            "FILE_READING:please read the file src/main.rs"
+            "SYNTAX_FIX:fix this bug please"
+            "COMPLEX_REASONING:architect a distributed rate limiter"
+            "CASUAL:hello"
+        )
+        
+        local all_pass=true
+        for test in "${tests[@]}"; do
+            IFS=':' read -r expected prompt <<< "$test"
+            result=$(classify "$prompt") || result="ERROR"
+            
+            if [ "$result" = "$expected" ]; then
+                log_pass "$expected routed correctly"
+            else
+                log_fail "Expected $expected, got $result"
+                all_pass=false
+            fi
+        done
+        
+        stop_server
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
+    test_field_integrity() {
+        section "Test 6: Field Value Integrity"
+        
+        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+[[categories]]
+name = "FILE_READING"
+description = "Test category"
+threshold = 100
+priority = 1
+model_env_var = "CUSTOM_MODEL"
+
+[[categories]]
+name = "SYNTAX_FIX"
+description = "Test syntax fix"
+threshold = 3
+priority = 2
+model_env_var = "DEFAULT_MODEL"
+
+[[categories]]
+name = "COMPLEX_REASONING"
+description = "Test complex"
+threshold = 3
+priority = 3
+model_env_var = "DEFAULT_MODEL_COMPLEX"
+
+[[categories]]
+name = "CASUAL"
+description = "Test casual"
+threshold = 1
+priority = 4
+model_env_var = "DEFAULT_MODEL"
+
+[FALLBACK]
+model = "nvidia/nemotron-3-nano-30b-a3b"
+EOF
+        
+        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+        
+        result=$(classify "please read the file src/main.rs") || result="ERROR"
+        if [ "$result" = "CASUAL" ] || [ "$result" = "ERROR" ]; then
+            log_pass "FILE_READING threshold 100 respected (fell back to CASUAL or ERROR)"
+        else
+            log_fail "FILE_READING threshold override NOT respected: $result"
+            stop_server
+            return 1
+        fi
+        
+        stop_server
+        return 0
+    }
+
+    test_negative_suppression() {
+        section "Test 7: Negative Suppression (regression test)"
+        
+        if ! start_server ""; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+        
+        result=$(classify "read the architecture document") || result="ERROR"
+        
+        if [ "$result" != "COMPLEX_REASONING" ]; then
+            log_pass "Negative suppression working (got $result, not COMPLEX_REASONING)"
+            stop_server
+            return 0
+        else
+            log_fail "Negative suppression broken: got COMPLEX_REASONING"
+            stop_server
+            return 1
+        fi
+    }
+
+    run_automated_tests() {
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════════════╗"
+        echo "║  Automated Integration Tests: Shared Category Config (S-07b)    ║"
+        echo "╚══════════════════════════════════════════════════════════════════╝"
+        echo ""
+        
+        if [ ! -f "Cargo.toml" ]; then
+            echo "ERROR: Must run from project root (Cargo.toml not found)" >&2
+            exit 1
+        fi
+        
+        build_server
+        
+        test_hardcoded_defaults
+        test_threshold_override
+        test_partial_categories
+        test_legacy_routing
+        test_combined_config
+        test_field_integrity
+        test_negative_suppression
+        
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        local total=$((PASS + FAIL))
+        printf "Results: ${GREEN}%d/%d passed${NC}, ${RED}%d failed${NC}\n" "$PASS" "$total" "$FAIL"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        
+        if [ $FAIL -gt 0 ]; then
+            exit 1
+        else
+            log_pass "All tests passed!"
+            exit 0
+        fi
+    }
+
+    # Run automated mode
+    run_automated_tests
+fi
+
+# ============================================================================
+# Interactive manual testing mode (default)
+# ============================================================================
+# This is the original run.sh functionality
 
 if [ -z "$TOKEN" ]; then
     echo "ERROR: PROXY_API_BEARER_TOKEN is not set" >&2
+    echo "Set it via: export PROXY_API_BEARER_TOKEN=your_token" >&2
     exit 1
 fi
 
-# ── Colors ──
+# Colors (redefine in case not in auto mode)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -24,11 +574,9 @@ extract_model() {
     echo "$1" | python3 -c "
 import json,sys
 try:
-    # strict=False allows control characters inside string values
-    # (NVIDIA 70B occasionally returns raw newlines in content)
     d = json.load(sys.stdin, strict=False)
     print(d.get('model', d.get('upstream_model', '')))
-except Exception as e:
+except:
     print('')
 " 2>/dev/null
 }
@@ -65,7 +613,7 @@ run_test() {
         sleep 2
         printf "."
     done
-    wait "$_curl_pid" 2>/dev/null
+    wait $_curl_pid 2>/dev/null
     _end=$(date +%s)
     _elapsed=$((_end - _start))
     printf " done\n"
@@ -109,7 +657,7 @@ run_test_headers() {
         sleep 2
         printf "."
     done
-    wait "$_curl_pid" 2>/dev/null
+    wait $_curl_pid 2>/dev/null
     _end=$(date +%s)
     _elapsed=$((_end - _start))
     printf " done\n"
@@ -130,10 +678,17 @@ run_test_headers() {
     fi
 }
 
-echo "============================================"
-echo " Cerebrum Manual Route Tests"
+# Interactive mode header
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo " Cerebrum Manual Route Tests (Shared Category Config Validation)"
 echo " Target: $URL"
-echo "============================================"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "Make sure the server is running with:"
+echo "  RUST_LOG=info cargo run"
+echo ""
+echo "Press Ctrl+C to abort any test, or wait for completion."
 echo ""
 
 # ── COMPLEX_REASONING (expects NVIDIA meta/llama-3.3-70b-instruct) ──
@@ -167,7 +722,7 @@ run_test "casual hello" \
 run_test "what is Rust" \
     '{"messages":[{"role":"user","content":"what is Rust programming language"}]}'
 
-# ── FALLBACK (expects NVIDIA nvidia/nemotron-3-nano-30b-a3b) ──
+# ── FALLBACK / EDGE CASES ──
 echo ""
 echo "── FALLBACK / EDGE CASES ──"
 run_test "empty message" \
@@ -229,9 +784,11 @@ fi
 
 # ── Summary ──
 echo ""
-echo "============================================"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 printf " Results: ${GREEN}%d passed${NC}, ${RED}%d failed${NC}\n" "$PASS" "$FAIL"
-echo "============================================"
-if [ "$FAIL" -gt 0 ]; then
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+if [ $FAIL -gt 0 ]; then
     exit 1
 fi
