@@ -305,76 +305,56 @@ Integration test with `httpmock` verifying the full LLM classification flow end-
 
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles. See `references/progress-format.md`.
 
-## Addendum: Test Framework Expansion (S-09a)
-
-During implementation review, an additional comprehensive test framework was added to `manual-test/test.sh` covering Shared Category Configuration (S-07b) scenarios alongside S-09 LLM classifier tests. This extended the test scope beyond the original plan:
-
-**Original scope:** LLM classifier integration tests (3 tests in test.sh)
-**Actual scope:** Combined S-07b category config + S-09 LLM classifier tests (10 total tests in test.sh)
-
-**Rationale:** The testing infrastructure for both features relies on identical server lifecycle management and HTTP request patterns, making a unified test framework more maintainable than separate test suites.
-
-**Impact:** Positive — provides comprehensive validation of both category configuration and LLM classifier features in realistic end-to-end scenarios.
-
 ### Phase 1: LLM Classifier Config
 
 #### Automated
 
-- [x] 1.1 cargo build compiles cleanly
-- [x] 1.2 Unit test: parse TOML with [llm_classifier] → correct LlmClassifierConfig
-- [x] 1.3 Unit test: parse TOML without section → None
-- [x] 1.4 Unit test: parse TOML with enabled = false → None
+- [ ] 1.1 cargo build compiles cleanly
+- [ ] 1.2 Unit test: parse TOML with [llm_classifier] → correct LlmClassifierConfig
+- [ ] 1.3 Unit test: parse TOML without section → None
+- [ ] 1.4 Unit test: parse TOML with enabled = false → None
 
 #### Manual
 
-- [x] 1.5 N/A (pure config parsing)
+- [ ] 1.5 N/A (pure config parsing)
 
 ### Phase 2: LLM Classifier Implementation
 
 #### Automated
 
-- [x] 2.1 cargo build compiles cleanly with async trait
-- [x] 2.2 Unit test: RegexClassifier async wrapper works (call and await)
-- [x] 2.3 Unit test: build_llm_classifier_prompt generates expected format
-- [x] 2.4 Unit test: LLMClassifier classify with mocked success → correct category, Regex tier
-- [x] 2.5 Unit test: LLMClassifier classify with timeout/error → Fallback tier, CASUAL
-- [x] 2.6 Unit test: LLMClassifier classify with invalid response → Fallback
+- [ ] 2.1 cargo build compiles cleanly with async trait
+- [ ] 2.2 Unit test: RegexClassifier async wrapper works (call and await)
+- [ ] 2.3 Unit test: build_llm_classifier_prompt generates expected format
+- [ ] 2.4 Unit test: LLMClassifier classify with mocked success → correct category, Regex tier
+- [ ] 2.5 Unit test: LLMClassifier classify with timeout/error → Fallback tier, CASUAL
+- [ ] 2.6 Unit test: LLMClassifier classify with invalid response → Fallback
 
 #### Manual
 
-- [x] 2.7 N/A (tested via mocks)
+- [ ] 2.7 N/A (tested via mocks)
 
 ### Phase 3: Chain Wiring
 
 #### Automated
 
-- [x] 3.1 cargo build compiles cleanly
-- [x] 3.2 Existing tests pass (call sites updated to await)
-- [x] 3.3 cargo test all green
-- [x] 3.7 Regex classifier enabled/disabled toggle in config — unit tests — cc19f25
-- [x] 3.8 Build compiles with regex disabled config — cc19f25
-- [x] 3.9 All tests green with regex config — cc19f25
+- [ ] 3.1 cargo build compiles cleanly
+- [ ] 3.2 Existing tests pass (call sites updated to await)
+- [ ] 3.3 cargo test all green
 
 #### Manual
 
-- [x] 3.4 Server with [llm_classifier] → "LLM classifier enabled" in logs — 8dfc5ee
-- [x] 3.5 Server without section → regex-only works — 8dfc5ee
-- [x] 3.6 Ambiguous prompt → LLM classifier fires — 8dfc5ee
-- [x] 3.10 Server with [regex_classifier] enabled = false → "Regex classifier disabled" in logs — cc19f25
-- [x] 3.11 Server with regex disabled + LLM enabled → only LLM classifier active — cc19f25
-- [x] 3.12 Server with regex disabled + LLM disabled → no classifier (fallback only) — cc19f25
-- [ ] 3.10 Server with [regex_classifier] enabled = false → "Regex classifier disabled" in logs
-- [ ] 3.11 Server with regex disabled + LLM enabled → only LLM classifier active
-- [ ] 3.12 Server with regex disabled + LLM disabled → no classifier (fallback only)
+- [ ] 3.4 Server with [llm_classifier] → "LLM classifier enabled" in logs
+- [ ] 3.5 Server without section → regex-only works
+- [ ] 3.6 Ambiguous prompt → LLM classifier fires
 
 ### Phase 4: Testing
 
 #### Automated
 
-- [x] 4.1 cargo test all green including integration tests
-- [x] 4.2 cargo clippy clean (12 pre-existing warnings unrelated to this change)
-- [x] 4.3 All 4 error scenarios tested
+- [ ] 4.1 cargo test all green including integration tests
+- [ ] 4.2 cargo clippy clean
+- [ ] 4.3 All 4 error scenarios tested
 
 #### Manual
 
-- [x] 4.4 Real LLM endpoint test — 5 diverse prompts with sensible classifications — 2417a56
+- [ ] 4.4 Real LLM endpoint test — 5 diverse prompts with sensible classifications
