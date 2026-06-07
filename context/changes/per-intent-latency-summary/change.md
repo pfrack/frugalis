@@ -1,8 +1,8 @@
 ---
 id: per-intent-latency-summary
-status: implemented
+status: impl_reviewed
 created: 2026-06-01
-updated: 2026-06-02
+updated: 2026-06-07
 user: pfrack
 tags: [dashboard, latency, intent, observability]
 ---

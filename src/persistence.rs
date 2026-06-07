@@ -16,15 +16,13 @@ pub trait CostProvider {
 /// Custom error type for inference query failures.
 #[derive(Debug, Clone)]
 pub enum QueryError {
-    Database(String),      // Connection, query, or pool error
-    InvalidFilter(String), // Invalid filter value
+    Database(String), // Connection, query, or pool error
 }
 
 impl std::fmt::Display for QueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::Database(msg) => write!(f, "Database error: {}", msg),
-            Self::InvalidFilter(msg) => write!(f, "Invalid filter: {}", msg),
         }
     }
 }
@@ -32,7 +30,6 @@ impl std::fmt::Display for QueryError {
 /// One row from the `inferences` table, pre-formatted for dashboard display.
 #[derive(Debug, Clone)]
 pub struct InferenceLog {
-    pub id: String,
     pub timestamp: String,
     pub prompt_snippet: String,
     pub category: Option<String>,
@@ -135,122 +132,74 @@ impl PersistenceConfig {
         filter_category: Option<&str>,
         filter_model: Option<&str>,
     ) -> Result<(Vec<InferenceLog>, i64), QueryError> {
-        // Build the data query and count query with proper parameter indices.
-        let (data_sql, count_sql) = match (filter_category, filter_model) {
-            (Some(_), Some(_)) => (
-                "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
-                 FROM inferences WHERE category = $1 AND upstream_model = $2 \
-                 ORDER BY created_at DESC LIMIT $3 OFFSET $4",
-                "SELECT COUNT(*) FROM inferences WHERE category = $1 AND upstream_model = $2",
-            ),
-            (Some(_), None) => (
-                "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
-                 FROM inferences WHERE category = $1 \
-                 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-                "SELECT COUNT(*) FROM inferences WHERE category = $1",
-            ),
-            (None, Some(_)) => (
-                "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
-                 FROM inferences WHERE upstream_model = $1 \
-                 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-                "SELECT COUNT(*) FROM inferences WHERE upstream_model = $1",
-            ),
-            (None, None) => (
-                "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
-                 FROM inferences ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-                "SELECT COUNT(*) FROM inferences",
-            ),
+        // Build WHERE clause based on filter presence.
+        let (where_clause, limit_ph, offset_ph) = match (filter_category, filter_model) {
+            (Some(_), Some(_)) => (" WHERE category = $1 AND upstream_model = $2", "$3", "$4"),
+            (Some(_), None) => (" WHERE category = $1", "$2", "$3"),
+            (None, Some(_)) => (" WHERE upstream_model = $1", "$2", "$3"),
+            (None, None) => ("", "$1", "$2"),
         };
 
-        // Execute the count query.
-        let total_count: i64 = match (filter_category, filter_model) {
-            (Some(cat), Some(model)) => sqlx::query(count_sql)
-                .bind(cat)
-                .bind(model)
-                .fetch_one(self.pool.as_ref())
-                .await
-                .map_err(|e| QueryError::Database(e.to_string()))?
-                .try_get(0)
-                .map_err(|e| QueryError::Database(e.to_string()))?,
-            (Some(cat), None) => sqlx::query(count_sql)
-                .bind(cat)
-                .fetch_one(self.pool.as_ref())
-                .await
-                .map_err(|e| QueryError::Database(e.to_string()))?
-                .try_get(0)
-                .map_err(|e| QueryError::Database(e.to_string()))?,
-            (None, Some(model)) => sqlx::query(count_sql)
-                .bind(model)
-                .fetch_one(self.pool.as_ref())
-                .await
-                .map_err(|e| QueryError::Database(e.to_string()))?
-                .try_get(0)
-                .map_err(|e| QueryError::Database(e.to_string()))?,
-            (None, None) => sqlx::query(count_sql)
-                .fetch_one(self.pool.as_ref())
-                .await
-                .map_err(|e| QueryError::Database(e.to_string()))?
-                .try_get(0)
-                .map_err(|e| QueryError::Database(e.to_string()))?,
-        };
+        let data_sql = format!(
+            "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
+             FROM inferences{} ORDER BY created_at DESC LIMIT {} OFFSET {}",
+            where_clause,
+            limit_ph,
+            offset_ph,
+        );
+        let count_sql = format!("SELECT COUNT(*) FROM inferences{}", where_clause);
 
-        // Execute the data query.
-        let rows = match (filter_category, filter_model) {
-            (Some(cat), Some(model)) => sqlx::query(data_sql)
-                .bind(cat)
-                .bind(model)
-                .bind(limit as i64)
-                .bind(offset as i64)
-                .fetch_all(self.pool.as_ref())
-                .await
-                .map_err(|e| QueryError::Database(e.to_string()))?,
-            (Some(cat), None) => sqlx::query(data_sql)
-                .bind(cat)
-                .bind(limit as i64)
-                .bind(offset as i64)
-                .fetch_all(self.pool.as_ref())
-                .await
-                .map_err(|e| QueryError::Database(e.to_string()))?,
-            (None, Some(model)) => sqlx::query(data_sql)
-                .bind(model)
-                .bind(limit as i64)
-                .bind(offset as i64)
-                .fetch_all(self.pool.as_ref())
-                .await
-                .map_err(|e| QueryError::Database(e.to_string()))?,
-            (None, None) => sqlx::query(data_sql)
-                .bind(limit as i64)
-                .bind(offset as i64)
-                .fetch_all(self.pool.as_ref())
-                .await
-                .map_err(|e| QueryError::Database(e.to_string()))?,
-        };
+        // Execute count query.
+        let mut count_query = sqlx::query(&count_sql);
+        if let Some(cat) = filter_category {
+            count_query = count_query.bind(cat);
+        }
+        if let Some(model) = filter_model {
+            count_query = count_query.bind(model);
+        }
+        let total_count: i64 = count_query
+            .fetch_one(self.pool.as_ref())
+            .await
+            .map_err(|e| QueryError::Database(e.to_string()))?
+            .try_get(0)
+            .map_err(|e| QueryError::Database(e.to_string()))?;
+
+        // Execute data query.
+        let mut data_query = sqlx::query(&data_sql);
+        if let Some(cat) = filter_category {
+            data_query = data_query.bind(cat);
+        }
+        if let Some(model) = filter_model {
+            data_query = data_query.bind(model);
+        }
+        let rows = data_query
+            .bind(limit as i64)
+            .bind(offset as i64)
+            .fetch_all(self.pool.as_ref())
+            .await
+            .map_err(|e| QueryError::Database(e.to_string()))?;
 
         // Map rows to InferenceLog, formatting timestamps and durations.
+        // Propagate any row extraction errors to fail fast on data issues.
         let records: Vec<InferenceLog> = rows
             .iter()
             .map(|row| {
-                let id: Uuid = row.try_get("id").unwrap_or_default();
-                let created_at: chrono::DateTime<chrono::Utc> =
-                    row.try_get("created_at").unwrap_or_default();
+                let created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at")?;
                 let timestamp = created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string();
-                let prompt_snippet: String =
-                    row.try_get("prompt_snippet").unwrap_or_default();
-                let category: Option<String> = row.try_get("category").unwrap_or(None);
-                let upstream_model: Option<String> =
-                    row.try_get("upstream_model").unwrap_or(None);
-                let duration_ms: Option<i32> = row.try_get("duration_ms").unwrap_or(None);
-
-                InferenceLog {
-                    id: id.to_string(),
+                let prompt_snippet: String = row.try_get("prompt_snippet")?;
+                let category: Option<String> = row.try_get("category")?;
+                let upstream_model: Option<String> = row.try_get("upstream_model")?;
+                let duration_ms: Option<i32> = row.try_get("duration_ms")?;
+                Ok(InferenceLog {
                     timestamp,
                     prompt_snippet,
                     category,
                     upstream_model,
                     duration_ms,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .map_err(|e| QueryError::Database(e.to_string()))?;
 
         Ok((records, total_count))
     }

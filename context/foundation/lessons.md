@@ -22,3 +22,10 @@
 - **Problem**: Upstream error responses are read fully into memory (capped at 10 MB) before constructing the error response. This introduces unnecessary latency and memory pressure on large error payloads.
 - **Rule**: Prefer streaming upstream error bodies directly to the client (chunked transfer) or truncating early, rather than buffering the entire body before responding. Keep error-path latency and memory bounded.
 - **Applies to**: implement, impl-review
+
+## Favor dynamic WHERE clause building over duplicated SQL branches
+
+- **Context**: src/persistence.rs:135-224 (`fetch_inferences` method)
+- **Problem**: Four separate SQL query strings and bind/fetch blocks for different filter combinations were duplicated (~80 lines). Each new filter combination would multiply the branches, increasing maintenance burden and review surface.
+- **Rule**: Use dynamic WHERE clause building with a bind_count tracker and reusable bind/fetch logic instead of duplicating SQL queries and bind/fetch blocks for every filter combination. Keep the number of SQL statement variants proportional to the number of independent dimensions, not their product.
+- **Applies to**: implement, impl-review

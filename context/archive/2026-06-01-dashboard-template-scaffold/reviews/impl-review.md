@@ -61,7 +61,7 @@ Manual criteria (2.4 browser, 2.5 curl 401) were confirmed in the prior review.
 - **Location**: N/A (plan document)
 - **Detail**: The original plan was implemented correctly at da9f084 (zero-field `DashboardIndex` struct in `src/main.rs`, single handler, single test, "coming soon" template). Subsequent changes (f19fc07 Dashboard rewrite, inference log inspection, cost savings, latency summary, dashboard router refactor) moved the struct/handler/routes into a new `src/dashboard.rs` module, added 3 additional pages with a full nav router (violating the plan's "No multiple dashboard sub-pages or navigation router" guardrail), injected JS theme toggle (violating "No JavaScript / client-side interactivity"), and added DB queries + metrics display (violating "No querying or displaying inference records" and "No latency summaries or metrics"). The plan's "What We're NOT Doing" section and "Desired End State" now contradict HEAD. The test coverage was also substantially expanded (13 additional tests beyond the one planned). All of these expansions were intentional and part of later roadmap slices — they are not implementation mistakes. The plan document simply wasn't updated to reflect the cumulative scope.
 - **Fix**: Either archive this plan (since F-03 is done and the scaffold served its purpose as a prerequisite for S-02/S-03) or add an epilogue section documenting how later slices built on the scaffold.
-- **Decision**: TO ARCHIVE — user chose to archive the plan (pending /10x-archive after triage)
+- **Decision**: ARCHIVED — moved to `context/archive/2026-06-01-dashboard-template-scaffold/`. Commit: fec2a0c
 
 ### F4 — /static served without authentication
 - **Severity**: ℹ️ OBSERVATION

@@ -147,25 +147,24 @@ Modify the `/dashboard` index page to display a latency summary card below the w
 
 ### Changes Required:
 
-#### 1. Modify `DashboardIndex` template struct
+#### 1. Modify `DashboardTemplate` struct
 
-**File**: `src/main.rs` (around line 20)
+**File**: `src/dashboard.rs` (after the `dashboard_page!` macro)
 
-**Intent**: Extend the `DashboardIndex` struct to carry optional summary data and an optional error string, mirroring the `InferencesTemplate` pattern.
+**Intent**: Extend the DashboardTemplate struct (defined via `dashboard_page!`) to carry optional summary data. The macro already provides an `error` field.
 
-**Contract**: Add two fields:
+**Contract**: Add field:
 - `summary: Option<persistence::LatencySummary>`
-- `error: Option<String>`
 
-#### 2. Modify `dashboard()` handler
+#### 2. Modify `dashboard_handler`
 
-**File**: `src/main.rs` (around line 152)
+**File**: `src/dashboard.rs` (around the existing `dashboard_handler` function)
 
 **Intent**: Accept `State<Arc<AppState>>`, query the persistence layer for a 24h latency summary when available, and pass the result to the template.
 
-**Contract**: Change signature to `async fn dashboard(State(state): State<Arc<AppState>>) -> impl IntoResponse`. Inside:
-- If `state.persistence` is `None`, return `DashboardIndex { summary: None, error: None }` — current behavior preserved
-- If `state.persistence` is `Some(p)`, call `p.fetch_latency_summary(24).await` and map result to `DashboardIndex { summary: Some(s), error: None }` on success, or `DashboardIndex { summary: None, error: Some(e.to_string()) }` on error
+**Contract**: The function already has `State<Arc<AppState>>`. Add:
+- If `state.persistence` is `None`, return `DashboardTemplate { summary: None, error: None }` — current behavior preserved
+- If `state.persistence` is `Some(p)`, call `p.fetch_latency_summary(24).await` and map result to `DashboardTemplate { summary: Some(s), error: None }` on success, or `DashboardTemplate { summary: None, error: Some(e.to_string()) }` on error
 
 #### 3. Update dashboard index template
 
@@ -188,11 +187,13 @@ The existing welcome card and link to `/dashboard/inferences` remain above the n
 
 #### 4. Update navigation bar
 
-**File**: `templates/dashboard/index.html` (`{% block nav %}`)
+**File**: `src/dashboard.rs` (the `PAGES` constant)
 
-**Intent**: Add a "Latency" tab link so the operator can reach the full latency page.
+**Intent**: Add a "Latency" tab link to the sidebar navigation so it appears on all dashboard pages.
 
-**Contract**: Add `<a href="/dashboard/latency">Latency</a>` after the "Inference Logs" link.
+**Contract**: Insert a `NavPage` entry: `NavPage { path: "latency", label: "Latency", icon: ICON_CLOCK }` into the `PAGES` array.
+
+**Note**: The navigation is rendered by `base.html`, which iterates `nav.pages`. Adding the entry here automatically adds the link to all pages without modifying individual templates.
 
 ### Success Criteria:
 
@@ -221,29 +222,30 @@ Create a dedicated `/dashboard/latency` page with a configurable time-window for
 
 #### 1. New `LatencyTemplate` struct
 
-**File**: `src/main.rs` (after `InferencesTemplate`, around line 33)
+**File**: `src/dashboard.rs` (using the `dashboard_page!` macro)
 
-**Intent**: Template struct carrying the latency summary data, error state, and current hours parameter for the form's pre-filled value.
+**Intent**: Template struct carrying the latency summary data, hours parameter, and the macro-provided `error` field.
 
 **Contract**:
 
 ```rust
-#[derive(Template, WebTemplate)]
-#[template(path = "dashboard/latency.html")]
-struct LatencyTemplate {
-    summary: Option<persistence::LatencySummary>,
-    hours: u32,
-    error: Option<String>,
+dashboard_page! {
+    struct LatencyTemplate for "dashboard/latency.html" {
+        summary: Option<persistence::LatencySummary>,
+        hours: u32,
+    }
 }
 ```
 
-#### 2. New `latency()` handler
+The macro automatically adds an `error: Option<String>` field.
 
-**File**: `src/main.rs` (after `inferences()` handler, around line 220)
+#### 2. New `latency_handler`
 
-**Intent**: Parse the `?hours=` query parameter with validation, fetch the latency summary, and render the template. Follows the same structure as the `inferences()` handler (lines 156-220).
+**File**: `src/dashboard.rs` (after the `inferences_handler` function)
 
-**Contract**: `async fn latency(State(state): State<Arc<AppState>>, Query(params): Query<HashMap<String, String>>) -> impl IntoResponse`
+**Intent**: Parse the `?hours=` query parameter with validation, fetch the latency summary, and render the template. Follows the same structure as the `inferences_handler`.
+
+**Contract**: `pub async fn latency_handler(State(state): State<Arc<AppState>>, Query(params): Query<HashMap<String, String>>) -> impl IntoResponse`
 
 - Parse `hours` from query params: default 24, clamp to 1..720 range on parse failure or out-of-bounds
 - If `state.persistence` is None → return `LatencyTemplate { summary: None, hours, error: Some("Database not configured".into()) }`
@@ -273,19 +275,15 @@ All CSS classes (`card`, `error-banner`, `badge`, `muted`, `empty-state`, `btn`,
 
 #### 4. Wire new route
 
-**File**: `src/main.rs` (in `build_app()`, around line 234)
+**File**: `src/dashboard.rs` (in the `routes()` function)
 
-**Intent**: Add the `/latency` GET route to the dashboard router so it inherits the Basic Auth middleware layer.
+**Intent**: Add the `/latency` GET route to the dashboard router.
 
-**Contract**: Add `.route("/latency", get(latency))` to the `dashboard_routes` Router builder, after the existing `.route("/inferences", get(inferences))` line.
+**Contract**: Insert `.route("/latency", get(latency_handler))` into the `Router::new()` chain. The `dashboard::routes(auth_config)` call in `main.rs` will then register this route under the `/dashboard` prefix with the Basic Auth middleware.
 
-#### 5. Update inferences template navigation
+#### 5. Navigation consistency (automatic)
 
-**File**: `templates/dashboard/inferences.html` (`{% block nav %}`)
-
-**Intent**: Add the "Latency" tab link so all dashboard pages have consistent navigation.
-
-**Contract**: Add `<a href="/dashboard/latency">Latency</a>` after the "Inference Logs" link, matching the same pattern added to `index.html` in Phase 2.
+> Note: The sidebar navigation is rendered by `base.html` using the `nav.pages` slice, which is generated from the `PAGES` registry in `src/dashboard.rs`. Adding the Latency entry to `PAGES` (in Phase 2) automatically adds the Latency link to all dashboard pages, including Inferences. No per-template edit is required.
 
 ### Success Criteria:
 

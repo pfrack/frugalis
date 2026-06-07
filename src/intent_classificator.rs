@@ -532,10 +532,6 @@ impl RegexClassifier {
         })
     }
 
-    pub fn model_costs(&self) -> &ModelCosts {
-        &self.model_costs
-    }
-
     #[cfg(test)]
     pub fn from_values(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry) -> Self {
         let (patterns, metadata) = build_all_patterns();
@@ -863,16 +859,16 @@ mod tests {
     #[test]
     fn model_costs_returns_some_for_hardcoded_models() {
         let c = test_classifier();
-        assert_eq!(c.model_costs().get("claude-3.5-sonnet"), Some(3.00));
-        assert_eq!(c.model_costs().get("gpt-4o"), Some(2.50));
-        assert_eq!(c.model_costs().get("gpt-4o-mini"), Some(0.15));
-        assert_eq!(c.model_costs().get("deepseek-chat"), Some(0.14));
+        assert_eq!(c.model_costs.get("claude-3.5-sonnet"), Some(3.00));
+        assert_eq!(c.model_costs.get("gpt-4o"), Some(2.50));
+        assert_eq!(c.model_costs.get("gpt-4o-mini"), Some(0.15));
+        assert_eq!(c.model_costs.get("deepseek-chat"), Some(0.14));
     }
 
     #[test]
     fn model_costs_returns_none_for_unknown_model() {
         let c = test_classifier();
-        assert_eq!(c.model_costs().get("nonexistent-model"), None);
+        assert_eq!(c.model_costs.get("nonexistent-model"), None);
     }
 
     #[test]
@@ -907,9 +903,9 @@ mod tests {
         };
         let classifier = RegexClassifier::from_values(routing, fallback);
         // claude-3.5-sonnet should be 5.0 (override), not 3.00 (hardcoded)
-        assert_eq!(classifier.model_costs().get("claude-3.5-sonnet"), Some(5.0));
+        assert_eq!(classifier.model_costs.get("claude-3.5-sonnet"), Some(5.0));
         // ca-model gets no override and is not in hardcoded table → None
-        assert_eq!(classifier.model_costs().get("ca-model"), None);
+        assert_eq!(classifier.model_costs.get("ca-model"), None);
     }
 
     #[test]

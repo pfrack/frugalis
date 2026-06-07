@@ -77,7 +77,7 @@ Add `prompt_char_count` to the inferences table schema, update the insert path t
 
 **Intent**: Add a `prompt_chars_to_cost(chars: i32, cost_per_1m: f64) -> f64` utility that converts character count → estimated token count (chars / 4) → dollar cost (tokens × cost_per_1m / 1_000_000). Shared between the savings query and the template.
 
-**Contract**: `pub fn prompt_chars_to_cost(char_count: i32, cost_per_1m_input_tokens: f64) -> f64` — rounds to 4 decimal places.
+**Contract**: `pub fn prompt_chars_to_cost(char_count: i32, cost_per_1m_input_tokens: f64) -> f64` — rounds to 6 decimal places internally; display formatting uses 4dp.
 
 #### 4. Model cost configuration
 
@@ -182,9 +182,9 @@ This takes `model_costs` and `baseline_model` from the caller (the handler in ma
 
 #### 2. Handler, template struct, and route
 
-**File**: `src/main.rs`
+**File**: `src/dashboard.rs`
 
-**Intent**: Add a `SavingsTemplate` struct for Askama, a `savings` async handler, and register the route in `build_app`.
+**Intent**: Add a `SavingsTemplate` struct via `dashboard_page!` macro, a `savings_handler` async handler, and register the route in `routes()`.
 
 **Contract**:
 - New template struct:
@@ -239,7 +239,7 @@ Create the `savings.html` template with the savings display and integrate the "S
 
 **Contract**:
 - Extends `base.html`
-- `{% block nav %}` includes the full set of tabs: Dashboard, Inference Logs, Latency, Savings (with Savings as active)
+- `{% block content %}` only — nav is auto-generated from `PAGES` by `base.html`
 - Content renders:
   - **With estimate**: A stat card showing the dollar savings figure (`$X.XXXX`), the baseline model used, classified record count. When `savings_usd <= 0.0`, show "$0.00 (no savings — baseline costs less)" instead of a negative figure. If `unknown_cost_count > 0`, a muted note: "N records excluded — unknown model cost". If `has_historical_fallback`, a note: "Includes older records estimated from snippet length (less accurate)."
   - **With error**: Error banner with the message
@@ -247,13 +247,15 @@ Create the `savings.html` template with the savings display and integrate the "S
 
 Follows the same visual patterns as `templates/dashboard/latency.html` (stat-row, card, empty-state, error-banner CSS classes from `base.html`).
 
-#### 2. Navigation updates
+Addendum: dashboard index (`index.html:51-59`) includes an "Est. Savings" quick-stat card alongside latency/throughput stats, populated by the same `fetch_savings_estimate` call via `tokio::join!`.
 
-**Files**: `templates/dashboard/index.html:3-7`, `templates/dashboard/inferences.html:3-7`, `templates/dashboard/latency.html:3-7`
+#### 2. Navigation update
 
-**Intent**: Add the "Savings" tab link to the nav block in each existing template so the operator can navigate to the new page from anywhere in the dashboard.
+**File**: `src/dashboard.rs`
 
-**Contract**: Each `{% block nav %}` gains an additional `<a href="/dashboard/savings">Savings</a>` line (before the closing `{% endblock %}`). The savings.html template's nav block marks Savings with `class="active"`.
+**Intent**: Register Savings in the `PAGES` static array so auto-nav (via `base.html` iterating `nav.pages`) renders it in the sidebar on all dashboard pages.
+
+**Contract**: Add `NavPage { path: "/dashboard/savings", label: "Savings", icon }` to the `PAGES` array. Each handler calls `nav_for("savings")` to mark it active.
 
 ### Success Criteria:
 
@@ -349,7 +351,7 @@ Follows the same visual patterns as `templates/dashboard/latency.html` (stat-row
 - [x] 2.5 Handler returns HTTP 401 for unauthenticated requests — d84f2a0
 - [x] 2.6 Handler gracefully handles `state.classifier == None` (no panic) — d84f2a0
 - [x] 2.7 `cargo test` — all existing and new tests pass — d84f2a0
-- [x] 2.8 `cargo build --release` — compiles without warnings — d84f2a0
+- [x] 2.8 `cargo build --release` — compiles without *new* warnings (5 pre-existing warnings from other modules remain) — d84f2a0
 
 #### Manual
 

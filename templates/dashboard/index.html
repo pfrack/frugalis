@@ -86,8 +86,13 @@
         <td>{{ row.p99_duration_ms.unwrap_or(0) }}</td>
       </tr>
       {% endfor %}
-    </table>
-    {% else %}
+     </table>
+     {% if s.unclassified_count > 0 %}
+     <p class="muted" style="font-size:12px;">{{ s.unclassified_count }} unclassified records excluded.</p>
+     {% endif %}
+     <p class="muted">{{ s.total_classified_count }} total classified inferences in the selected window.</p>
+     <a href="/dashboard/latency?hours=24" class="btn btn-ghost">View full latency breakdown &rarr;</a>
+     {% else %}
     <div class="empty-state"><p>No inference data yet</p><small>Send requests through the proxy to see results here.</small></div>
     {% endif %}
   {% else %}
