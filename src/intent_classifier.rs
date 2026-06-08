@@ -174,6 +174,7 @@ pub struct LLMClassifier {
     pub model: String,
     pub endpoint: String,
     api_key_env: String,
+    api_key: String,
     provider_type: String,
     categories: Vec<CategoryConfig>,
     prompt_template: String,
@@ -187,18 +188,22 @@ impl LLMClassifier {
                 Ok(contents) => contents,
                 Err(e) => {
                     tracing::warn!("Failed to read prompt template at {}: {}", path, e);
-                    build_llm_classifier_prompt(&categories, None)
+                    build_llm_classifier_prompt(&categories)
                 }
             }
         } else {
-            build_llm_classifier_prompt(&categories, None)
+            build_llm_classifier_prompt(&categories)
         };
+
+        let api_key = std::env::var(&config.api_key_env)
+            .unwrap_or_else(|_| String::new());
 
         Self {
             client,
             model: config.model,
             endpoint: config.endpoint,
             api_key_env: config.api_key_env,
+            api_key,
             provider_type: config.provider_type,
             categories,
             prompt_template,
@@ -224,22 +229,20 @@ impl LLMClassifier {
             "response_format": { "type": "json_object" }
         });
 
-        // Get API key from environment
-        let api_key = std::env::var(&self.api_key_env)
-            .unwrap_or_else(|_| String::new());
+        // Use pre-resolved API key
+        let api_key = &self.api_key;
 
         if api_key.is_empty() {
             tracing::warn!("LLM classifier API key environment variable {} is empty or unset", self.api_key_env);
         }
 
-        // Build request
         let request = self.client
             .post(&self.endpoint)
             .timeout(self.timeout)
             .header("Content-Type", "application/json");
 
         let request = if !api_key.is_empty() {
-            let headers = auth_headers_for(&self.provider_type, &api_key);
+            let headers = auth_headers_for(&self.provider_type, api_key);
             let mut req = request;
             for (key, value) in headers {
                 req = req.header(&key, &value);
@@ -323,7 +326,7 @@ impl IntentClassify for LLMClassifier {
 }
 
 /// Build the system prompt for LLM classification from category configs.
-pub fn build_llm_classifier_prompt(categories: &[CategoryConfig], _template_path: Option<&str>) -> String {
+pub fn build_llm_classifier_prompt(categories: &[CategoryConfig]) -> String {
     let mut prompt = String::from("You are an intent classifier for a coding assistant. ");
     prompt.push_str("Classify user prompts into exactly one of these categories:\n\n");
 
@@ -1113,7 +1116,7 @@ mod tests {
     #[tokio::test]
     async fn build_llm_classifier_prompt_has_categories() {
         let cats = hardcoded_categories();
-        let prompt = build_llm_classifier_prompt(&cats, None);
+        let prompt = build_llm_classifier_prompt(&cats);
 
         assert!(prompt.contains("FILE_READING"));
         assert!(prompt.contains("SYNTAX_FIX"));

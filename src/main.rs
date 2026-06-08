@@ -71,8 +71,16 @@ async fn main() {
         }
     };
     let config_path_option = std::env::var("CONFIG_PATH").ok();
-    let regex_config = config_path_option.as_deref()
-        .map(config::load_regex_classifier_config)
+
+    // Read and parse config file once, reuse across all loaders
+    let config_root = config_path_option.as_deref()
+        .and_then(|path| {
+            let content = std::fs::read_to_string(path).ok()?;
+            toml::from_str::<toml::Value>(&content).ok()
+        });
+
+    let regex_config = config_root.as_ref()
+        .map(config::load_regex_classifier_config_from_value)
         .unwrap_or_default();
     let regex_enabled = regex_config.enabled;
 
@@ -81,7 +89,9 @@ async fn main() {
         let model_costs = config::build_model_costs(&routing_map);
         let baseline_model =
             config::env_or_default("BASELINE_MODEL", intent_classifier::DEFAULT_MODEL_COMPLEX);
-        let categories = config::load_categories();
+        let categories = config_root.as_ref()
+            .and_then(|root| config::load_categories_from_value(root).ok())
+            .unwrap_or_else(intent_classifier::hardcoded_categories);
         if !regex_enabled {
             info!("Regex classifier disabled via config");
             (
@@ -134,51 +144,51 @@ async fn main() {
         .expect("reqwest client should build");
 
     // If LLM classifier is configured, add it to the chain
-    let (classifier, routing) = if let Some(config_path) = config_path_option.as_deref() {
-        if let Some(llm_config) = config::load_llm_classifier_config(config_path) {
-            let categories = config::load_categories();
-            let llm_classifier = intent_classifier::LLMClassifier::new(
-                llm_config,
-                http_client.clone(),
-                categories,
-            );
-            info!(
-                "LLM classifier enabled: model={}, endpoint={}",
-                llm_classifier.model, llm_classifier.endpoint
-            );
-            if let Some(chain) = classifier {
-                // Add LLMClassifier as second backend in the chain
-                let mut backends = chain.backends().to_vec();
-                backends.push(Arc::new(llm_classifier));
-                let new_chain = intent_classifier::ClassifierChain::new(backends);
-                let mut merged_routing = HashMap::new();
-                for backend in new_chain.backends().iter() {
-                    if let Some(r) = backend.get_routing() {
-                        merged_routing.extend(r.clone());
-                    }
+    let (classifier, routing) = if let Some(llm_config) = config_root.as_ref()
+        .and_then(|root| config::load_llm_classifier_config_from_value(root))
+    {
+        let categories = config_root.as_ref()
+            .and_then(|root| config::load_categories_from_value(root).ok())
+            .unwrap_or_else(intent_classifier::hardcoded_categories);
+        let llm_classifier = intent_classifier::LLMClassifier::new(
+            llm_config,
+            http_client.clone(),
+            categories,
+        );
+        info!(
+            "LLM classifier enabled: model={}, endpoint={}",
+            llm_classifier.model, llm_classifier.endpoint
+        );
+        if let Some(chain) = classifier {
+            // Add LLMClassifier as second backend in the chain
+            let mut backends = chain.backends().to_vec();
+            backends.push(Arc::new(llm_classifier));
+            let new_chain = intent_classifier::ClassifierChain::new(backends);
+            let mut merged_routing = HashMap::new();
+            for backend in new_chain.backends().iter() {
+                if let Some(r) = backend.get_routing() {
+                    merged_routing.extend(r.clone());
                 }
-                (Some(Arc::new(new_chain)), Arc::new(merged_routing))
-            } else if regex_enabled {
-                warn!("LLM classifier enabled but regex classifier failed to build; disabling LLM classifier");
-                (classifier, routing)
-            } else {
-                // Regex explicitly disabled, LLM is the only backend
-                info!("LLM classifier is the only classification backend (regex disabled)");
-                let new_chain = intent_classifier::ClassifierChain::new(vec![Arc::new(llm_classifier)]);
-                let mut merged_routing = HashMap::new();
-                for backend in new_chain.backends().iter() {
-                    if let Some(r) = backend.get_routing() {
-                        merged_routing.extend(r.clone());
-                    }
-                }
-                (Some(Arc::new(new_chain)), Arc::new(merged_routing))
             }
+            (Some(Arc::new(new_chain)), Arc::new(merged_routing))
         } else {
-            debug!("LLM classifier not configured or disabled");
-            (classifier, routing)
+            // No regex classifier (either disabled or failed to build)
+            if regex_enabled {
+                warn!("Regex classifier failed to build; falling back to LLM-only classification");
+            } else {
+                info!("LLM classifier is the only classification backend (regex disabled)");
+            }
+            let new_chain = intent_classifier::ClassifierChain::new(vec![Arc::new(llm_classifier)]);
+            let mut merged_routing = HashMap::new();
+            for backend in new_chain.backends().iter() {
+                if let Some(r) = backend.get_routing() {
+                    merged_routing.extend(r.clone());
+                }
+            }
+            (Some(Arc::new(new_chain)), Arc::new(merged_routing))
         }
     } else {
-        debug!("No config path set, LLM classifier disabled");
+        debug!("LLM classifier not configured or disabled");
         (classifier, routing)
     };
 

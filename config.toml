@@ -12,14 +12,14 @@
 # prompt_template_path = "path/to/prompt.txt"  # optional custom prompt
 # timeout_secs = 3
 
-# LLM Classifier config for testing with Groq free tier
-[llm_classifier]
-enabled = true
-model = "llama3-8b-8192"
-endpoint = "https://api.groq.com/openai/v1/chat/completions"
-api_key_env = "GROQ_API_KEY"
-provider_type = "openai_compatible"
-timeout_secs = 10
+# Example: LLM Classifier config for testing with Groq free tier
+# [llm_classifier]
+# enabled = true
+# model = "llama3-8b-8192"
+# endpoint = "https://api.groq.com/openai/v1/chat/completions"
+# api_key_env = "GROQ_API_KEY"
+# provider_type = "openai_compatible"
+# timeout_secs = 10
 
 [[categories]]
 name = "FILE_READING"
