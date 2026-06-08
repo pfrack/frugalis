@@ -209,6 +209,53 @@ pub(crate) fn build_model_costs(routing: &HashMap<String, RouteEntry>) -> ModelC
     ModelCosts::from_costs(costs)
 }
 
+/// Configuration for global classifier settings.
+#[derive(Clone, Debug)]
+pub(crate) struct ClassifiersConfig {
+    pub enabled: bool,
+    pub order: Vec<String>,
+}
+
+impl Default for ClassifiersConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            order: vec!["regex".to_string(), "llm".to_string()],
+        }
+    }
+}
+
+/// Load classifiers config from a parsed toml::Value.
+/// Returns default if section is absent.
+pub(crate) fn load_classifiers_config_from_value(root: &toml::Value) -> ClassifiersConfig {
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => {
+            tracing::debug!("Config root is not a table for classifiers config; using defaults");
+            return ClassifiersConfig::default();
+        }
+    };
+    let classifiers_section = match table.get("classifiers").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => {
+            tracing::debug!("No [classifiers] section in config; using defaults");
+            return ClassifiersConfig::default();
+        }
+    };
+    let enabled = classifiers_section.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let order = classifiers_section
+        .get("order")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_else(|| vec!["regex".to_string(), "llm".to_string()]);
+
+    ClassifiersConfig { enabled, order }
+}
+
 /// Configuration for the regex classifier backend.
 #[derive(Clone, Debug)]
 pub(crate) struct RegexClassifierConfig {
@@ -462,10 +509,17 @@ api_key_env = ""
 
     #[test]
     fn hardcoded_routing_respects_nvidia_endpoint_env() {
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var("NVIDIA_ENDPOINT");
+            }
+        }
+        
+        let _guard = EnvGuard;
         std::env::set_var("NVIDIA_ENDPOINT", "https://custom.endpoint.example.com/v1/chat/completions");
         let (_, fallback) = hardcoded_routing(&hardcoded_categories());
         assert_eq!(fallback.endpoint, "https://custom.endpoint.example.com/v1/chat/completions");
-        std::env::remove_var("NVIDIA_ENDPOINT");
     }
 
     #[test]
@@ -706,5 +760,75 @@ priority = 1
         assert_eq!(cfg.model, "gpt-4o-mini");
         assert_eq!(cfg.provider_type, "openai_compatible");
         assert_eq!(cfg.timeout_secs, 3);
+    }
+
+    #[test]
+    fn load_classifiers_config_defaults_when_missing() {
+        // Section absent → default values
+        let toml_content = r#"
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let root: toml::Value = toml::from_str(toml_content).expect("valid TOML");
+        let cfg = load_classifiers_config_from_value(&root);
+        assert!(cfg.enabled);
+        assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
+    }
+
+    #[test]
+    fn load_classifiers_config_explicit_values() {
+        let toml_content = r#"
+[classifiers]
+enabled = false
+order = ["llm", "regex"]
+
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let root: toml::Value = toml::from_str(toml_content).expect("valid TOML");
+        let cfg = load_classifiers_config_from_value(&root);
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.order, vec!["llm".to_string(), "regex".to_string()]);
+    }
+
+    #[test]
+    fn load_classifiers_config_partial_order_keeps_default_for_missing() {
+        let toml_content = r#"
+[classifiers]
+enabled = true
+order = ["llm"]
+
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let root: toml::Value = toml::from_str(toml_content).expect("valid TOML");
+        let cfg = load_classifiers_config_from_value(&root);
+        assert!(cfg.enabled);
+        assert_eq!(cfg.order, vec!["llm".to_string()]);
+    }
+
+    #[test]
+    fn load_classifiers_config_empty_root_returns_defaults() {
+        let root = toml::Value::Table(toml::value::Table::new());
+        let cfg = load_classifiers_config_from_value(&root);
+        assert!(cfg.enabled);
+        assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
+    }
+
+    #[test]
+    fn load_classifiers_config_non_table_root_returns_defaults() {
+        let root = toml::Value::String("not a table".to_string());
+        let cfg = load_classifiers_config_from_value(&root);
+        assert!(cfg.enabled);
+        assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
     }
 }
