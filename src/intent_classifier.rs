@@ -29,6 +29,7 @@ pub(crate) fn hardcoded_model_costs() -> HashMap<String, f64> {
 /// - openapi/completions.yaml — enum constraint values (line 44, 111)
 /// - manual-test/run.sh — x-cerebrum-category header (line 179)
 /// - templates/dashboard/inferences.html — placeholder text (line 19)
+///
 /// Category names are a PUBLIC API contract. Renaming any value here
 /// is a breaking change requiring updates to all listed consumers.
 /// Names must stay [A-Z_]+ for compatibility with key.to_uppercase()
@@ -994,7 +995,7 @@ mod tests {
         });
 
         let config = LlmClassifierConfig {
-            enabled: true,
+
             model: "gpt-4o-mini".to_string(),
             endpoint: server.url("/v1/chat/completions"),
             api_key_env: "OPENAI_API_KEY".to_string(),
@@ -1029,7 +1030,7 @@ mod tests {
         });
 
         let config = LlmClassifierConfig {
-            enabled: true,
+
             model: "gpt-4o-mini".to_string(),
             endpoint: server.url("/v1/chat/completions"),
             api_key_env: "OPENAI_API_KEY".to_string(),
@@ -1052,7 +1053,7 @@ mod tests {
     #[tokio::test]
     async fn llm_classifier_network_error() {
         let config = LlmClassifierConfig {
-            enabled: true,
+
             model: "gpt-4o-mini".to_string(),
             endpoint: "http://127.0.0.1:1/nonexistent".to_string(), // Invalid endpoint
             api_key_env: "OPENAI_API_KEY".to_string(),
@@ -1093,7 +1094,7 @@ mod tests {
         });
 
         let config = LlmClassifierConfig {
-            enabled: true,
+
             model: "gpt-4o-mini".to_string(),
             endpoint: server.url("/v1/chat/completions"),
             api_key_env: "OPENAI_API_KEY".to_string(),

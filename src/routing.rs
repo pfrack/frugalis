@@ -31,6 +31,7 @@ impl ModelCosts {
     }
 
     /// An empty cost table — all model lookups return None.
+    #[cfg(test)]
     pub fn empty() -> Self {
         ModelCosts {
             costs: HashMap::new(),

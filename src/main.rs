@@ -75,8 +75,20 @@ async fn main() {
     // Read and parse config file once, reuse across all loaders
     let config_root = config_path_option.as_deref()
         .and_then(|path| {
-            let content = std::fs::read_to_string(path).ok()?;
-            toml::from_str::<toml::Value>(&content).ok()
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("failed to read config file at {}: {}", path, e);
+                    return None;
+                }
+            };
+            match toml::from_str::<toml::Value>(&content) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    warn!("failed to parse config file at {}: {}", path, e);
+                    None
+                }
+            }
         });
 
     let regex_config = config_root.as_ref()
@@ -99,14 +111,23 @@ async fn main() {
         .unwrap_or(false);
 
     let (classifier, routing, model_costs, baseline_model) = {
-        let (routing_map, fallback_entry) = config::load_routing();
-        let model_costs = config::build_model_costs(&routing_map);
-        let baseline_model =
-            config::env_or_default("BASELINE_MODEL", intent_classifier::DEFAULT_MODEL_COMPLEX);
         let categories = config_root.as_ref()
             .and_then(|root| config::load_categories_from_value(root).ok())
             .unwrap_or_else(intent_classifier::hardcoded_categories);
-
+        let (routing_map, fallback_entry) = if let Some(root) = config_root.as_ref() {
+            match config::routing_from_value(root) {
+                Ok((map, fallback)) => (map, fallback),
+                Err(e) => {
+                    warn!("routing config parsing failed: {}; using hardcoded routing defaults", e);
+                    config::hardcoded_routing(&categories)
+                }
+            }
+        } else {
+            config::hardcoded_routing(&categories)
+        };
+        let model_costs = config::build_model_costs(&routing_map);
+        let baseline_model =
+            config::env_or_default("BASELINE_MODEL", intent_classifier::DEFAULT_MODEL_COMPLEX);
         if !classifiers_config.enabled {
             info!("All classifiers disabled via config");
             (None, Arc::new(HashMap::new()), model_costs, baseline_model)
@@ -135,7 +156,7 @@ async fn main() {
                     }
                     "llm" => {
                         if let Some(llm_config) = config_root.as_ref()
-                            .and_then(|root| config::load_llm_classifier_config_from_value(root))
+                            .and_then(config::load_llm_classifier_config_from_value)
                         {
                             let llm = intent_classifier::LLMClassifier::new(
                                 llm_config,
@@ -509,8 +530,7 @@ async fn completion_handler(
                 .collect::<String>()
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"")
-                .replace('\n', " ")
-                .replace('\r', " ");
+                .replace(['\n', '\r'], " ");
             let sse_error = format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", error_text);
             let mut resp = Response::new(Body::from(sse_error));
             *resp.status_mut() = upstream_status;
@@ -548,7 +568,7 @@ async fn completion_handler(
                         match chunk {
                             Some(Ok(bytes)) => { if tx.send(bytes).await.is_err() { break; } }
                             Some(Err(e)) => {
-                                let sanitized = e.to_string().replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ").replace('\r', " ");
+                                let sanitized = e.to_string().replace('\\', "\\\\").replace('"', "\\\"").replace(['\n', '\r'], " ");
                                 let _ = tx.send(Bytes::from(
                                     format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", sanitized)
                                 )).await;
@@ -567,7 +587,7 @@ async fn completion_handler(
         });
 
         let body = Body::from_stream(
-            tokio_stream::wrappers::ReceiverStream::new(rx).map(|bytes| Ok::<_, Infallible>(bytes)),
+            tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, Infallible>),
         );
 
         let mut resp = Response::new(body);
@@ -595,8 +615,7 @@ async fn completion_handler(
                             .chars()
                             .take(512)
                             .collect::<String>()
-                            .replace('\n', " ")
-                            .replace('\r', " ");
+                            .replace(['\n', '\r'], " ");
                         break serde_json::json!({
                             "error": "upstream_error",
                             "status": upstream_status.as_u16(),
@@ -611,8 +630,7 @@ async fn completion_handler(
                         .chars()
                         .take(512)
                         .collect::<String>()
-                        .replace('\n', " ")
-                        .replace('\r', " ");
+                            .replace(['\n', '\r'], " ");
                     break serde_json::json!({
                         "error": "upstream_error",
                         "status": upstream_status.as_u16(),
