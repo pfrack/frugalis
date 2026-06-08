@@ -313,12 +313,12 @@ No migration needed — all new fields have defaults that preserve current behav
 
 #### Automated
 
-- [x] 3.1 Build passes: `cargo build`
-- [x] 3.2 Existing tests pass: `cargo test`
-- [x] 3.3 Config option documented
+- [x] 3.1 Build passes: `cargo build` — fc8dc56
+- [x] 3.2 Existing tests pass: `cargo test` — fc8dc56
+- [x] 3.3 Config option documented — fc8dc56
 
 #### Manual
 
-- [x] 3.4 Default behavior unchanged
-- [x] 3.5 Can disable all classifiers
-- [x] 3.6 Can change backend order
+- [x] 3.4 Default behavior unchanged — fc8dc56
+- [x] 3.5 Can disable all classifiers — fc8dc56
+- [x] 3.6 Can change backend order — fc8dc56

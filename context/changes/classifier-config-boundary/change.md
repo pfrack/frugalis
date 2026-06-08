@@ -1,7 +1,7 @@
 # Change: Classifier Config Boundary (S-09a)
 
 - **id**: classifier-config-boundary
-- **status**: implementing
+- **status**: implemented
 - **created**: 2026-06-07
 - **updated**: 2026-06-08
 - **roadmap**: S-09a
