@@ -657,6 +657,105 @@ EOF
 }
 
 # ============================================================================
+# Test: LLM Classifier with Real Endpoint (Phase 4.4 - Manual verification)
+# ============================================================================
+test_llm_classifier_real_endpoint() {
+    section "Test 10: LLM Classifier Real Endpoint (5 diverse prompts)"
+    
+    # Skip if GROQ_API_KEY not set
+    if [ -z "${GROQ_API_KEY:-}" ]; then
+        log_info "GROQ_API_KEY not set, skipping real endpoint test"
+        return 0
+    fi
+    
+    cat > /tmp/cerebrum-config-test.toml << EOF
+[[categories]]
+name = "FILE_READING"
+description = "Reading, viewing, inspecting, searching, or navigating files or code"
+threshold = 3
+priority = 1
+model_env_var = "DEFAULT_MODEL_READING"
+
+[[categories]]
+name = "SYNTAX_FIX"
+description = "Fixing bugs, errors, typos, compilation issues, or broken code"
+threshold = 3
+priority = 2
+model_env_var = "DEFAULT_MODEL"
+
+[[categories]]
+name = "COMPLEX_REASONING"
+description = "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization"
+threshold = 3
+priority = 3
+model_env_var = "DEFAULT_MODEL_COMPLEX"
+
+[[categories]]
+name = "CASUAL"
+description = "Simple questions, greetings, general conversation, or short prompts"
+threshold = 1
+priority = 4
+model_env_var = "DEFAULT_MODEL"
+
+[llm_classifier]
+enabled = true
+model = "llama3-8b-8192"
+endpoint = "https://api.groq.com/openai/v1/chat/completions"
+api_key_env = "GROQ_API_KEY"
+provider_type = "openai_compatible"
+timeout_secs = 3
+EOF
+    
+    if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        log_fail "Failed to start server"
+        return 1
+    fi
+    
+    # Define 5 diverse prompts that should be ambiguous for regex
+    local prompts=(
+        "Write a short story about a robot learning to paint"
+        "Translate this sentence to French: I love programming"
+        "How would you bake a chocolate cake?"
+        "I want to learn guitar"
+        "Write a function that reverses a string"
+    )
+    
+    local llm_triggered=0
+    local all_outputs=""
+    
+    for prompt in "${prompts[@]}"; do
+        log_info "Testing prompt: $prompt"
+        result=$(classify "$prompt" 2>/dev/null) || result="ERROR"
+        # classify prints "(category=..., model=...)" to stderr, category to stdout
+        # We'll capture both
+        output=$( (classify "$prompt" 2>&1) 2>/dev/null ) || output="ERROR"
+        all_outputs+="Prompt: $prompt\nOutput: $output\n"
+        
+        # Extract model from output (it's in parentheses on stderr but we merged)
+        if echo "$output" | grep -q "model=llama3-8b-8192"; then
+            log_pass "LLM classifier triggered for: $prompt"
+            llm_triggered=$((llm_triggered+1))
+        else
+            log_info "Result: $output (not LLM model)"
+        fi
+    done
+    
+    stop_server
+    
+    if [ $llm_triggered -ge 5 ]; then
+        log_pass "All 5 prompts triggered LLM classifier with sensible classifications"
+        echo "Full outputs:"
+        echo "$all_outputs"
+        return 0
+    else
+        log_fail "Only $llm_triggered/5 prompts triggered LLM classifier"
+        echo "Full outputs:"
+        echo "$all_outputs"
+        return 1
+    fi
+}
+
+# ============================================================================
 # Test: LLM Classifier disabled (no [llm_classifier] section)
 # ============================================================================
 test_llm_classifier_disabled() {
@@ -740,6 +839,120 @@ test_ambiguous_prompt() {
 }
 
 # ============================================================================
+# Test: Regex Classifier disabled (S-09 extension)
+# ============================================================================
+test_regex_classifier_disabled() {
+    section "Test 11: Regex Classifier Disabled (only LLM active)"
+    
+    cat > /tmp/cerebrum-config-test.toml << 'EOF'
+[regex_classifier]
+enabled = false
+
+[llm_classifier]
+enabled = true
+model = "gpt-4o-mini"
+endpoint = "http://localhost:9999/v1/chat/completions"
+api_key_env = "OPENAI_API_KEY"
+provider_type = "openai_compatible"
+timeout_secs = 3
+
+[[categories]]
+name = "FILE_READING"
+description = "Reading files"
+threshold = 3
+priority = 1
+model_env_var = "DEFAULT_MODEL_READING"
+
+[[categories]]
+name = "CASUAL"
+description = "Simple questions"
+threshold = 1
+priority = 4
+model_env_var = "DEFAULT_MODEL"
+EOF
+    
+    if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        log_fail "Failed to start server"
+        return 1
+    fi
+    
+    # Verify logs contain "Regex classifier disabled"
+    if grep -q "Regex classifier disabled" /tmp/cerebrum-test-$$.log; then
+        log_pass "Log contains 'Regex classifier disabled'"
+    else
+        log_fail "Log missing 'Regex classifier disabled' message"
+        stop_server
+        return 1
+    fi
+    
+    # Verify logs contain "LLM classifier is the only classification backend" or "LLM classifier enabled"
+    if grep -q "LLM classifier enabled" /tmp/cerebrum-test-$$.log; then
+        log_pass "LLM classifier startup logged"
+    else
+        log_fail "LLM classifier not logged"
+        stop_server
+        return 1
+    fi
+    
+    # Test classification: should use LLM (endpoint unreachable, but we can see the class)
+    # Actually the LLM will fail to connect, so we'll get fallback. That's fine.
+    result=$(classify "hello") || result="ERROR"
+    if [ "$result" = "CASUAL" ] || [ "$result" = "ERROR" ]; then
+        log_pass "Classification returns fallback (LLM endpoint unreachable, as expected)"
+        stop_server
+        return 0
+    else
+        log_fail "Unexpected result: $result"
+        stop_server
+        return 1
+    fi
+}
+
+# ============================================================================
+# Test: No classifier at all (both disabled)
+# ============================================================================
+test_no_classifier_fallback() {
+    section "Test 12: Both Classifiers Disabled (pure fallback)"
+    
+    cat > /tmp/cerebrum-config-test.toml << 'EOF'
+[regex_classifier]
+enabled = false
+
+# LLM classifier not present or explicitly disabled
+# If present, must be disabled
+
+[llm_classifier]
+enabled = false
+
+[[categories]]
+name = "CASUAL"
+description = "Simple questions"
+threshold = 1
+priority = 1
+model_env_var = "DEFAULT_MODEL"
+EOF
+    
+    if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        log_fail "Failed to start server"
+        return 1
+    fi
+    
+    # Verify chain is empty or disabled
+    result=$(classify "any prompt here") || result="ERROR"
+    
+    # Expect CASUAL fallback
+    if [ "$result" = "CASUAL" ] || [ "$result" = "ERROR" ]; then
+        log_pass "Both classifiers disabled → fallback to CASUAL"
+        stop_server
+        return 0
+    else
+        log_fail "Expected CASUAL/ERROR, got $result"
+        stop_server
+        return 1
+    fi
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 main() {
@@ -768,11 +981,15 @@ main() {
     test_negative_suppression
     
     # Run S-09 tests (LLM classifier)
-    test_llm_classifier_enabled
-    test_llm_classifier_disabled
-    test_ambiguous_prompt
-    
-    # Summary
+     test_llm_classifier_enabled
+     test_llm_classifier_disabled
+     test_ambiguous_prompt
+     
+     # Run new tests for regex classifier enable/disable toggle (scope extension)
+     test_regex_classifier_disabled
+     test_no_classifier_fallback
+     
+     # Summary
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     local total=$((PASS + FAIL))

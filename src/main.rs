@@ -70,45 +70,57 @@ async fn main() {
             None
         }
     };
-    let (classifier, routing, model_costs, baseline_model, _llm_classifier_enabled) = {
+    let config_path_option = std::env::var("CONFIG_PATH").ok();
+    let regex_config = config_path_option.as_deref()
+        .map(config::load_regex_classifier_config)
+        .unwrap_or_default();
+    let regex_enabled = regex_config.enabled;
+
+    let (classifier, routing, model_costs, baseline_model) = {
         let (routing_map, fallback_entry) = config::load_routing();
         let model_costs = config::build_model_costs(&routing_map);
         let baseline_model =
             config::env_or_default("BASELINE_MODEL", intent_classifier::DEFAULT_MODEL_COMPLEX);
         let categories = config::load_categories();
-        match intent_classifier::RegexClassifier::from_env(
-            routing_map.clone(),
-            fallback_entry.clone(),
-            intent_classifier::SHORT_PROMPT_LEN,
-            categories.clone(),
-        ) {
-            Ok(regex_classifier) => {
-                info!("Intent classifier initialized");
-                // Build classifier chain; currently only one backend (RegexClassifier)
-                // LLMClassifier will be added after http_client is created
-                let chain = intent_classifier::ClassifierChain::new(vec![Arc::new(
-                    regex_classifier,
-                )]);
-                let classifier = Arc::new(chain);
-                // Merge routing tables from all backends (currently just one)
-                let mut merged_routing = HashMap::new();
-                for backend in classifier.backends().iter() {
-                    if let Some(r) = backend.get_routing() {
-                        merged_routing.extend(r.clone());
+        if !regex_enabled {
+            info!("Regex classifier disabled via config");
+            (
+                None,
+                Arc::new(HashMap::new()),
+                model_costs,
+                baseline_model,
+            )
+        } else {
+            match intent_classifier::RegexClassifier::from_env(
+                routing_map.clone(),
+                fallback_entry.clone(),
+                intent_classifier::SHORT_PROMPT_LEN,
+                categories.clone(),
+            ) {
+                Ok(regex_classifier) => {
+                    info!("Regex classifier initialized");
+                    let chain = intent_classifier::ClassifierChain::new(vec![Arc::new(
+                        regex_classifier,
+                    )]);
+                    let classifier = Arc::new(chain);
+                    let mut merged_routing = HashMap::new();
+                    for backend in classifier.backends().iter() {
+                        if let Some(r) = backend.get_routing() {
+                            merged_routing.extend(r.clone());
+                        }
                     }
+                    let routing = Arc::new(merged_routing);
+                    (Some(classifier), routing, model_costs, baseline_model)
                 }
-                let routing = Arc::new(merged_routing);
-                (Some(classifier), routing, model_costs, baseline_model, false)
-            }
-            Err(e) => {
-                warn!("intent classification disabled: {e}");
-                (
-                    None,
-                    Arc::new(HashMap::new()),
-                    intent_classifier::ModelCosts::empty(),
-                    String::new(),
-                    false,
-                )
+                Err(e) => {
+                    warn!("intent classification disabled: {e}");
+                    (
+                        None,
+                        Arc::new(HashMap::new()),
+                        intent_classifier::ModelCosts::empty(),
+                        String::new(),
+                    )
+                }
             }
         }
     };
@@ -122,8 +134,8 @@ async fn main() {
         .expect("reqwest client should build");
 
     // If LLM classifier is configured, add it to the chain
-    let (classifier, routing) = if let Some(config_path) = std::env::var("CONFIG_PATH").ok() {
-        if let Some(llm_config) = config::load_llm_classifier_config(&config_path) {
+    let (classifier, routing) = if let Some(config_path) = config_path_option.as_deref() {
+        if let Some(llm_config) = config::load_llm_classifier_config(config_path) {
             let categories = config::load_categories();
             let llm_classifier = intent_classifier::LLMClassifier::new(
                 llm_config,
@@ -134,12 +146,11 @@ async fn main() {
                 "LLM classifier enabled: model={}, endpoint={}",
                 llm_classifier.model, llm_classifier.endpoint
             );
-            // Add LLMClassifier as second backend in the chain
             if let Some(chain) = classifier {
+                // Add LLMClassifier as second backend in the chain
                 let mut backends = chain.backends().to_vec();
                 backends.push(Arc::new(llm_classifier));
                 let new_chain = intent_classifier::ClassifierChain::new(backends);
-                // Merge routing tables from all backends
                 let mut merged_routing = HashMap::new();
                 for backend in new_chain.backends().iter() {
                     if let Some(r) = backend.get_routing() {
@@ -147,9 +158,20 @@ async fn main() {
                     }
                 }
                 (Some(Arc::new(new_chain)), Arc::new(merged_routing))
-            } else {
-                warn!("LLM classifier configuration enabled but no regex classifier available; disabling LLM classifier");
+            } else if regex_enabled {
+                warn!("LLM classifier enabled but regex classifier failed to build; disabling LLM classifier");
                 (classifier, routing)
+            } else {
+                // Regex explicitly disabled, LLM is the only backend
+                info!("LLM classifier is the only classification backend (regex disabled)");
+                let new_chain = intent_classifier::ClassifierChain::new(vec![Arc::new(llm_classifier)]);
+                let mut merged_routing = HashMap::new();
+                for backend in new_chain.backends().iter() {
+                    if let Some(r) = backend.get_routing() {
+                        merged_routing.extend(r.clone());
+                    }
+                }
+                (Some(Arc::new(new_chain)), Arc::new(merged_routing))
             }
         } else {
             debug!("LLM classifier not configured or disabled");
