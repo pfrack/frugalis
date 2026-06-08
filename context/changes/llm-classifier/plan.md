@@ -377,4 +377,4 @@ During implementation review, an additional comprehensive test framework was add
 
 #### Manual
 
-- [x] 4.4 Real LLM endpoint test — 5 diverse prompts with sensible classifications
+- [x] 4.4 Real LLM endpoint test — 5 diverse prompts with sensible classifications — 2417a56
