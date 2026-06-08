@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use tracing::warn;
 
-use crate::intent_classifier::{CategoryConfig, hardcoded_categories};
+use crate::intent_classifier::CategoryConfig;
 use crate::routing::*;
 
+#[cfg(test)]
 pub(crate) const CONFIG_DEFAULT: &str = "config.toml";
+#[cfg(test)]
 pub(crate) const ROUTING_CONFIG_LEGACY: &str = "routing.toml";
 pub(crate) const NVIDIA_ENDPOINT_DEFAULT: &str = "https://integrate.api.nvidia.com/v1/chat/completions";
 
@@ -55,6 +57,7 @@ pub(crate) fn hardcoded_routing(categories: &[CategoryConfig]) -> (HashMap<Strin
     (routing, fallback)
 }
 
+#[cfg(test)]
 pub(crate) fn load_routing_from_file(path: &str) -> Result<HashMap<String, RouteEntry>, String> {
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
@@ -108,6 +111,7 @@ pub(crate) fn load_routing_from_file(path: &str) -> Result<HashMap<String, Route
     Ok(routing)
 }
 
+#[cfg(test)]
 pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
     let config_path = std::env::var("CONFIG_PATH")
         .or_else(|_| std::env::var("ROUTING_CONFIG_PATH"))
@@ -144,6 +148,64 @@ pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
     (routing, fallback_entry)
 }
 
+/// Build routing map and fallback entry from a parsed TOML value.
+/// Returns (routing map, fallback entry). If the root is not a table, returns error.
+pub(crate) fn routing_from_value(root: &toml::Value) -> Result<(HashMap<String, RouteEntry>, RouteEntry), String> {
+    let table = root.as_table()
+        .ok_or_else(|| "Root must be a table".to_string())?;
+    let mut routing = HashMap::new();
+    for (key, value) in table {
+        if key == "fallback" || key == "categories" {
+            continue;
+        }
+        let model = if let Some(m) = value.get("model").and_then(|v| v.as_str()) {
+            m.to_string()
+        } else {
+            warn!(category = %key, "routing section missing 'model' for category; using DEFAULT_MODEL");
+            env_or_default("DEFAULT_MODEL", DEFAULT_MODEL)
+        };
+        let endpoint = value
+            .get("endpoint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let cost_per_1m_input_tokens = value
+            .get("cost_per_1m_input_tokens")
+            .and_then(|v| v.as_float());
+        let provider_type = if let Some(pt) = value.get("provider_type").and_then(|v| v.as_str()) {
+            pt.to_string()
+        } else {
+            warn!(category = %key, "routing section missing 'provider_type' for category; defaulting to empty");
+            String::new()
+        };
+        let api_key_env = if let Some(ake) = value.get("api_key_env").and_then(|v| v.as_str()) {
+            Some(ake.to_string())
+        } else {
+            warn!(category = %key, "routing section missing 'api_key_env' for category; no API key will be resolved");
+            None
+        };
+        routing.insert(
+            key.to_uppercase(),
+            RouteEntry {
+                model,
+                endpoint,
+                cost_per_1m_input_tokens,
+                provider_type,
+                api_key_env,
+            },
+        );
+    }
+    let fallback = routing.remove("FALLBACK").unwrap_or_else(|| RouteEntry {
+        model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
+        endpoint: String::new(),
+        cost_per_1m_input_tokens: None,
+        provider_type: String::new(),
+        api_key_env: None,
+    });
+    Ok((routing, fallback))
+}
+
+#[cfg(test)]
 pub(crate) fn load_categories() -> Vec<CategoryConfig> {
     let path = std::env::var("CONFIG_PATH")
         .unwrap_or_else(|_| CONFIG_DEFAULT.to_string());
@@ -156,12 +218,14 @@ pub(crate) fn load_categories() -> Vec<CategoryConfig> {
     }
 }
 
+#[cfg(test)]
 fn load_categories_from_file(path: &str) -> Result<Vec<CategoryConfig>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Cannot read {path}: {e}"))?;
     let root: toml::Value = toml::from_str(&content)
         .map_err(|e| format!("Invalid TOML in {path}: {e}"))?;
     load_categories_from_value(&root)
+        .map_err(|e| format!("Error in {}: {}", path, e))
 }
 
 /// Load categories from a parsed toml::Value.
@@ -209,20 +273,74 @@ pub(crate) fn build_model_costs(routing: &HashMap<String, RouteEntry>) -> ModelC
     ModelCosts::from_costs(costs)
 }
 
+/// Configuration for global classifier settings.
+#[derive(Clone, Debug)]
+pub(crate) struct ClassifiersConfig {
+    pub enabled: bool,
+    pub order: Vec<String>,
+}
+
+impl Default for ClassifiersConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            order: vec!["regex".to_string(), "llm".to_string()],
+        }
+    }
+}
+
+/// Load classifiers config from a parsed toml::Value.
+/// Returns default if section is absent.
+pub(crate) fn load_classifiers_config_from_value(root: &toml::Value) -> ClassifiersConfig {
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => {
+            tracing::debug!("Config root is not a table for classifiers config; using defaults");
+            return ClassifiersConfig::default();
+        }
+    };
+    let classifiers_section = match table.get("classifiers").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => {
+            tracing::debug!("No [classifiers] section in config; using defaults");
+            return ClassifiersConfig::default();
+        }
+    };
+    let enabled = classifiers_section.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let order = classifiers_section
+        .get("order")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_else(|| vec!["regex".to_string(), "llm".to_string()]);
+
+    ClassifiersConfig { enabled, order }
+}
+
 /// Configuration for the regex classifier backend.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub(crate) struct RegexClassifierConfig {
     pub enabled: bool,
+    /// Timeout for regex matching (seconds). Currently unused but reserved for future timeout support.
+    pub timeout_secs: u64,
 }
 
 impl Default for RegexClassifierConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            timeout_secs: 5,
+        }
     }
 }
 
 /// Load regex classifier config from config.toml.
 /// Returns default (enabled) if section is absent.
+#[cfg(test)]
 pub(crate) fn load_regex_classifier_config(path: &str) -> RegexClassifierConfig {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -254,14 +372,17 @@ pub(crate) fn load_regex_classifier_config_from_value(root: &toml::Value) -> Reg
         _ => return RegexClassifierConfig::default(),
     };
     let enabled = regex_section.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-    RegexClassifierConfig { enabled }
+    let timeout_secs = regex_section
+        .get("timeout_secs")
+        .and_then(|v| v.as_integer())
+        .unwrap_or(5)
+        .max(1) as u64;
+    RegexClassifierConfig { enabled, timeout_secs }
 }
 
 /// Configuration for the LLM classifier backend.
 #[derive(Clone, Debug)]
 pub(crate) struct LlmClassifierConfig {
-    #[allow(dead_code)]
-    pub enabled: bool,
     pub model: String,
     pub endpoint: String,
     pub api_key_env: String,
@@ -272,6 +393,7 @@ pub(crate) struct LlmClassifierConfig {
 
 /// Load LLM classifier config from config.toml.
 /// Returns None if section is absent or enabled = false.
+#[cfg(test)]
 pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConfig> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -296,8 +418,7 @@ pub(crate) fn load_llm_classifier_config_from_value(root: &toml::Value) -> Optio
     let table = root.as_table()?;
     let llm_section = table.get("llm_classifier")?.as_table()?;
 
-    let enabled = llm_section.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-    if !enabled {
+    if !llm_section.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
         return None;
     }
 
@@ -336,7 +457,6 @@ pub(crate) fn load_llm_classifier_config_from_value(root: &toml::Value) -> Optio
         .unwrap_or(3) as u64).max(1);
 
     Some(LlmClassifierConfig {
-        enabled,
         model,
         endpoint,
         api_key_env,
@@ -462,10 +582,17 @@ api_key_env = ""
 
     #[test]
     fn hardcoded_routing_respects_nvidia_endpoint_env() {
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var("NVIDIA_ENDPOINT");
+            }
+        }
+        
+        let _guard = EnvGuard;
         std::env::set_var("NVIDIA_ENDPOINT", "https://custom.endpoint.example.com/v1/chat/completions");
         let (_, fallback) = hardcoded_routing(&hardcoded_categories());
         assert_eq!(fallback.endpoint, "https://custom.endpoint.example.com/v1/chat/completions");
-        std::env::remove_var("NVIDIA_ENDPOINT");
     }
 
     #[test]
@@ -586,6 +713,7 @@ priority = 1
 
         let cfg = load_regex_classifier_config(file_path.to_str().unwrap());
         assert!(cfg.enabled);
+        assert_eq!(cfg.timeout_secs, 5);
     }
 
     #[test]
@@ -638,7 +766,6 @@ priority = 1
         let result = load_llm_classifier_config(file_path.to_str().unwrap());
         assert!(result.is_some());
         let cfg = result.unwrap();
-        assert!(cfg.enabled);
         assert_eq!(cfg.model, "gpt-4o-mini");
         assert_eq!(cfg.endpoint, "https://api.openai.com/v1/chat/completions");
         assert_eq!(cfg.api_key_env, "MY_API_KEY");
@@ -706,5 +833,75 @@ priority = 1
         assert_eq!(cfg.model, "gpt-4o-mini");
         assert_eq!(cfg.provider_type, "openai_compatible");
         assert_eq!(cfg.timeout_secs, 3);
+    }
+
+    #[test]
+    fn load_classifiers_config_defaults_when_missing() {
+        // Section absent → default values
+        let toml_content = r#"
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let root: toml::Value = toml::from_str(toml_content).expect("valid TOML");
+        let cfg = load_classifiers_config_from_value(&root);
+        assert!(cfg.enabled);
+        assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
+    }
+
+    #[test]
+    fn load_classifiers_config_explicit_values() {
+        let toml_content = r#"
+[classifiers]
+enabled = false
+order = ["llm", "regex"]
+
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let root: toml::Value = toml::from_str(toml_content).expect("valid TOML");
+        let cfg = load_classifiers_config_from_value(&root);
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.order, vec!["llm".to_string(), "regex".to_string()]);
+    }
+
+    #[test]
+    fn load_classifiers_config_custom_order_replaces_default() {
+        let toml_content = r#"
+[classifiers]
+enabled = true
+order = ["llm"]
+
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let root: toml::Value = toml::from_str(toml_content).expect("valid TOML");
+        let cfg = load_classifiers_config_from_value(&root);
+        assert!(cfg.enabled);
+        assert_eq!(cfg.order, vec!["llm".to_string()]);
+    }
+
+    #[test]
+    fn load_classifiers_config_empty_root_returns_defaults() {
+        let root = toml::Value::Table(toml::value::Table::new());
+        let cfg = load_classifiers_config_from_value(&root);
+        assert!(cfg.enabled);
+        assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
+    }
+
+    #[test]
+    fn load_classifiers_config_non_table_root_returns_defaults() {
+        let root = toml::Value::String("not a table".to_string());
+        let cfg = load_classifiers_config_from_value(&root);
+        assert!(cfg.enabled);
+        assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
     }
 }

@@ -75,121 +75,122 @@ async fn main() {
     // Read and parse config file once, reuse across all loaders
     let config_root = config_path_option.as_deref()
         .and_then(|path| {
-            let content = std::fs::read_to_string(path).ok()?;
-            toml::from_str::<toml::Value>(&content).ok()
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("failed to read config file at {}: {}", path, e);
+                    return None;
+                }
+            };
+            match toml::from_str::<toml::Value>(&content) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    warn!("failed to parse config file at {}: {}", path, e);
+                    None
+                }
+            }
         });
 
     let regex_config = config_root.as_ref()
         .map(config::load_regex_classifier_config_from_value)
         .unwrap_or_default();
-    let regex_enabled = regex_config.enabled;
 
-    let (classifier, routing, model_costs, baseline_model) = {
-        let (routing_map, fallback_entry) = config::load_routing();
-        let model_costs = config::build_model_costs(&routing_map);
-        let baseline_model =
-            config::env_or_default("BASELINE_MODEL", intent_classifier::DEFAULT_MODEL_COMPLEX);
-        let categories = config_root.as_ref()
-            .and_then(|root| config::load_categories_from_value(root).ok())
-            .unwrap_or_else(intent_classifier::hardcoded_categories);
-        if !regex_enabled {
-            info!("Regex classifier disabled via config");
-            (
-                None,
-                Arc::new(HashMap::new()),
-                model_costs,
-                baseline_model,
-            )
-        } else {
-            match intent_classifier::RegexClassifier::from_env(
-                routing_map.clone(),
-                fallback_entry.clone(),
-                intent_classifier::SHORT_PROMPT_LEN,
-                categories.clone(),
-            ) {
-                Ok(regex_classifier) => {
-                    info!("Regex classifier initialized");
-                    let chain = intent_classifier::ClassifierChain::new(vec![Arc::new(
-                        regex_classifier,
-                    )]);
-                    let classifier = Arc::new(chain);
-                    let mut merged_routing = HashMap::new();
-                    for backend in classifier.backends().iter() {
-                        if let Some(r) = backend.get_routing() {
-                            merged_routing.extend(r.clone());
-                        }
-                    }
-                    let routing = Arc::new(merged_routing);
-                    (Some(classifier), routing, model_costs, baseline_model)
-                }
-                Err(e) => {
-                    warn!("intent classification disabled: {e}");
-                    (
-                        None,
-                        Arc::new(HashMap::new()),
-                        intent_classifier::ModelCosts::empty(),
-                        String::new(),
-                    )
-                }
-            }
-        }
-    };
-    let classify_db_log = std::env::var("CLASSIFY_DB_LOG")
-        .ok()
-        .and_then(|v| v.parse::<bool>().ok())
-        .unwrap_or(false);
+    // Load global classifiers config
+    let classifiers_config = config_root.as_ref()
+        .map(config::load_classifiers_config_from_value)
+        .unwrap_or_default();
+
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .expect("reqwest client should build");
 
-    // If LLM classifier is configured, add it to the chain
-    let (classifier, routing) = if let Some(llm_config) = config_root.as_ref()
-        .and_then(|root| config::load_llm_classifier_config_from_value(root))
-    {
+    let classify_db_log = std::env::var("CLASSIFY_DB_LOG")
+        .ok()
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(false);
+
+    let (classifier, routing, model_costs, baseline_model) = {
         let categories = config_root.as_ref()
             .and_then(|root| config::load_categories_from_value(root).ok())
             .unwrap_or_else(intent_classifier::hardcoded_categories);
-        let llm_classifier = intent_classifier::LLMClassifier::new(
-            llm_config,
-            http_client.clone(),
-            categories,
-        );
-        info!(
-            "LLM classifier enabled: model={}, endpoint={}",
-            llm_classifier.model, llm_classifier.endpoint
-        );
-        if let Some(chain) = classifier {
-            // Add LLMClassifier as second backend in the chain
-            let mut backends = chain.backends().to_vec();
-            backends.push(Arc::new(llm_classifier));
-            let new_chain = intent_classifier::ClassifierChain::new(backends);
-            let mut merged_routing = HashMap::new();
-            for backend in new_chain.backends().iter() {
-                if let Some(r) = backend.get_routing() {
-                    merged_routing.extend(r.clone());
+        let (routing_map, fallback_entry) = if let Some(root) = config_root.as_ref() {
+            match config::routing_from_value(root) {
+                Ok((map, fallback)) => (map, fallback),
+                Err(e) => {
+                    warn!("routing config parsing failed: {}; using hardcoded routing defaults", e);
+                    config::hardcoded_routing(&categories)
                 }
             }
-            (Some(Arc::new(new_chain)), Arc::new(merged_routing))
         } else {
-            // No regex classifier (either disabled or failed to build)
-            if regex_enabled {
-                warn!("Regex classifier failed to build; falling back to LLM-only classification");
-            } else {
-                info!("LLM classifier is the only classification backend (regex disabled)");
-            }
-            let new_chain = intent_classifier::ClassifierChain::new(vec![Arc::new(llm_classifier)]);
-            let mut merged_routing = HashMap::new();
-            for backend in new_chain.backends().iter() {
-                if let Some(r) = backend.get_routing() {
-                    merged_routing.extend(r.clone());
+            config::hardcoded_routing(&categories)
+        };
+        let model_costs = config::build_model_costs(&routing_map);
+        let baseline_model =
+            config::env_or_default("BASELINE_MODEL", intent_classifier::DEFAULT_MODEL_COMPLEX);
+        if !classifiers_config.enabled {
+            info!("All classifiers disabled via config");
+            (None, Arc::new(HashMap::new()), model_costs, baseline_model)
+        } else {
+            let mut backends: Vec<Arc<dyn intent_classifier::IntentClassify + Send + Sync>> = Vec::new();
+
+            for name in &classifiers_config.order {
+                match name.as_str() {
+                    "regex" => {
+                        if regex_config.enabled {
+                            match intent_classifier::RegexClassifier::from_env(
+                                routing_map.clone(),
+                                fallback_entry.clone(),
+                                intent_classifier::SHORT_PROMPT_LEN,
+                                categories.clone(),
+                            ) {
+                                Ok(c) => {
+                                    info!("Regex classifier initialized");
+                                    backends.push(Arc::new(c));
+                                }
+                                Err(e) => {
+                                    warn!("RegexClassifier disabled: {e}");
+                                }
+                            }
+                        }
+                    }
+                    "llm" => {
+                        if let Some(llm_config) = config_root.as_ref()
+                            .and_then(config::load_llm_classifier_config_from_value)
+                        {
+                            let llm = intent_classifier::LLMClassifier::new(
+                                llm_config,
+                                http_client.clone(),
+                                categories.clone(),
+                            );
+                            info!(
+                                "LLM classifier enabled: model={}, endpoint={}",
+                                llm.model, llm.endpoint
+                            );
+                            backends.push(Arc::new(llm));
+                        }
+                    }
+                    unknown => {
+                        warn!("unknown classifier in order: '{unknown}'");
+                    }
                 }
             }
-            (Some(Arc::new(new_chain)), Arc::new(merged_routing))
+
+            if backends.is_empty() {
+                warn!("no classifier backends enabled");
+                (None, Arc::new(HashMap::new()), model_costs, baseline_model)
+            } else {
+                let chain = intent_classifier::ClassifierChain::new(backends);
+                let mut merged_routing = HashMap::new();
+                for backend in chain.backends().iter() {
+                    if let Some(r) = backend.get_routing() {
+                        merged_routing.extend(r.clone());
+                    }
+                }
+                let routing = Arc::new(merged_routing);
+                (Some(Arc::new(chain)), routing, model_costs, baseline_model)
+            }
         }
-    } else {
-        debug!("LLM classifier not configured or disabled");
-        (classifier, routing)
     };
 
     let app_state = Arc::new(AppState {
@@ -529,8 +530,7 @@ async fn completion_handler(
                 .collect::<String>()
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"")
-                .replace('\n', " ")
-                .replace('\r', " ");
+                .replace(['\n', '\r'], " ");
             let sse_error = format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", error_text);
             let mut resp = Response::new(Body::from(sse_error));
             *resp.status_mut() = upstream_status;
@@ -568,7 +568,7 @@ async fn completion_handler(
                         match chunk {
                             Some(Ok(bytes)) => { if tx.send(bytes).await.is_err() { break; } }
                             Some(Err(e)) => {
-                                let sanitized = e.to_string().replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ").replace('\r', " ");
+                                let sanitized = e.to_string().replace('\\', "\\\\").replace('"', "\\\"").replace(['\n', '\r'], " ");
                                 let _ = tx.send(Bytes::from(
                                     format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", sanitized)
                                 )).await;
@@ -587,7 +587,7 @@ async fn completion_handler(
         });
 
         let body = Body::from_stream(
-            tokio_stream::wrappers::ReceiverStream::new(rx).map(|bytes| Ok::<_, Infallible>(bytes)),
+            tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, Infallible>),
         );
 
         let mut resp = Response::new(body);
@@ -615,8 +615,7 @@ async fn completion_handler(
                             .chars()
                             .take(512)
                             .collect::<String>()
-                            .replace('\n', " ")
-                            .replace('\r', " ");
+                            .replace(['\n', '\r'], " ");
                         break serde_json::json!({
                             "error": "upstream_error",
                             "status": upstream_status.as_u16(),
@@ -631,8 +630,7 @@ async fn completion_handler(
                         .chars()
                         .take(512)
                         .collect::<String>()
-                        .replace('\n', " ")
-                        .replace('\r', " ");
+                            .replace(['\n', '\r'], " ");
                     break serde_json::json!({
                         "error": "upstream_error",
                         "status": upstream_status.as_u16(),
