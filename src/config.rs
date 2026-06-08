@@ -161,8 +161,13 @@ fn load_categories_from_file(path: &str) -> Result<Vec<CategoryConfig>, String> 
         .map_err(|e| format!("Cannot read {path}: {e}"))?;
     let root: toml::Value = toml::from_str(&content)
         .map_err(|e| format!("Invalid TOML in {path}: {e}"))?;
+    load_categories_from_value(&root)
+}
+
+/// Load categories from a parsed toml::Value.
+pub(crate) fn load_categories_from_value(root: &toml::Value) -> Result<Vec<CategoryConfig>, String> {
     let table = root.as_table()
-        .ok_or_else(|| format!("Root must be a table in {path}"))?;
+        .ok_or_else(|| "Root must be a table".to_string())?;
 
     let cats_array = match table.get("categories") {
         Some(toml::Value::Array(arr)) => arr,
@@ -221,15 +226,28 @@ impl Default for RegexClassifierConfig {
 pub(crate) fn load_regex_classifier_config(path: &str) -> RegexClassifierConfig {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return RegexClassifierConfig::default(),
+        Err(e) => {
+            tracing::warn!("Cannot read config for regex classifier: {e}");
+            return RegexClassifierConfig::default();
+        }
     };
     let root: toml::Value = match toml::from_str(&content) {
         Ok(r) => r,
-        Err(_) => return RegexClassifierConfig::default(),
+        Err(e) => {
+            tracing::warn!("Invalid TOML for regex classifier section: {e}");
+            return RegexClassifierConfig::default();
+        }
     };
+    load_regex_classifier_config_from_value(&root)
+}
+
+pub(crate) fn load_regex_classifier_config_from_value(root: &toml::Value) -> RegexClassifierConfig {
     let table = match root.as_table() {
         Some(t) => t,
-        None => return RegexClassifierConfig::default(),
+        None => {
+            tracing::warn!("Config file root is not a table for regex classifier");
+            return RegexClassifierConfig::default();
+        }
     };
     let regex_section = match table.get("regex_classifier") {
         Some(toml::Value::Table(t)) => t,
@@ -269,10 +287,15 @@ pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConf
             return None;
         }
     };
+    load_llm_classifier_config_from_value(&root)
+}
+
+/// Load LLM classifier config from a parsed toml::Value.
+/// Returns None if section is absent or enabled = false.
+pub(crate) fn load_llm_classifier_config_from_value(root: &toml::Value) -> Option<LlmClassifierConfig> {
     let table = root.as_table()?;
     let llm_section = table.get("llm_classifier")?.as_table()?;
 
-    // Check enabled first
     let enabled = llm_section.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
     if !enabled {
         return None;
@@ -284,15 +307,11 @@ pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConf
         .unwrap_or("gpt-4o-mini")
         .to_string();
 
-// NOTE: LLM classifier requires explicit endpoint configuration (no default).
-        // Unlike routing which has provider-specific defaults, LLM classifiers must
-        // always specify their endpoint — an empty default ensures misconfiguration
-        // fails loudly rather than silently routing to the wrong provider.
-        let endpoint = llm_section
-            .get("endpoint")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+    let endpoint = llm_section
+        .get("endpoint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     let api_key_env = llm_section
         .get("api_key_env")
@@ -311,10 +330,10 @@ pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConf
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let timeout_secs = llm_section
+    let timeout_secs = (llm_section
         .get("timeout_secs")
         .and_then(|v| v.as_integer())
-        .unwrap_or(3) as u64;
+        .unwrap_or(3) as u64).max(1);
 
     Some(LlmClassifierConfig {
         enabled,

@@ -2,10 +2,10 @@
 # Implementation Review: LLM Classifier Backend (S-09)
 
 - **Plan**: context/changes/llm-classifier/plan.md
-- **Scope**: Phase 1-4 of 4
-- **Date**: 2026-06-07
+- **Scope**: Full Plan (4 phases + extension)
+- **Date**: 2026-06-08
 - **Verdict**: APPROVED
-- **Findings**: 0 critical, 1 warning, 5 observations
+- **Findings**: 0 critical | 3 warnings | 5 observations
 
 ## Verdicts
 
@@ -13,86 +13,89 @@
 |-----------|---------|
 | Plan Adherence | PASS |
 | Scope Discipline | PASS |
-| Safety & Quality | PASS |
+| Safety & Quality | WARNING |
 | Architecture | PASS |
-| Pattern Consistency | PASS |
+| Pattern Consistency | WARNING |
 | Success Criteria | PASS |
 
 ## Findings
 
-### F1 — Config silently ignores parse errors
+### F1 — load_regex_classifier_config silent fallback
+
+- **Severity**: ⚠️ WARNING
+- **Impact**: 🏃 LOW — quick decision; fix is obvious and narrowly scoped
+- **Dimension**: Pattern Consistency
+- **Location**: src/config.rs:222-239
+- **Detail**: Function silently falls back to defaults on file read/parse errors without logging, violating lessons.md "Log operational failures before falling back."
+- **Fix**: Added `tracing::warn!` before each `return RegexClassifierConfig::default()` in the error arms.
+- **Decision**: FIXED
+
+### F2 — Regex failure unnecessarily disables LLM classifier
 
 - **Severity**: ⚠️ WARNING
 - **Impact**: 🔎 MEDIUM — real tradeoff; pause to reason through it
 - **Dimension**: Safety & Quality
-- **Location**: src/config.rs:222
-- **Detail**: `load_llm_classifier_config` uses `.ok()?` on both `read_to_string` and `toml::from_str`, silently ignoring all errors. A user who uncomments `[llm_classifier]` in config.toml but has a typo will get no LLM classifier with no indication why.
-- **Fix**: Log a warning when the section is present but fails to parse, similar to `load_categories` at config.rs:152-155.
-  - Strength: Matches existing error handling pattern in the same module; provides actionable feedback to operators.
-  - Tradeoff: Minor — add 2-3 lines of logging.
-  - Confidence: HIGH — same pattern exists in nearby code.
-  - Blind spot: None significant.
-- **Decision**: FIXED — Added `tracing::warn!` logs for read/parse failures, matching `load_categories` pattern
+- **Location**: src/main.rs:161-163
+- **Detail**: When regex_enabled=true but RegexClassifier::from_env fails, code disabled LLM classifier too. LLM could serve as sole backend.
+- **Fix**: Removed the early-return guard; regex failure now falls through to LLM-only path with a warning.
+- **Decision**: FIXED
 
-### F2 — enabled field stored but never read
+### F3 — test.sh code duplication with run.sh
 
-- **Severity**: ℹ️ OBSERVATION
-- **Impact**: 🏃 LOW — quick decision; fix is obvious and narrowly scoped
-- **Dimension**: Safety & Quality
-- **Location**: src/config.rs:210
-- **Detail**: The `enabled` field is read at line 229 to decide whether to return None early, then stored in the struct at line 269, but never read again by callers. The `dead_code` warning indicates it's unused after construction.
-- **Fix**: Remove the `enabled` field from `LlmClassifierConfig`, or add `#[allow(dead_code)]` if you intend to use it later.
-- **Decision**: FIXED — Added `tracing::warn!` logs for read/parse failures, matching `load_categories` pattern
+- **Severity**: ⚠️ WARNING
+- **Impact**: 🔬 HIGH — architectural stakes; think carefully before deciding
+- **Dimension**: Pattern Consistency
+- **Location**: manual-test/test.sh vs manual-test/run.sh
+- **Detail**: test.sh (1008 lines) duplicates infrastructure from run.sh (start_server, stop_server, cleanup, classify, logging). Minor inconsistencies between the two.
+- **Fix A (applied)**: Extracted shared infrastructure into manual-test/lib.sh, sourced by both test.sh and run.sh.
+- **Decision**: FIXED
 
-### F3 — for_kv_map clippy hint in new code
+### F4 — Dead _template_path parameter on build_llm_classifier_prompt
 
-- **Severity**: ℹ️ OBSERVATION
-- **Impact**: 🏃 LOW — quick decision; fix is obvious and narrowly scoped
-- **Dimension**: Safety & Quality
-- **Location**: src/config.rs:199
-- **Detail**: `load_llm_classifier_config` uses `for (_category, entry) in routing` but only needs `entry.values()`. This triggers a clippy warning.
-- **Fix**: Use `for entry in routing.values()` instead.
-- **Decision**: FIXED — Added `tracing::warn!` logs for read/parse failures, matching `load_categories` pattern
-
-### F4 — LLM response parsing is loose but acceptable
-
-- **Severity**: ℹ️ OBSERVATION
-- **Impact**: 🏃 LOW — quick decision; fix is obvious and narrowly scoped
-- **Dimension**: Safety & Quality
-- **Location**: src/intent_classifier.rs:286-310
-- **Detail**: `parse_response` uses `contains()` matching — "SYNTAX_FIX_SYNTAX_FIX" would match. The prompt instructs "Return ONLY the category name" but adversarial LLM responses could theoretically bypass this.
-- **Fix**: Consider enforcing a JSON response format with schema validation (`response_format: { type: "json_object" }`) for OpenAI APIs.
-- **Decision**: FIXED — Added `tracing::warn!` logs for read/parse failures, matching `load_categories` pattern
-
-### F5 — classify_sync vs plan's classify_internal naming
-
-- **Severity**: ℹ️ OBSERVATION
+- **Severity**: 🔍 OBSERVATION
 - **Impact**: 🏃 LOW — quick decision; fix is obvious and narrowly scoped
 - **Dimension**: Pattern Consistency
-- **Location**: src/intent_classifier.rs:587
-- **Detail**: Plan specified `classify_internal()` but implementation uses `classify_sync()`. Intent is preserved; only naming differs.
-- **Fix**: Rename to `classify_internal()` if consistency matters, or leave as-is since functionality is correct.
-- **Decision**: FIXED — Added `tracing::warn!` logs for read/parse failures, matching `load_categories` pattern
+- **Location**: src/intent_classifier.rs:326
+- **Detail**: Parameter is never used. File-reading logic lives in LLMClassifier::new instead.
+- **Fix**: Removed the parameter from signature and both call sites.
+- **Decision**: FIXED
 
-### F6 — NVIDIA_ENDPOINT_DEFAULT not used by LLM config
+### F5 — timeout_secs=0 invalid, no clamping
 
-- **Severity**: ℹ️ OBSERVATION
+- **Severity**: 🔍 OBSERVATION
 - **Impact**: 🏃 LOW — quick decision; fix is obvious and narrowly scoped
-- **Dimension**: Pattern Consistency
-- **Location**: src/config.rs:9
-- **Detail**: `NVIDIA_ENDPOINT_DEFAULT` is defined but `load_llm_classifier_config` uses empty string as endpoint default, not `NVIDIA_ENDPOINT_DEFAULT`. Inconsistency in defaults between routing and LLM classifier config.
-- **Fix**: Document the difference in behavior, or align defaults.
-- **Decision**: FIXED — Added `tracing::warn!` logs for read/parse failures, matching `load_categories` pattern
+- **Dimension**: Safety & Quality
+- **Location**: src/config.rs:327
+- **Detail**: Loading timeout_secs with unwrap_or(3). If user sets 0, Duration::from_secs(0) causes immediate timeout.
+- **Fix**: Added `.max(1)` clamp.
+- **Decision**: FIXED
 
-## Success Criteria Verification
+### F6 — Config.toml read multiple times during startup
 
-### Automated
-- ✅ `cargo build` — compiles cleanly (no warnings)
-- ✅ `cargo test` — 116 tests passed
-- ⚠️ `cargo clippy -D warnings` — 10 pre-existing warnings (not from this change)
+- **Severity**: 🔍 OBSERVATION
+- **Impact**: 🏃 LOW — quick decision; fix is obvious and narrowly scoped
+- **Dimension**: Architecture
+- **Location**: src/main.rs:73,138
+- **Detail**: load_regex_classifier_config, load_llm_classifier_config, and load_categories each read+parse config.toml separately.
+- **Fix**: Added `_from_value` variants to each loader; main.rs reads+parses config once and passes the value.
+- **Decision**: FIXED
 
-### Manual
-- ✅ Phase 3.4: Server with `[llm_classifier]` → "LLM classifier enabled" in logs
-- ✅ Phase 3.5: Server without section → regex-only works
-- ✅ Phase 3.6: Ambiguous prompt → LLM classifier fires
-- ⏳ Phase 4.4: Real LLM endpoint test — pending (manual verification)
+### F7 — Env var read on every classification call
+
+- **Severity**: 🔍 OBSERVATION
+- **Impact**: 🏃 LOW — quick decision; fix is obvious and narrowly scoped
+- **Dimension**: Performance
+- **Location**: src/intent_classifier.rs:228
+- **Detail**: std::env::var called on each classify_async call instead of resolving once at construction.
+- **Fix**: Resolved api_key in LLMClassifier::new and stored as self.api_key field.
+- **Decision**: FIXED
+
+### F8 — Active Groq endpoint in committed config.toml
+
+- **Severity**: 🔍 OBSERVATION
+- **Impact**: 🏃 LOW — quick decision; fix is obvious and narrowly scoped
+- **Dimension**: Security
+- **Location**: config.toml:16-22
+- **Detail**: Active (non-commented) [llm_classifier] pointing to Groq's production API.
+- **Fix**: Commented out the active block; kept both commented examples for OpenAI and Groq.
+- **Decision**: FIXED
