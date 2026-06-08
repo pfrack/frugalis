@@ -302,23 +302,23 @@ No migration needed — all new fields have defaults that preserve current behav
 
 #### Automated
 
-- [x] 2.1 Build passes: `cargo build`
-- [x] 2.2 Existing tests pass: `cargo test`
+- [x] 2.1 Build passes: `cargo build` — 4650318
+- [x] 2.2 Existing tests pass: `cargo test` — 4650318
 
 #### Manual
 
-- [x] 2.3 Default timeout_secs is 5
+- [x] 2.3 Default timeout_secs is 5 — 4650318
 
 ### Phase 3: Refactor main.rs
 
 #### Automated
 
-- [ ] 3.1 Build passes: `cargo build`
-- [ ] 3.2 Existing tests pass: `cargo test`
-- [ ] 3.3 Config option documented
+- [x] 3.1 Build passes: `cargo build`
+- [x] 3.2 Existing tests pass: `cargo test`
+- [x] 3.3 Config option documented
 
 #### Manual
 
-- [ ] 3.4 Default behavior unchanged
-- [ ] 3.5 Can disable all classifiers
-- [ ] 3.6 Can change backend order
+- [x] 3.4 Default behavior unchanged
+- [x] 3.5 Can disable all classifiers
+- [x] 3.6 Can change backend order

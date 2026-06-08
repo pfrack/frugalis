@@ -82,7 +82,21 @@ async fn main() {
     let regex_config = config_root.as_ref()
         .map(config::load_regex_classifier_config_from_value)
         .unwrap_or_default();
-    let regex_enabled = regex_config.enabled;
+
+    // Load global classifiers config
+    let classifiers_config = config_root.as_ref()
+        .map(config::load_classifiers_config_from_value)
+        .unwrap_or_default();
+
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .expect("reqwest client should build");
+
+    let classify_db_log = std::env::var("CLASSIFY_DB_LOG")
+        .ok()
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(false);
 
     let (classifier, routing, model_costs, baseline_model) = {
         let (routing_map, fallback_entry) = config::load_routing();
@@ -92,104 +106,70 @@ async fn main() {
         let categories = config_root.as_ref()
             .and_then(|root| config::load_categories_from_value(root).ok())
             .unwrap_or_else(intent_classifier::hardcoded_categories);
-        if !regex_enabled {
-            info!("Regex classifier disabled via config");
-            (
-                None,
-                Arc::new(HashMap::new()),
-                model_costs,
-                baseline_model,
-            )
+
+        if !classifiers_config.enabled {
+            info!("All classifiers disabled via config");
+            (None, Arc::new(HashMap::new()), model_costs, baseline_model)
         } else {
-            match intent_classifier::RegexClassifier::from_env(
-                routing_map.clone(),
-                fallback_entry.clone(),
-                intent_classifier::SHORT_PROMPT_LEN,
-                categories.clone(),
-            ) {
-                Ok(regex_classifier) => {
-                    info!("Regex classifier initialized");
-                    let chain = intent_classifier::ClassifierChain::new(vec![Arc::new(
-                        regex_classifier,
-                    )]);
-                    let classifier = Arc::new(chain);
-                    let mut merged_routing = HashMap::new();
-                    for backend in classifier.backends().iter() {
-                        if let Some(r) = backend.get_routing() {
-                            merged_routing.extend(r.clone());
+            let mut backends: Vec<Arc<dyn intent_classifier::IntentClassify + Send + Sync>> = Vec::new();
+
+            for name in &classifiers_config.order {
+                match name.as_str() {
+                    "regex" => {
+                        if regex_config.enabled {
+                            match intent_classifier::RegexClassifier::from_env(
+                                routing_map.clone(),
+                                fallback_entry.clone(),
+                                intent_classifier::SHORT_PROMPT_LEN,
+                                categories.clone(),
+                            ) {
+                                Ok(c) => {
+                                    info!("Regex classifier initialized");
+                                    backends.push(Arc::new(c));
+                                }
+                                Err(e) => {
+                                    warn!("RegexClassifier disabled: {e}");
+                                }
+                            }
                         }
                     }
-                    let routing = Arc::new(merged_routing);
-                    (Some(classifier), routing, model_costs, baseline_model)
-                }
-                Err(e) => {
-                    warn!("intent classification disabled: {e}");
-                    (
-                        None,
-                        Arc::new(HashMap::new()),
-                        intent_classifier::ModelCosts::empty(),
-                        String::new(),
-                    )
+                    "llm" => {
+                        if let Some(llm_config) = config_root.as_ref()
+                            .and_then(|root| config::load_llm_classifier_config_from_value(root))
+                        {
+                            let llm = intent_classifier::LLMClassifier::new(
+                                llm_config,
+                                http_client.clone(),
+                                categories.clone(),
+                            );
+                            info!(
+                                "LLM classifier enabled: model={}, endpoint={}",
+                                llm.model, llm.endpoint
+                            );
+                            backends.push(Arc::new(llm));
+                        }
+                    }
+                    unknown => {
+                        warn!("unknown classifier in order: '{unknown}'");
+                    }
                 }
             }
-        }
-    };
-    let classify_db_log = std::env::var("CLASSIFY_DB_LOG")
-        .ok()
-        .and_then(|v| v.parse::<bool>().ok())
-        .unwrap_or(false);
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .build()
-        .expect("reqwest client should build");
 
-    // If LLM classifier is configured, add it to the chain
-    let (classifier, routing) = if let Some(llm_config) = config_root.as_ref()
-        .and_then(|root| config::load_llm_classifier_config_from_value(root))
-    {
-        let categories = config_root.as_ref()
-            .and_then(|root| config::load_categories_from_value(root).ok())
-            .unwrap_or_else(intent_classifier::hardcoded_categories);
-        let llm_classifier = intent_classifier::LLMClassifier::new(
-            llm_config,
-            http_client.clone(),
-            categories,
-        );
-        info!(
-            "LLM classifier enabled: model={}, endpoint={}",
-            llm_classifier.model, llm_classifier.endpoint
-        );
-        if let Some(chain) = classifier {
-            // Add LLMClassifier as second backend in the chain
-            let mut backends = chain.backends().to_vec();
-            backends.push(Arc::new(llm_classifier));
-            let new_chain = intent_classifier::ClassifierChain::new(backends);
-            let mut merged_routing = HashMap::new();
-            for backend in new_chain.backends().iter() {
-                if let Some(r) = backend.get_routing() {
-                    merged_routing.extend(r.clone());
-                }
-            }
-            (Some(Arc::new(new_chain)), Arc::new(merged_routing))
-        } else {
-            // No regex classifier (either disabled or failed to build)
-            if regex_enabled {
-                warn!("Regex classifier failed to build; falling back to LLM-only classification");
+            if backends.is_empty() {
+                warn!("no classifier backends enabled");
+                (None, Arc::new(HashMap::new()), model_costs, baseline_model)
             } else {
-                info!("LLM classifier is the only classification backend (regex disabled)");
-            }
-            let new_chain = intent_classifier::ClassifierChain::new(vec![Arc::new(llm_classifier)]);
-            let mut merged_routing = HashMap::new();
-            for backend in new_chain.backends().iter() {
-                if let Some(r) = backend.get_routing() {
-                    merged_routing.extend(r.clone());
+                let chain = intent_classifier::ClassifierChain::new(backends);
+                let mut merged_routing = HashMap::new();
+                for backend in chain.backends().iter() {
+                    if let Some(r) = backend.get_routing() {
+                        merged_routing.extend(r.clone());
+                    }
                 }
+                let routing = Arc::new(merged_routing);
+                (Some(Arc::new(chain)), routing, model_costs, baseline_model)
             }
-            (Some(Arc::new(new_chain)), Arc::new(merged_routing))
         }
-    } else {
-        debug!("LLM classifier not configured or disabled");
-        (classifier, routing)
     };
 
     let app_state = Arc::new(AppState {

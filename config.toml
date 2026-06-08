@@ -1,6 +1,12 @@
+# Global classifiers configuration
+[classifiers]
+# enabled = true           # Master switch to enable/disable all classification
+# order = ["regex", "llm"] # Backend priority order (regex checked first, then llm)
+
 # Uncomment to disable regex classifier (enabled by default)
 # [regex_classifier]
 # enabled = true
+# timeout_secs = 5         # Regex classifier timeout in seconds
 
 # Uncomment to enable LLM classifier backend (Phase 2 of S-09)
 # [llm_classifier]
