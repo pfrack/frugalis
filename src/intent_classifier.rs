@@ -8,7 +8,9 @@ use regex::Regex;
 use regex::RegexSet;
 
 #[allow(unused_imports)]
-pub use crate::routing::{RouteEntry, ModelCosts, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX, DEFAULT_MODEL_READING};
+pub use crate::routing::{
+    ModelCosts, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX, DEFAULT_MODEL_READING,
+};
 
 /// Hardcoded default costs per 1M input tokens for known models.
 pub(crate) fn hardcoded_model_costs() -> HashMap<String, f64> {
@@ -183,7 +185,11 @@ pub struct LLMClassifier {
 }
 
 impl LLMClassifier {
-    pub fn new(config: LlmClassifierConfig, client: reqwest::Client, categories: Vec<CategoryConfig>) -> Self {
+    pub fn new(
+        config: LlmClassifierConfig,
+        client: reqwest::Client,
+        categories: Vec<CategoryConfig>,
+    ) -> Self {
         let prompt_template = if let Some(ref path) = config.prompt_template_path {
             match std::fs::read_to_string(path) {
                 Ok(contents) => contents,
@@ -196,8 +202,7 @@ impl LLMClassifier {
             build_llm_classifier_prompt(&categories)
         };
 
-        let api_key = std::env::var(&config.api_key_env)
-            .unwrap_or_else(|_| String::new());
+        let api_key = std::env::var(&config.api_key_env).unwrap_or_else(|_| String::new());
 
         Self {
             client,
@@ -234,10 +239,14 @@ impl LLMClassifier {
         let api_key = &self.api_key;
 
         if api_key.is_empty() {
-            tracing::warn!("LLM classifier API key environment variable {} is empty or unset", self.api_key_env);
+            tracing::warn!(
+                "LLM classifier API key environment variable {} is empty or unset",
+                self.api_key_env
+            );
         }
 
-        let request = self.client
+        let request = self
+            .client
             .post(&self.endpoint)
             .timeout(self.timeout)
             .header("Content-Type", "application/json");
@@ -262,9 +271,7 @@ impl LLMClassifier {
                 }
 
                 match response.json::<serde_json::Value>().await {
-                    Ok(json) => {
-                        self.parse_response(json)
-                    }
+                    Ok(json) => self.parse_response(json),
                     Err(e) => {
                         tracing::warn!("LLM classifier failed to parse response: {}", e);
                         ClassificationResult::fallback()
@@ -304,7 +311,10 @@ impl LLMClassifier {
                     }
                 }
                 // If no match found, return fallback
-                tracing::warn!("LLM classifier returned unknown category: {}", response_text);
+                tracing::warn!(
+                    "LLM classifier returned unknown category: {}",
+                    response_text
+                );
                 ClassificationResult::fallback()
             }
             None => {
@@ -442,10 +452,22 @@ const NEGATIVE: &[&str] = &[
 // ── Negative suppression metadata (parallel to NEGATIVE patterns) ──
 
 const NEGATIVE_META: &[NegativeMeta] = &[
-    NegativeMeta { suppressed: "COMPLEX_REASONING", penalty: 2 },
-    NegativeMeta { suppressed: "COMPLEX_REASONING", penalty: 2 },
-    NegativeMeta { suppressed: "SYNTAX_FIX",         penalty: 2 },
-    NegativeMeta { suppressed: "FILE_READING",       penalty: 2 },
+    NegativeMeta {
+        suppressed: "COMPLEX_REASONING",
+        penalty: 2,
+    },
+    NegativeMeta {
+        suppressed: "COMPLEX_REASONING",
+        penalty: 2,
+    },
+    NegativeMeta {
+        suppressed: "SYNTAX_FIX",
+        penalty: 2,
+    },
+    NegativeMeta {
+        suppressed: "FILE_READING",
+        penalty: 2,
+    },
 ];
 
 // ── Auth Header Lookup ──
@@ -480,7 +502,9 @@ fn sanitize(text: &str) -> String {
 
 // ── Pattern assembly ──
 
-fn build_all_patterns(categories: &[CategoryConfig]) -> (Vec<&'static str>, Vec<PatternMeta>, Range<usize>) {
+fn build_all_patterns(
+    categories: &[CategoryConfig],
+) -> (Vec<&'static str>, Vec<PatternMeta>, Range<usize>) {
     let mut patterns = Vec::new();
     let mut metadata = Vec::new();
 
@@ -489,25 +513,37 @@ fn build_all_patterns(categories: &[CategoryConfig]) -> (Vec<&'static str>, Vec<
             "FILE_READING" => {
                 for (i, p) in FILE_READING.iter().enumerate() {
                     patterns.push(*p);
-                    metadata.push(PatternMeta { category: "FILE_READING", weight: FR_WEIGHTS[i] });
+                    metadata.push(PatternMeta {
+                        category: "FILE_READING",
+                        weight: FR_WEIGHTS[i],
+                    });
                 }
             }
             "COMPLEX_REASONING" => {
                 for (i, p) in COMPLEX_REASONING.iter().enumerate() {
                     patterns.push(*p);
-                    metadata.push(PatternMeta { category: "COMPLEX_REASONING", weight: CR_WEIGHTS[i] });
+                    metadata.push(PatternMeta {
+                        category: "COMPLEX_REASONING",
+                        weight: CR_WEIGHTS[i],
+                    });
                 }
             }
             "SYNTAX_FIX" => {
                 for (i, p) in SYNTAX_FIX.iter().enumerate() {
                     patterns.push(*p);
-                    metadata.push(PatternMeta { category: "SYNTAX_FIX", weight: SF_WEIGHTS[i] });
+                    metadata.push(PatternMeta {
+                        category: "SYNTAX_FIX",
+                        weight: SF_WEIGHTS[i],
+                    });
                 }
             }
             "CASUAL" => {
                 for (i, p) in CASUAL.iter().enumerate() {
                     patterns.push(*p);
-                    metadata.push(PatternMeta { category: "CASUAL", weight: CA_WEIGHTS[i] });
+                    metadata.push(PatternMeta {
+                        category: "CASUAL",
+                        weight: CA_WEIGHTS[i],
+                    });
                 }
             }
             unknown => {
@@ -521,7 +557,10 @@ fn build_all_patterns(categories: &[CategoryConfig]) -> (Vec<&'static str>, Vec<
 
     for p in NEGATIVE.iter() {
         patterns.push(*p);
-        metadata.push(PatternMeta { category: "NEG", weight: 0 });
+        metadata.push(PatternMeta {
+            category: "NEG",
+            weight: 0,
+        });
     }
     let negative_idx = negative_start..(negative_start + NEG_COUNT);
 
@@ -529,7 +568,8 @@ fn build_all_patterns(categories: &[CategoryConfig]) -> (Vec<&'static str>, Vec<
 }
 
 fn fallback_category(categories: &[CategoryConfig]) -> &str {
-    categories.iter()
+    categories
+        .iter()
         .max_by_key(|c| c.priority)
         .map(|c| c.name.as_str())
         .unwrap_or("CASUAL")
@@ -556,7 +596,12 @@ impl RegexClassifier {
     /// Build the classifier from built-in patterns and environment configuration.
     /// Always succeeds — regex compilation errors are the only failure mode.
     /// When routing.toml is missing, hardcoded defaults are used.
-    pub fn from_env(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry, short_prompt_len: usize, categories: Vec<CategoryConfig>) -> Result<Self, String> {
+    pub fn from_env(
+        routing: HashMap<String, RouteEntry>,
+        fallback_entry: RouteEntry,
+        short_prompt_len: usize,
+        categories: Vec<CategoryConfig>,
+    ) -> Result<Self, String> {
         let (patterns, metadata, negative_idx) = build_all_patterns(&categories);
         let set = RegexSet::new(&patterns).map_err(|e| format!("regex compilation failed: {e}"))?;
 
@@ -572,7 +617,12 @@ impl RegexClassifier {
     }
 
     #[cfg(test)]
-    pub fn from_values(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry, short_prompt_len: usize, categories: Vec<CategoryConfig>) -> Self {
+    pub fn from_values(
+        routing: HashMap<String, RouteEntry>,
+        fallback_entry: RouteEntry,
+        short_prompt_len: usize,
+        categories: Vec<CategoryConfig>,
+    ) -> Self {
         let (patterns, metadata, negative_idx) = build_all_patterns(&categories);
         let set = RegexSet::new(&patterns).expect("built-in patterns should always compile");
         IntentClassifier {
@@ -622,7 +672,9 @@ impl RegexClassifier {
         }
 
         // Check thresholds per config-driven algorithm
-        let mut met: Vec<(&CategoryConfig, bool)> = self.categories.iter()
+        let mut met: Vec<(&CategoryConfig, bool)> = self
+            .categories
+            .iter()
             .map(|c| {
                 let score = *scores.get(c.name.as_str()).unwrap_or(&0);
                 (c, score >= c.threshold)
@@ -784,7 +836,9 @@ mod tests {
     #[tokio::test]
     async fn intent_classify_fallback_on_ambiguous() {
         let c = test_classifier();
-        let result = c.classify("please read this file and fix this bug and compilation error").await;
+        let result = c
+            .classify("please read this file and fix this bug and compilation error")
+            .await;
         assert_eq!(result.category, "CASUAL");
         assert_eq!(result.tier, ClassificationTier::Fallback);
     }
@@ -800,9 +854,14 @@ mod tests {
     async fn hardcoded_categories_match_test_routing_keys() {
         let classifier = test_classifier();
         let cats = hardcoded_categories();
-        let routing_keys: std::collections::HashSet<&str> = classifier.routing.keys().map(|s| s.as_str()).collect();
-        let cat_names: std::collections::HashSet<&str> = cats.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(routing_keys, cat_names, "test_classifier routing keys must match hardcoded_categories names");
+        let routing_keys: std::collections::HashSet<&str> =
+            classifier.routing.keys().map(|s| s.as_str()).collect();
+        let cat_names: std::collections::HashSet<&str> =
+            cats.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            routing_keys, cat_names,
+            "test_classifier routing keys must match hardcoded_categories names"
+        );
     }
 
     // ── ClassifierChain Tests ────────────────────────────────────────────────────
@@ -980,22 +1039,19 @@ mod tests {
 
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST)
-                .path("/v1/chat/completions");
-            then.status(200)
-                .json_body(serde_json::json!({
-                    "choices": [
-                        {
-                            "message": {
-                                "content": "SYNTAX_FIX"
-                            }
+            when.method(POST).path("/v1/chat/completions");
+            then.status(200).json_body(serde_json::json!({
+                "choices": [
+                    {
+                        "message": {
+                            "content": "SYNTAX_FIX"
                         }
-                    ]
-                }));
+                    }
+                ]
+            }));
         });
 
         let config = LlmClassifierConfig {
-
             model: "gpt-4o-mini".to_string(),
             endpoint: server.url("/v1/chat/completions"),
             api_key_env: "OPENAI_API_KEY".to_string(),
@@ -1007,7 +1063,7 @@ mod tests {
         let cats = hardcoded_categories();
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
-        
+
         let llm = LLMClassifier::new(config, client, cats);
         let result = llm.classify("fix this bug").await;
 
@@ -1021,16 +1077,13 @@ mod tests {
 
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST)
-                .path("/v1/chat/completions");
-            then.status(200)
-                .json_body(serde_json::json!({
-                    "choices": []
-                }));
+            when.method(POST).path("/v1/chat/completions");
+            then.status(200).json_body(serde_json::json!({
+                "choices": []
+            }));
         });
 
         let config = LlmClassifierConfig {
-
             model: "gpt-4o-mini".to_string(),
             endpoint: server.url("/v1/chat/completions"),
             api_key_env: "OPENAI_API_KEY".to_string(),
@@ -1053,7 +1106,6 @@ mod tests {
     #[tokio::test]
     async fn llm_classifier_network_error() {
         let config = LlmClassifierConfig {
-
             model: "gpt-4o-mini".to_string(),
             endpoint: "http://127.0.0.1:1/nonexistent".to_string(), // Invalid endpoint
             api_key_env: "OPENAI_API_KEY".to_string(),
@@ -1079,22 +1131,19 @@ mod tests {
 
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST)
-                .path("/v1/chat/completions");
-            then.status(200)
-                .json_body(serde_json::json!({
-                    "choices": [
-                        {
-                            "message": {
-                                "content": "UNKNOWN_CATEGORY"
-                            }
+            when.method(POST).path("/v1/chat/completions");
+            then.status(200).json_body(serde_json::json!({
+                "choices": [
+                    {
+                        "message": {
+                            "content": "UNKNOWN_CATEGORY"
                         }
-                    ]
-                }));
+                    }
+                ]
+            }));
         });
 
         let config = LlmClassifierConfig {
-
             model: "gpt-4o-mini".to_string(),
             endpoint: server.url("/v1/chat/completions"),
             api_key_env: "OPENAI_API_KEY".to_string(),

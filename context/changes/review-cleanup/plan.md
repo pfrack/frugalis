@@ -335,12 +335,12 @@ No schema changes. No config format changes (`RegexClassifierConfig.timeout_secs
 
 #### Automated
 
-- [ ] 1.1 `cargo test` passes all fast tests
-- [ ] 1.2 `cargo test slow_tests` passes keepalive test
+- [x] 1.1 `cargo test` passes all fast tests
+- [x] 1.2 `cargo test slow_tests` passes keepalive test
 - [ ] 1.3 New integration test: streaming success produces "streaming" + "ok" records
 - [ ] 1.4 New integration test: streaming failure produces "stream_error" record
-- [ ] 1.5 `cargo clippy` zero warnings
-- [ ] 1.6 `cargo fmt --check` passes
+- [x] 1.5 `cargo clippy` zero warnings
+- [x] 1.6 `cargo fmt --check` passes
 
 #### Manual
 
@@ -351,12 +351,12 @@ No schema changes. No config format changes (`RegexClassifierConfig.timeout_secs
 
 #### Automated
 
-- [ ] 2.1 `cargo test` passes all fast tests
-- [ ] 2.2 `cargo test routes_auth` passes
-- [ ] 2.3 `cargo test auth` passes
-- [ ] 2.4 `cargo test slow_tests` passes
-- [ ] 2.5 `cargo clippy` zero warnings
-- [ ] 2.6 `cargo fmt --check` passes
+- [x] 2.1 `cargo test` passes all fast tests
+- [x] 2.2 `cargo test routes_auth` passes
+- [x] 2.3 `cargo test auth` passes
+- [x] 2.4 `cargo test slow_tests` passes
+- [x] 2.5 `cargo clippy` zero warnings
+- [x] 2.6 `cargo fmt --check` passes
 
 #### Manual
 
@@ -370,11 +370,11 @@ No schema changes. No config format changes (`RegexClassifierConfig.timeout_secs
 
 #### Automated
 
-- [ ] 3.1 `cargo test` passes all tests (run twice to verify no env leak)
-- [ ] 3.2 `cargo test routes_auth` passes
-- [ ] 3.3 `cargo test slow_tests` passes
-- [ ] 3.4 `cargo clippy` zero warnings
-- [ ] 3.5 `cargo fmt --check` passes
+- [x] 3.1 `cargo test` passes all tests (run twice to verify no env leak)
+- [x] 3.2 `cargo test routes_auth` passes
+- [x] 3.3 `cargo test slow_tests` passes
+- [x] 3.4 `cargo clippy` zero warnings
+- [x] 3.5 `cargo fmt --check` passes
 
 #### Manual
 

@@ -15,15 +15,11 @@ pub trait CostProvider {
 
 /// Custom error type for inference query failures.
 #[derive(Debug, Clone)]
-pub enum QueryError {
-    Database(String), // Connection, query, or pool error
-}
+pub struct QueryError(pub String);
 
 impl std::fmt::Display for QueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Self::Database(msg) => write!(f, "Database error: {}", msg),
-        }
+        write!(f, "Database error: {}", self.0)
     }
 }
 
@@ -155,9 +151,9 @@ impl PersistenceConfig {
         let total_count: i64 = count_query
             .fetch_one(self.pool.as_ref())
             .await
-            .map_err(|e| QueryError::Database(e.to_string()))?
+            .map_err(|e| QueryError(e.to_string()))?
             .try_get(0)
-            .map_err(|e| QueryError::Database(e.to_string()))?;
+            .map_err(|e| QueryError(e.to_string()))?;
 
         // Execute data query.
         let mut data_query = sqlx::query(&data_sql);
@@ -172,7 +168,7 @@ impl PersistenceConfig {
             .bind(offset as i64)
             .fetch_all(self.pool.as_ref())
             .await
-            .map_err(|e| QueryError::Database(e.to_string()))?;
+            .map_err(|e| QueryError(e.to_string()))?;
 
         // Map rows to InferenceLog, formatting timestamps and durations.
         // Propagate any row extraction errors to fail fast on data issues.
@@ -194,7 +190,7 @@ impl PersistenceConfig {
                 })
             })
             .collect::<Result<Vec<_>, sqlx::Error>>()
-            .map_err(|e| QueryError::Database(e.to_string()))?;
+            .map_err(|e| QueryError(e.to_string()))?;
 
         Ok((records, total_count))
     }
@@ -219,7 +215,7 @@ impl PersistenceConfig {
         .bind(hours as i64)
         .fetch_all(self.pool.as_ref())
         .await
-        .map_err(|e| QueryError::Database(e.to_string()))?;
+        .map_err(|e| QueryError(e.to_string()))?;
 
         let mut summary_rows = Vec::<LatencySummaryRow>::new();
         let mut unclassified_count: i64 = 0;
@@ -285,7 +281,7 @@ impl PersistenceConfig {
         .bind(hours as i64)
         .fetch_all(self.pool.as_ref())
         .await
-        .map_err(|e| QueryError::Database(e.to_string()))?;
+        .map_err(|e| QueryError(e.to_string()))?;
 
         let mut total_actual_cost: f64 = 0.0;
         let mut total_chars_all: i64 = 0;

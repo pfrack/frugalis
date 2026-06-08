@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 use tracing::warn;
 
-use crate::intent_classifier::CategoryConfig;
+#[allow(unused_imports)]
+use crate::intent_classifier::{hardcoded_categories, CategoryConfig};
 use crate::routing::*;
 
 #[cfg(test)]
 pub(crate) const CONFIG_DEFAULT: &str = "config.toml";
 #[cfg(test)]
 pub(crate) const ROUTING_CONFIG_LEGACY: &str = "routing.toml";
-pub(crate) const NVIDIA_ENDPOINT_DEFAULT: &str = "https://integrate.api.nvidia.com/v1/chat/completions";
+pub(crate) const NVIDIA_ENDPOINT_DEFAULT: &str =
+    "https://integrate.api.nvidia.com/v1/chat/completions";
 
 pub(crate) fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -23,11 +25,10 @@ fn hardcoded_model_default(env_var: &str) -> &'static str {
     }
 }
 
-pub(crate) fn hardcoded_routing(categories: &[CategoryConfig]) -> (HashMap<String, RouteEntry>, RouteEntry) {
-    let endpoint = env_or_default(
-        "NVIDIA_ENDPOINT",
-        NVIDIA_ENDPOINT_DEFAULT,
-    );
+pub(crate) fn hardcoded_routing(
+    categories: &[CategoryConfig],
+) -> (HashMap<String, RouteEntry>, RouteEntry) {
+    let endpoint = env_or_default("NVIDIA_ENDPOINT", NVIDIA_ENDPOINT_DEFAULT);
     let mut routing = HashMap::new();
 
     for cat in categories {
@@ -150,8 +151,11 @@ pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
 
 /// Build routing map and fallback entry from a parsed TOML value.
 /// Returns (routing map, fallback entry). If the root is not a table, returns error.
-pub(crate) fn routing_from_value(root: &toml::Value) -> Result<(HashMap<String, RouteEntry>, RouteEntry), String> {
-    let table = root.as_table()
+pub(crate) fn routing_from_value(
+    root: &toml::Value,
+) -> Result<(HashMap<String, RouteEntry>, RouteEntry), String> {
+    let table = root
+        .as_table()
         .ok_or_else(|| "Root must be a table".to_string())?;
     let mut routing = HashMap::new();
     for (key, value) in table {
@@ -207,8 +211,7 @@ pub(crate) fn routing_from_value(root: &toml::Value) -> Result<(HashMap<String, 
 
 #[cfg(test)]
 pub(crate) fn load_categories() -> Vec<CategoryConfig> {
-    let path = std::env::var("CONFIG_PATH")
-        .unwrap_or_else(|_| CONFIG_DEFAULT.to_string());
+    let path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| CONFIG_DEFAULT.to_string());
     match load_categories_from_file(&path) {
         Ok(cats) => cats,
         Err(e) => {
@@ -220,17 +223,18 @@ pub(crate) fn load_categories() -> Vec<CategoryConfig> {
 
 #[cfg(test)]
 fn load_categories_from_file(path: &str) -> Result<Vec<CategoryConfig>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Cannot read {path}: {e}"))?;
-    let root: toml::Value = toml::from_str(&content)
-        .map_err(|e| format!("Invalid TOML in {path}: {e}"))?;
-    load_categories_from_value(&root)
-        .map_err(|e| format!("Error in {}: {}", path, e))
+    let content = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {path}: {e}"))?;
+    let root: toml::Value =
+        toml::from_str(&content).map_err(|e| format!("Invalid TOML in {path}: {e}"))?;
+    load_categories_from_value(&root).map_err(|e| format!("Error in {}: {}", path, e))
 }
 
 /// Load categories from a parsed toml::Value.
-pub(crate) fn load_categories_from_value(root: &toml::Value) -> Result<Vec<CategoryConfig>, String> {
-    let table = root.as_table()
+pub(crate) fn load_categories_from_value(
+    root: &toml::Value,
+) -> Result<Vec<CategoryConfig>, String> {
+    let table = root
+        .as_table()
         .ok_or_else(|| "Root must be a table".to_string())?;
 
     let cats_array = match table.get("categories") {
@@ -240,21 +244,33 @@ pub(crate) fn load_categories_from_value(root: &toml::Value) -> Result<Vec<Categ
 
     let mut categories = Vec::new();
     for (i, cat) in cats_array.iter().enumerate() {
-        let t = cat.as_table()
+        let t = cat
+            .as_table()
             .ok_or_else(|| format!("categories[{i}] must be a table"))?;
-        let name = t.get("name").and_then(|v| v.as_str())
+        let name = t
+            .get("name")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| format!("categories[{i}]: missing 'name'"))?
             .to_string();
-        let description = t.get("description").and_then(|v| v.as_str())
-            .unwrap_or("").to_string();
-        let threshold = t.get("threshold").and_then(|v| v.as_integer())
-            .unwrap_or(1) as u32;
-        let priority = t.get("priority").and_then(|v| v.as_integer())
-            .unwrap_or(99) as u8;
-        let model_env_var = t.get("model_env_var").and_then(|v| v.as_str())
+        let description = t
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let threshold = t.get("threshold").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+        let priority = t.get("priority").and_then(|v| v.as_integer()).unwrap_or(99) as u8;
+        let model_env_var = t
+            .get("model_env_var")
+            .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        categories.push(CategoryConfig { name, description, threshold, priority, model_env_var });
+        categories.push(CategoryConfig {
+            name,
+            description,
+            threshold,
+            priority,
+            model_env_var,
+        });
     }
 
     if categories.is_empty() {
@@ -306,7 +322,10 @@ pub(crate) fn load_classifiers_config_from_value(root: &toml::Value) -> Classifi
             return ClassifiersConfig::default();
         }
     };
-    let enabled = classifiers_section.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let enabled = classifiers_section
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let order = classifiers_section
         .get("order")
         .and_then(|v| v.as_array())
@@ -322,19 +341,13 @@ pub(crate) fn load_classifiers_config_from_value(root: &toml::Value) -> Classifi
 
 /// Configuration for the regex classifier backend.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub(crate) struct RegexClassifierConfig {
     pub enabled: bool,
-    /// Timeout for regex matching (seconds). Currently unused but reserved for future timeout support.
-    pub timeout_secs: u64,
 }
 
 impl Default for RegexClassifierConfig {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            timeout_secs: 5,
-        }
+        Self { enabled: true }
     }
 }
 
@@ -371,13 +384,11 @@ pub(crate) fn load_regex_classifier_config_from_value(root: &toml::Value) -> Reg
         Some(toml::Value::Table(t)) => t,
         _ => return RegexClassifierConfig::default(),
     };
-    let enabled = regex_section.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-    let timeout_secs = regex_section
-        .get("timeout_secs")
-        .and_then(|v| v.as_integer())
-        .unwrap_or(5)
-        .max(1) as u64;
-    RegexClassifierConfig { enabled, timeout_secs }
+    let enabled = regex_section
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    RegexClassifierConfig { enabled }
 }
 
 /// Configuration for the LLM classifier backend.
@@ -414,11 +425,17 @@ pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConf
 
 /// Load LLM classifier config from a parsed toml::Value.
 /// Returns None if section is absent or enabled = false.
-pub(crate) fn load_llm_classifier_config_from_value(root: &toml::Value) -> Option<LlmClassifierConfig> {
+pub(crate) fn load_llm_classifier_config_from_value(
+    root: &toml::Value,
+) -> Option<LlmClassifierConfig> {
     let table = root.as_table()?;
     let llm_section = table.get("llm_classifier")?.as_table()?;
 
-    if !llm_section.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !llm_section
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return None;
     }
 
@@ -454,7 +471,8 @@ pub(crate) fn load_llm_classifier_config_from_value(root: &toml::Value) -> Optio
     let timeout_secs = (llm_section
         .get("timeout_secs")
         .and_then(|v| v.as_integer())
-        .unwrap_or(3) as u64).max(1);
+        .unwrap_or(3) as u64)
+        .max(1);
 
     Some(LlmClassifierConfig {
         model,
@@ -519,12 +537,27 @@ api_key_env = ""
 
         assert_eq!(routing.len(), 2);
         assert_eq!(routing.get("SYNTAX_FIX").unwrap().model, "test-sf-model");
-        assert_eq!(routing.get("SYNTAX_FIX").unwrap().endpoint, "https://test.endpoint");
-        assert_eq!(routing.get("SYNTAX_FIX").unwrap().provider_type, "openai_compatible");
-        assert_eq!(routing.get("SYNTAX_FIX").unwrap().api_key_env, Some("TEST_API_KEY".to_string()));
-        assert_eq!(routing.get("SYNTAX_FIX").unwrap().cost_per_1m_input_tokens, Some(1.23));
+        assert_eq!(
+            routing.get("SYNTAX_FIX").unwrap().endpoint,
+            "https://test.endpoint"
+        );
+        assert_eq!(
+            routing.get("SYNTAX_FIX").unwrap().provider_type,
+            "openai_compatible"
+        );
+        assert_eq!(
+            routing.get("SYNTAX_FIX").unwrap().api_key_env,
+            Some("TEST_API_KEY".to_string())
+        );
+        assert_eq!(
+            routing.get("SYNTAX_FIX").unwrap().cost_per_1m_input_tokens,
+            Some(1.23)
+        );
 
-        assert_eq!(routing.get("COMPLEX_REASONING").unwrap().model, "test-cr-model");
+        assert_eq!(
+            routing.get("COMPLEX_REASONING").unwrap().model,
+            "test-cr-model"
+        );
     }
 
     #[test]
@@ -559,7 +592,11 @@ api_key_env = ""
 
         assert_eq!(routing.len(), cats.len());
         for cat in &cats {
-            assert!(routing.contains_key(cat.name.as_str()), "routing missing key for {}", cat.name);
+            assert!(
+                routing.contains_key(cat.name.as_str()),
+                "routing missing key for {}",
+                cat.name
+            );
             let entry = routing.get(cat.name.as_str()).unwrap();
             let expected_model = match cat.model_env_var.as_deref() {
                 Some("DEFAULT_MODEL") => DEFAULT_MODEL,
@@ -588,11 +625,17 @@ api_key_env = ""
                 std::env::remove_var("NVIDIA_ENDPOINT");
             }
         }
-        
+
         let _guard = EnvGuard;
-        std::env::set_var("NVIDIA_ENDPOINT", "https://custom.endpoint.example.com/v1/chat/completions");
+        std::env::set_var(
+            "NVIDIA_ENDPOINT",
+            "https://custom.endpoint.example.com/v1/chat/completions",
+        );
         let (_, fallback) = hardcoded_routing(&hardcoded_categories());
-        assert_eq!(fallback.endpoint, "https://custom.endpoint.example.com/v1/chat/completions");
+        assert_eq!(
+            fallback.endpoint,
+            "https://custom.endpoint.example.com/v1/chat/completions"
+        );
     }
 
     #[test]
@@ -713,7 +756,6 @@ priority = 1
 
         let cfg = load_regex_classifier_config(file_path.to_str().unwrap());
         assert!(cfg.enabled);
-        assert_eq!(cfg.timeout_secs, 5);
     }
 
     #[test]

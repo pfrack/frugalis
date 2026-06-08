@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::panic;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     body::{Body, Bytes},
@@ -11,17 +12,17 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use tokio_stream::StreamExt;
+use tokio_stream::{Stream, StreamExt};
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
 use tracing::{debug, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod auth;
-mod dashboard;
-mod routing;
 mod config;
+mod dashboard;
 mod intent_classifier;
 mod persistence;
+mod routing;
 
 use intent_classifier::IntentClassify;
 
@@ -73,35 +74,37 @@ async fn main() {
     let config_path_option = std::env::var("CONFIG_PATH").ok();
 
     // Read and parse config file once, reuse across all loaders
-    let config_root = config_path_option.as_deref()
-        .and_then(|path| {
-            let content = match std::fs::read_to_string(path) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("failed to read config file at {}: {}", path, e);
-                    return None;
-                }
-            };
-            match toml::from_str::<toml::Value>(&content) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    warn!("failed to parse config file at {}: {}", path, e);
-                    None
-                }
+    let config_root = config_path_option.as_deref().and_then(|path| {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("failed to read config file at {}: {}", path, e);
+                return None;
             }
-        });
+        };
+        match toml::from_str::<toml::Value>(&content) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                warn!("failed to parse config file at {}: {}", path, e);
+                None
+            }
+        }
+    });
 
-    let regex_config = config_root.as_ref()
+    let regex_config = config_root
+        .as_ref()
         .map(config::load_regex_classifier_config_from_value)
         .unwrap_or_default();
 
     // Load global classifiers config
-    let classifiers_config = config_root.as_ref()
+    let classifiers_config = config_root
+        .as_ref()
         .map(config::load_classifiers_config_from_value)
         .unwrap_or_default();
 
     let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("reqwest client should build");
 
@@ -111,14 +114,18 @@ async fn main() {
         .unwrap_or(false);
 
     let (classifier, routing, model_costs, baseline_model) = {
-        let categories = config_root.as_ref()
+        let categories = config_root
+            .as_ref()
             .and_then(|root| config::load_categories_from_value(root).ok())
             .unwrap_or_else(intent_classifier::hardcoded_categories);
         let (routing_map, fallback_entry) = if let Some(root) = config_root.as_ref() {
             match config::routing_from_value(root) {
                 Ok((map, fallback)) => (map, fallback),
                 Err(e) => {
-                    warn!("routing config parsing failed: {}; using hardcoded routing defaults", e);
+                    warn!(
+                        "routing config parsing failed: {}; using hardcoded routing defaults",
+                        e
+                    );
                     config::hardcoded_routing(&categories)
                 }
             }
@@ -132,7 +139,8 @@ async fn main() {
             info!("All classifiers disabled via config");
             (None, Arc::new(HashMap::new()), model_costs, baseline_model)
         } else {
-            let mut backends: Vec<Arc<dyn intent_classifier::IntentClassify + Send + Sync>> = Vec::new();
+            let mut backends: Vec<Arc<dyn intent_classifier::IntentClassify + Send + Sync>> =
+                Vec::new();
 
             for name in &classifiers_config.order {
                 match name.as_str() {
@@ -155,7 +163,8 @@ async fn main() {
                         }
                     }
                     "llm" => {
-                        if let Some(llm_config) = config_root.as_ref()
+                        if let Some(llm_config) = config_root
+                            .as_ref()
                             .and_then(config::load_llm_classifier_config_from_value)
                         {
                             let llm = intent_classifier::LLMClassifier::new(
@@ -314,6 +323,235 @@ fn json_response(status: StatusCode, body: String) -> Response<Body> {
     resp
 }
 
+fn upstream_error_json(status: u16, message: &str) -> String {
+    let escaped = message
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\n', '\r'], " ");
+    serde_json::json!({
+        "error": "upstream_error",
+        "status": status,
+        "message": escaped,
+    })
+    .to_string()
+}
+
+fn classification_only_json(result: &intent_classifier::ClassificationResult) -> String {
+    serde_json::json!({
+        "status": "classified",
+        "category": result.category,
+        "model": result.model,
+        "tier": format!("{:?}", result.tier),
+    })
+    .to_string()
+}
+
+fn build_upstream_request(
+    client: &reqwest::Client,
+    classification: &intent_classifier::ClassificationResult,
+    body: &Bytes,
+    api_key: &str,
+) -> Result<(bool, reqwest::RequestBuilder), String> {
+    let mut req_body: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON body: {e}"))?;
+
+    let client_wants_stream = req_body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if let serde_json::Value::Object(map) = &mut req_body {
+        map.insert(
+            "model".to_string(),
+            serde_json::Value::String(classification.model.clone()),
+        );
+    } else {
+        return Err("request body must be a JSON object".to_string());
+    }
+
+    let modified_body = serde_json::to_vec(&req_body).unwrap_or_else(|_| body.to_vec());
+
+    let auth_headers = intent_classifier::auth_headers_for(&classification.provider_type, api_key);
+
+    let mut req = client
+        .post(&classification.endpoint)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(modified_body);
+    for (name, value) in &auth_headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+
+    Ok((client_wants_stream, req))
+}
+
+async fn handle_buffered_response(
+    mut upstream_response: reqwest::Response,
+) -> (StatusCode, String) {
+    let upstream_status = upstream_response.status();
+    if !upstream_status.is_success() {
+        const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
+        let mut error_bytes = Vec::new();
+        let error_body = loop {
+            match upstream_response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if error_bytes.len() + chunk.len() > MAX_ERROR_BODY_BYTES {
+                        let error_text = String::from_utf8_lossy(&error_bytes)
+                            .chars()
+                            .take(512)
+                            .collect::<String>()
+                            .replace(['\n', '\r'], " ");
+                        break upstream_error_json(upstream_status.as_u16(), &error_text);
+                    }
+                    error_bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => {
+                    let error_text = String::from_utf8_lossy(&error_bytes)
+                        .chars()
+                        .take(512)
+                        .collect::<String>()
+                        .replace(['\n', '\r'], " ");
+                    break upstream_error_json(upstream_status.as_u16(), &error_text);
+                }
+                Err(e) => break upstream_error_json(502, &e.to_string()),
+            }
+        };
+        return (
+            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            error_body,
+        );
+    }
+
+    const MAX_UPSTREAM_BODY: usize = 10 * 1024 * 1024;
+    let mut upstream_body_bytes: Vec<u8> = Vec::new();
+    let upstream_body = loop {
+        match upstream_response.chunk().await {
+            Ok(Some(chunk)) => {
+                if upstream_body_bytes.len() + chunk.len() > MAX_UPSTREAM_BODY {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        upstream_error_json(502, "upstream response too large"),
+                    );
+                }
+                upstream_body_bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break String::from_utf8_lossy(&upstream_body_bytes).into_owned(),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    upstream_error_json(502, &e.to_string()),
+                );
+            }
+        }
+    };
+
+    let response_body = match serde_json::from_str::<serde_json::Value>(&upstream_body) {
+        Ok(value) => serde_json::to_string(&value).unwrap_or(upstream_body),
+        Err(_) => upstream_body,
+    };
+    (StatusCode::OK, response_body)
+}
+
+fn handle_streaming_response(
+    state: Arc<AppState>,
+    classification: intent_classifier::ClassificationResult,
+    body_str: String,
+    start: Instant,
+    byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
+) -> Response<Body> {
+    let channel_capacity = std::env::var("STREAMING_CHANNEL_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(channel_capacity);
+
+    log_classification(&state, &classification, &body_str, start, "streaming");
+
+    tokio::spawn(async move {
+        let keepalive_secs = std::env::var("KEEPALIVE_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15);
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(keepalive_secs));
+        let mut stream = byte_stream;
+        let mut stream_status = "ok";
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                chunk = stream.next() => {
+                    match chunk {
+                        Some(Ok(bytes)) => { if tx.send(bytes).await.is_err() { break; } }
+                        Some(Err(_e)) => {
+                            stream_status = "stream_error";
+                            let sanitized = _e.to_string().replace('\\', "\\\\").replace('"', "\\\"").replace(['\n', '\r'], " ");
+                            let _ = tx.send(Bytes::from(
+                                format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", sanitized)
+                            )).await;
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+                _ = interval.tick() => {
+                    if tx.send(Bytes::from_static(b": keepalive\n\n")).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        log_classification(&state, &classification, &body_str, start, stream_status);
+    });
+
+    let body =
+        Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, Infallible>));
+
+    let mut resp = Response::new(body);
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/event-stream"),
+    );
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    resp
+}
+
+async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Response {
+    const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
+    let mut error_bytes = Vec::new();
+    loop {
+        match upstream_response.chunk().await {
+            Ok(Some(chunk)) => {
+                if error_bytes.len() + chunk.len() > MAX_ERROR_BODY_BYTES {
+                    break;
+                }
+                error_bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    let error_text = String::from_utf8_lossy(&error_bytes)
+        .chars()
+        .take(512)
+        .collect::<String>()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\n', '\r'], " ");
+    let sse_error = format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", error_text);
+    let mut resp = Response::new(Body::from(sse_error));
+    *resp.status_mut() = upstream_response.status();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/event-stream"),
+    );
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    resp
+}
+
 /// Completion handler: classifies intent, optionally skips classification via
 /// X-Cerebrum-Category / X-Cerebrum-Model headers, resolves the API key from
 /// the env var named by the classification result, builds auth headers,
@@ -338,8 +576,8 @@ async fn completion_handler(
         );
     }
 
-    let body_str = match std::str::from_utf8(&body) {
-        Ok(s) => s,
+    let body_str: String = match std::str::from_utf8(&body) {
+        Ok(s) => s.to_string(),
         Err(_) => {
             return json_response(
                 StatusCode::BAD_REQUEST,
@@ -377,19 +615,13 @@ async fn completion_handler(
                     Some(c) => c.classify("").await,
                     None => intent_classifier::ClassificationResult::fallback(),
                 };
-                let response_body = serde_json::json!({
-                    "status": "classified",
-                    "category": fallback.category,
-                    "model": fallback.model,
-                    "tier": format!("{:?}", fallback.tier),
-                })
-                .to_string();
-                log_classification(&state, &fallback, body_str, start, "ok");
+                let response_body = classification_only_json(&fallback);
+                log_classification(&state, &fallback, &body_str, start, "ok");
                 return json_response(StatusCode::OK, response_body);
             }
         }
     } else {
-        let prompt = persistence::extract_last_user_message(body_str);
+        let prompt = persistence::extract_last_user_message(&body_str);
         match state.classifier.as_ref() {
             Some(c) => c.classify(&prompt).await,
             None => intent_classifier::ClassificationResult::fallback(),
@@ -399,14 +631,8 @@ async fn completion_handler(
     let client = match &state.http_client {
         Some(c) => c,
         None => {
-            let response_body = serde_json::json!({
-                "status": "classified",
-                "category": classification.category,
-                "model": classification.model,
-                "tier": format!("{:?}", classification.tier),
-            })
-            .to_string();
-            log_classification(&state, &classification, body_str, start, "ok");
+            let response_body = classification_only_json(&classification);
+            log_classification(&state, &classification, &body_str, start, "ok");
             return json_response(StatusCode::OK, response_body);
         }
     };
@@ -416,285 +642,68 @@ async fn completion_handler(
             Ok(key) if !key.is_empty() => key,
             _ => {
                 warn!("upstream API key env var '{env_name}' is missing or empty; degrading to classification-only response");
-                let response_body = serde_json::json!({
-                    "status": "classified",
-                    "category": classification.category,
-                    "model": classification.model,
-                    "tier": format!("{:?}", classification.tier),
-                })
-                .to_string();
-                log_classification(&state, &classification, body_str, start, "ok");
-                return json_response(StatusCode::OK, response_body);
+                log_classification(&state, &classification, &body_str, start, "ok");
+                return json_response(StatusCode::OK, classification_only_json(&classification));
             }
         },
         None => {
             warn!("no api_key_env configured for category '{}'; degrading to classification-only response", classification.category);
-            let response_body = serde_json::json!({
-                "status": "classified",
-                "category": classification.category,
-                "model": classification.model,
-                "tier": format!("{:?}", classification.tier),
-            })
-            .to_string();
-            log_classification(&state, &classification, body_str, start, "ok");
+            let response_body = classification_only_json(&classification);
+            log_classification(&state, &classification, &body_str, start, "ok");
             return json_response(StatusCode::OK, response_body);
         }
     };
 
     if classification.endpoint.is_empty() {
-        let error_body = serde_json::json!({
-            "error": "upstream_error",
-            "status": 502,
-            "message": "no endpoint configured",
-        })
-        .to_string();
-        log_classification(&state, &classification, body_str, start, "upstream_error");
-        return json_response(StatusCode::BAD_GATEWAY, error_body);
-    }
-
-    let mut req_body: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(e) => {
-            let error_body = serde_json::json!({
-                "error": "bad_request",
-                "status": 400,
-                "message": format!("invalid JSON body: {e}"),
-            })
-            .to_string();
-            log_classification(&state, &classification, body_str, start, "bad_request");
-            return json_response(StatusCode::BAD_REQUEST, error_body);
-        }
-    };
-    let client_wants_stream = req_body
-        .get("stream")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if let serde_json::Value::Object(map) = &mut req_body {
-        map.insert(
-            "model".to_string(),
-            serde_json::Value::String(classification.model.clone()),
-        );
-    } else {
+        log_classification(&state, &classification, &body_str, start, "upstream_error");
         return json_response(
-            StatusCode::BAD_REQUEST,
-            r#"{"error":"bad_request","message":"request body must be a JSON object"}"#.to_string(),
+            StatusCode::BAD_GATEWAY,
+            upstream_error_json(502, "no endpoint configured"),
         );
     }
-    let modified_body = serde_json::to_vec(&req_body).unwrap_or_else(|_| body.to_vec());
 
-    let auth_headers =
-        intent_classifier::auth_headers_for(&classification.provider_type, &api_key);
+    let (client_wants_stream, upstream_req) =
+        match build_upstream_request(client, &classification, &body, &api_key) {
+            Err(msg) => {
+                log_classification(&state, &classification, &body_str, start, "bad_request");
+                return json_response(StatusCode::BAD_REQUEST, upstream_error_json(400, &msg));
+            }
+            Ok(r) => r,
+        };
 
-    let mut upstream_req = client
-        .post(&classification.endpoint)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(modified_body);
-    for (name, value) in &auth_headers {
-        upstream_req = upstream_req.header(name.as_str(), value.as_str());
-    }
-
-    let mut upstream_response = match upstream_req.send().await {
+    let upstream_response = match upstream_req.send().await {
         Ok(resp) => resp,
         Err(e) => {
-            let error_body = serde_json::json!({
-                "error": "upstream_error",
-                "status": 502,
-                "message": e.to_string(),
-            })
-            .to_string();
-            log_classification(&state, &classification, body_str, start, "upstream_error");
-            return json_response(StatusCode::BAD_GATEWAY, error_body);
+            log_classification(&state, &classification, &body_str, start, "upstream_error");
+            return json_response(
+                StatusCode::BAD_GATEWAY,
+                upstream_error_json(502, &e.to_string()),
+            );
         }
     };
 
     if client_wants_stream {
-        let upstream_status = upstream_response.status();
-        if !upstream_status.is_success() {
-            const MAX_ERROR_BODY_BYTES: usize = 2 * 1024; // 2 KB, enough for ~512 chars
-            let mut error_bytes = Vec::new();
-            loop {
-                match upstream_response.chunk().await {
-                    Ok(Some(chunk)) => {
-                        if error_bytes.len() + chunk.len() > MAX_ERROR_BODY_BYTES {
-                            break;
-                        }
-                        error_bytes.extend_from_slice(&chunk);
-                    }
-                    Ok(None) => break,
-                    Err(_) => break,
-                }
-            }
-            let error_text = String::from_utf8_lossy(&error_bytes)
-                .chars()
-                .take(512)
-                .collect::<String>()
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace(['\n', '\r'], " ");
-            let sse_error = format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", error_text);
-            let mut resp = Response::new(Body::from(sse_error));
-            *resp.status_mut() = upstream_status;
-            resp.headers_mut().insert(
-                header::CONTENT_TYPE,
-                header::HeaderValue::from_static("text/event-stream"),
-            );
-            resp.headers_mut().insert(
-                header::CACHE_CONTROL,
-                header::HeaderValue::from_static("no-cache"),
-            );
-            log_classification(&state, &classification, body_str, start, "upstream_error");
-            return resp;
+        if !upstream_response.status().is_success() {
+            return handle_streaming_error(upstream_response).await;
         }
 
-        let byte_stream = upstream_response.bytes_stream();
-        let channel_capacity = std::env::var("STREAMING_CHANNEL_CAPACITY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(32);
-        let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(channel_capacity);
-
-        tokio::spawn(async move {
-            let keepalive_secs = std::env::var("KEEPALIVE_INTERVAL_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(15);
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(keepalive_secs));
-            let mut stream = byte_stream;
-            interval.tick().await;
-            loop {
-                tokio::select! {
-                    chunk = stream.next() => {
-                        match chunk {
-                            Some(Ok(bytes)) => { if tx.send(bytes).await.is_err() { break; } }
-                            Some(Err(e)) => {
-                                let sanitized = e.to_string().replace('\\', "\\\\").replace('"', "\\\"").replace(['\n', '\r'], " ");
-                                let _ = tx.send(Bytes::from(
-                                    format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", sanitized)
-                                )).await;
-                                break;
-                            }
-                            None => break,
-                        }
-                    }
-                    _ = interval.tick() => {
-                        if tx.send(Bytes::from_static(b": keepalive\n\n")).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        let body = Body::from_stream(
-            tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, Infallible>),
-        );
-
-        let mut resp = Response::new(body);
-        resp.headers_mut().insert(
-            header::CONTENT_TYPE,
-            header::HeaderValue::from_static("text/event-stream"),
-        );
-        resp.headers_mut().insert(
-            header::CACHE_CONTROL,
-            header::HeaderValue::from_static("no-cache"),
-        );
-        log_classification(&state, &classification, body_str, start, "ok");
-        return resp;
-    }
-
-    let upstream_status = upstream_response.status();
-    if !upstream_status.is_success() {
-        const MAX_ERROR_BODY_BYTES: usize = 2 * 1024; // 2 KB, enough for ~512 chars
-        let mut error_bytes = Vec::new();
-        let error_body = loop {
-            match upstream_response.chunk().await {
-                Ok(Some(chunk)) => {
-                    if error_bytes.len() + chunk.len() > MAX_ERROR_BODY_BYTES {
-                        let error_text = String::from_utf8_lossy(&error_bytes)
-                            .chars()
-                            .take(512)
-                            .collect::<String>()
-                            .replace(['\n', '\r'], " ");
-                        break serde_json::json!({
-                            "error": "upstream_error",
-                            "status": upstream_status.as_u16(),
-                            "message": error_text,
-                        })
-                        .to_string();
-                    }
-                    error_bytes.extend_from_slice(&chunk);
-                }
-                Ok(None) => {
-                    let error_text = String::from_utf8_lossy(&error_bytes)
-                        .chars()
-                        .take(512)
-                        .collect::<String>()
-                            .replace(['\n', '\r'], " ");
-                    break serde_json::json!({
-                        "error": "upstream_error",
-                        "status": upstream_status.as_u16(),
-                        "message": error_text,
-                    })
-                    .to_string();
-                }
-                Err(e) => {
-                    break serde_json::json!({
-                        "error": "upstream_error",
-                        "status": 502,
-                        "message": e.to_string(),
-                    })
-                    .to_string();
-                }
-            }
-        };
-        log_classification(&state, &classification, body_str, start, "upstream_error");
-        return json_response(
-            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-            error_body,
+        return handle_streaming_response(
+            state,
+            classification,
+            body_str,
+            start,
+            upstream_response.bytes_stream(),
         );
     }
 
-    const MAX_UPSTREAM_BODY: usize = 10 * 1024 * 1024; // 10 MB
-    let mut upstream_body_bytes: Vec<u8> = Vec::new();
-    let upstream_body = loop {
-        match upstream_response.chunk().await {
-            Ok(Some(chunk)) => {
-                if upstream_body_bytes.len() + chunk.len() > MAX_UPSTREAM_BODY {
-                    let error_body = serde_json::json!({
-                        "error": "upstream_error",
-                        "status": 502,
-                        "message": "upstream response too large",
-                    })
-                    .to_string();
-                    log_classification(&state, &classification, body_str, start, "upstream_error");
-                    return json_response(StatusCode::BAD_GATEWAY, error_body);
-                }
-                upstream_body_bytes.extend_from_slice(&chunk);
-            }
-            Ok(None) => break String::from_utf8_lossy(&upstream_body_bytes).into_owned(),
-            Err(e) => {
-                let error_body = serde_json::json!({
-                    "error": "upstream_error",
-                    "status": 502,
-                    "message": e.to_string(),
-                })
-                .to_string();
-                log_classification(&state, &classification, body_str, start, "upstream_error");
-                return json_response(StatusCode::BAD_GATEWAY, error_body);
-            }
-        }
+    let (status, body) = handle_buffered_response(upstream_response).await;
+    let log_status = if status == StatusCode::OK {
+        "ok"
+    } else {
+        "upstream_error"
     };
-
-    log_classification(&state, &classification, body_str, start, "ok");
-    let response_body = match serde_json::from_str::<serde_json::Value>(&upstream_body) {
-        Ok(value) => {
-            // Re-serialize to guarantee valid JSON escaping. Fallback to original on error.
-            serde_json::to_string(&value).unwrap_or(upstream_body)
-        }
-        Err(_) => upstream_body,
-    };
-    json_response(StatusCode::OK, response_body)
+    log_classification(&state, &classification, &body_str, start, log_status);
+    json_response(status, body)
 }
 
 /// Classify handler: extracts prompt, classifies intent, optionally logs a
@@ -761,6 +770,14 @@ mod tests {
     };
     use tower::util::ServiceExt;
 
+    /// Guard that removes an env var on drop to prevent test pollution.
+    struct EnvGuard(&'static str);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
     /// Build an `AppState` from a `RegexClassifier` and optional HTTP client.
     /// Mergeroutes from all classifier backends.
     fn make_test_app_state(
@@ -769,8 +786,7 @@ mod tests {
         model_costs: intent_classifier::ModelCosts,
         baseline_model: String,
     ) -> Arc<AppState> {
-        let classifier_chain =
-            intent_classifier::ClassifierChain::new(vec![Arc::new(classifier)]);
+        let classifier_chain = intent_classifier::ClassifierChain::new(vec![Arc::new(classifier)]);
         let classifier_arc = Some(Arc::new(classifier_chain));
         let mut merged_routing = std::collections::HashMap::new();
         if let Some(cls) = classifier_arc.as_ref() {
@@ -851,7 +867,12 @@ mod tests {
         };
         let regex_classifier =
             intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
-        let app_state = make_test_app_state(regex_classifier, None, intent_classifier::ModelCosts::empty(), String::new());
+        let app_state = make_test_app_state(
+            regex_classifier,
+            None,
+            intent_classifier::ModelCosts::empty(),
+            String::new(),
+        );
         build_app(auth_config, app_state)
     }
 
@@ -969,12 +990,18 @@ mod tests {
         };
         let regex_classifier =
             intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
-        let app_state = make_test_app_state(regex_classifier, None, intent_classifier::ModelCosts::empty(), String::new());
+        let app_state = make_test_app_state(
+            regex_classifier,
+            None,
+            intent_classifier::ModelCosts::empty(),
+            String::new(),
+        );
         build_app(auth_config, app_state)
     }
 
     #[tokio::test]
     async fn test_completion_does_not_include_enriched_fields() {
+        let _guard = EnvGuard("TEST_API_KEY");
         std::env::set_var("TEST_API_KEY", "sk-test-value-123");
         let response = test_app_with_enriched_classifier("test_provider", Some("TEST_API_KEY"))
             .oneshot(
@@ -1455,7 +1482,12 @@ mod tests {
         };
         let regex_classifier =
             intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
-        let app_state = make_test_app_state(regex_classifier, Some(client), intent_classifier::ModelCosts::empty(), String::new());
+        let app_state = make_test_app_state(
+            regex_classifier,
+            Some(client),
+            intent_classifier::ModelCosts::empty(),
+            String::new(),
+        );
         let app = build_app(auth_config, app_state);
         (app, server)
     }
@@ -1503,13 +1535,19 @@ mod tests {
         };
         let regex_classifier =
             intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
-        let app_state = make_test_app_state(regex_classifier, Some(client), intent_classifier::ModelCosts::empty(), String::new());
+        let app_state = make_test_app_state(
+            regex_classifier,
+            Some(client),
+            intent_classifier::ModelCosts::empty(),
+            String::new(),
+        );
         build_app(auth_config, app_state)
     }
 
     #[tokio::test]
     async fn test_upstream_returns_response() {
         let env = "TEST_UPSTREAM_RESP";
+        let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
         let (app, server) = test_app_with_http_client(env);
         let mock = server.mock(|when, then| {
@@ -1542,12 +1580,13 @@ mod tests {
             "expected upstream response body, got: {body}"
         );
         mock.assert();
-        std::env::remove_var(env);
+        // cleanup handled by EnvGuard
     }
 
     #[tokio::test]
     async fn test_upstream_request_includes_auth_header() {
         let env = "TEST_UPSTREAM_AUTH";
+        let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
         let (app, server) = test_app_with_http_client(env);
         let mock = server.mock(|when, then| {
@@ -1574,12 +1613,13 @@ mod tests {
             .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
         mock.assert();
-        std::env::remove_var(env);
+        // cleanup handled by EnvGuard
     }
 
     #[tokio::test]
     async fn test_upstream_request_includes_content_type_json() {
         let env = "TEST_UPSTREAM_CT";
+        let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
         let (app, server) = test_app_with_http_client(env);
         let mock = server.mock(|when, then| {
@@ -1606,12 +1646,13 @@ mod tests {
             .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
         mock.assert();
-        std::env::remove_var(env);
+        // cleanup handled by EnvGuard
     }
 
     #[tokio::test]
     async fn test_upstream_unreachable_returns_502() {
         let env = "TEST_UPSTREAM_DEAD";
+        let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
         let app = test_app_with_dead_endpoint(env);
         let response = app
@@ -1637,12 +1678,13 @@ mod tests {
             body.contains(r#""error":"upstream_error""#),
             "expected upstream_error in body, got: {body}"
         );
-        std::env::remove_var(env);
+        // cleanup handled by EnvGuard
     }
 
     #[tokio::test]
     async fn test_upstream_skip_classify_via_headers() {
         let env = "TEST_UPSTREAM_SKIP";
+        let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
         let (app, server) = test_app_with_http_client(env);
         let mock = server.mock(|when, then| {
@@ -1677,7 +1719,7 @@ mod tests {
             "expected skip-classify upstream response, got: {body}"
         );
         mock.assert();
-        std::env::remove_var(env);
+        // cleanup handled by EnvGuard
     }
 
     // ── SSE streaming tests ─────────────────────────────────────────────────
@@ -1685,6 +1727,7 @@ mod tests {
     #[tokio::test]
     async fn test_streaming_handler_returns_sse_content_type() {
         let env = "TEST_STREAM_CT";
+        let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
         let (app, server) = test_app_with_http_client(env);
         let sse_body =
@@ -1732,7 +1775,7 @@ mod tests {
             "expected [DONE] marker, got: {body}"
         );
         mock.assert();
-        std::env::remove_var(env);
+        // cleanup handled by EnvGuard
     }
 
     #[tokio::test]
@@ -1779,7 +1822,7 @@ mod tests {
             "expected [DONE] marker, got: {body}"
         );
         mock.assert();
-        std::env::remove_var(env);
+        // cleanup handled by EnvGuard
     }
 
     #[tokio::test]
@@ -1817,7 +1860,7 @@ mod tests {
             "expected SSE error event, got: {body}"
         );
         mock.assert();
-        std::env::remove_var(env);
+        // cleanup handled by EnvGuard
     }
 
     #[tokio::test]
@@ -1856,7 +1899,7 @@ mod tests {
             "expected SSE for stream:true"
         );
         mock.assert();
-        std::env::remove_var(env);
+        // cleanup handled by EnvGuard
     }
 
     #[tokio::test]
@@ -1895,7 +1938,7 @@ mod tests {
             "expected JSON for stream:false"
         );
         mock.assert();
-        std::env::remove_var(env);
+        // cleanup handled by EnvGuard
     }
 
     #[tokio::test]
@@ -1934,7 +1977,7 @@ mod tests {
             "expected JSON for absent stream field"
         );
         mock.assert();
-        std::env::remove_var(env);
+        // cleanup handled by EnvGuard
     }
 
     #[tokio::test]
@@ -2150,6 +2193,13 @@ mod slow_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::util::ServiceExt;
 
+    struct EnvGuard(&'static str);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
     // ── Keepalive test ──────────────────────────────────────────────────────
     // Uses a real TCP server that sends headers immediately, waits for the
     // keepalive interval, then sends body data. KEEPALIVE_INTERVAL_SECS=1
@@ -2179,8 +2229,10 @@ mod slow_tests {
     async fn test_streaming_keepalive_injected() {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         std::env::set_var("KEEPALIVE_INTERVAL_SECS", "1");
+        let _guard_ka = EnvGuard("KEEPALIVE_INTERVAL_SECS");
         let (url, server_handle) = spawn_slow_sse_server().await;
         let env = "TEST_STREAM_KA_SLOW";
+        let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
 
         let client = reqwest::Client::builder()
@@ -2276,7 +2328,5 @@ mod slow_tests {
             "expected upstream data after keepalive, got: {body}"
         );
         let _ = server_handle.await;
-        std::env::remove_var(env);
-        std::env::remove_var("KEEPALIVE_INTERVAL_SECS");
     }
 }
