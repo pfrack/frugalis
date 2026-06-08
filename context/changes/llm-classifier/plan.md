@@ -351,12 +351,18 @@ During implementation review, an additional comprehensive test framework was add
 - [x] 3.1 cargo build compiles cleanly
 - [x] 3.2 Existing tests pass (call sites updated to await)
 - [x] 3.3 cargo test all green
+- [x] 3.7 Regex classifier enabled/disabled toggle in config — unit tests
+- [x] 3.8 Build compiles with regex disabled config
+- [x] 3.9 All tests green with regex config
 
 #### Manual
 
 - [x] 3.4 Server with [llm_classifier] → "LLM classifier enabled" in logs — 8dfc5ee
 - [x] 3.5 Server without section → regex-only works — 8dfc5ee
 - [x] 3.6 Ambiguous prompt → LLM classifier fires — 8dfc5ee
+- [ ] 3.10 Server with [regex_classifier] enabled = false → "Regex classifier disabled" in logs
+- [ ] 3.11 Server with regex disabled + LLM enabled → only LLM classifier active
+- [ ] 3.12 Server with regex disabled + LLM disabled → no classifier (fallback only)
 
 ### Phase 4: Testing
 

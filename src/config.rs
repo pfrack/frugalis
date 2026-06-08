@@ -204,6 +204,41 @@ pub(crate) fn build_model_costs(routing: &HashMap<String, RouteEntry>) -> ModelC
     ModelCosts::from_costs(costs)
 }
 
+/// Configuration for the regex classifier backend.
+#[derive(Clone, Debug)]
+pub(crate) struct RegexClassifierConfig {
+    pub enabled: bool,
+}
+
+impl Default for RegexClassifierConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Load regex classifier config from config.toml.
+/// Returns default (enabled) if section is absent.
+pub(crate) fn load_regex_classifier_config(path: &str) -> RegexClassifierConfig {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return RegexClassifierConfig::default(),
+    };
+    let root: toml::Value = match toml::from_str(&content) {
+        Ok(r) => r,
+        Err(_) => return RegexClassifierConfig::default(),
+    };
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => return RegexClassifierConfig::default(),
+    };
+    let regex_section = match table.get("regex_classifier") {
+        Some(toml::Value::Table(t)) => t,
+        _ => return RegexClassifierConfig::default(),
+    };
+    let enabled = regex_section.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    RegexClassifierConfig { enabled }
+}
+
 /// Configuration for the LLM classifier backend.
 #[derive(Clone, Debug)]
 pub(crate) struct LlmClassifierConfig {
@@ -514,6 +549,50 @@ api_key_env = ""
         assert_eq!(costs.get("deepseek-chat"), Some(0.14));
         // Unknown model with override
         assert_eq!(costs.get("unknown-model"), Some(2.50));
+    }
+
+    #[test]
+    fn load_regex_classifier_config_default_enabled() {
+        // Section absent → default enabled
+        let toml_content = r#"
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_regex_default.toml");
+        std::fs::write(&file_path, toml_content).expect("write temp file");
+
+        let cfg = load_regex_classifier_config(file_path.to_str().unwrap());
+        assert!(cfg.enabled);
+    }
+
+    #[test]
+    fn load_regex_classifier_config_explicitly_disabled() {
+        let toml_content = r#"
+[regex_classifier]
+enabled = false
+
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_regex_disabled.toml");
+        std::fs::write(&file_path, toml_content).expect("write temp file");
+
+        let cfg = load_regex_classifier_config(file_path.to_str().unwrap());
+        assert!(!cfg.enabled);
+    }
+
+    #[test]
+    fn load_regex_classifier_config_missing_file_returns_default() {
+        let cfg = load_regex_classifier_config("/nonexistent/config.toml");
+        assert!(cfg.enabled);
     }
 
     #[test]
