@@ -260,11 +260,15 @@ pub(crate) fn load_classifiers_config_from_value(root: &toml::Value) -> Classifi
 #[derive(Clone, Debug)]
 pub(crate) struct RegexClassifierConfig {
     pub enabled: bool,
+    pub timeout_secs: u64,
 }
 
 impl Default for RegexClassifierConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            timeout_secs: 5,
+        }
     }
 }
 
@@ -301,7 +305,11 @@ pub(crate) fn load_regex_classifier_config_from_value(root: &toml::Value) -> Reg
         _ => return RegexClassifierConfig::default(),
     };
     let enabled = regex_section.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-    RegexClassifierConfig { enabled }
+    let timeout_secs = regex_section
+        .get("timeout_secs")
+        .and_then(|v| v.as_integer())
+        .unwrap_or(5) as u64;
+    RegexClassifierConfig { enabled, timeout_secs }
 }
 
 /// Configuration for the LLM classifier backend.
@@ -640,6 +648,7 @@ priority = 1
 
         let cfg = load_regex_classifier_config(file_path.to_str().unwrap());
         assert!(cfg.enabled);
+        assert_eq!(cfg.timeout_secs, 5);
     }
 
     #[test]

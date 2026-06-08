@@ -291,23 +291,23 @@ No migration needed — all new fields have defaults that preserve current behav
 
 #### Automated
 
-- [x] 1.1 Build passes: `cargo build`
-- [x] 1.2 Existing tests pass: `cargo test`
+- [x] 1.1 Build passes: `cargo build` — 3efd1e3
+- [x] 1.2 Existing tests pass: `cargo test` — 3efd1e3
 
 #### Manual
 
-- [x] 1.3 Config loader handles missing [classifiers] section
+- [x] 1.3 Config loader handles missing [classifiers] section — 3efd1e3
 
 ### Phase 2: Extend RegexClassifierConfig
 
 #### Automated
 
-- [ ] 2.1 Build passes: `cargo build`
-- [ ] 2.2 Existing tests pass: `cargo test`
+- [x] 2.1 Build passes: `cargo build`
+- [x] 2.2 Existing tests pass: `cargo test`
 
 #### Manual
 
-- [ ] 2.3 Default timeout_secs is 5
+- [x] 2.3 Default timeout_secs is 5
 
 ### Phase 3: Refactor main.rs
 
