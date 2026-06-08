@@ -161,8 +161,13 @@ fn load_categories_from_file(path: &str) -> Result<Vec<CategoryConfig>, String> 
         .map_err(|e| format!("Cannot read {path}: {e}"))?;
     let root: toml::Value = toml::from_str(&content)
         .map_err(|e| format!("Invalid TOML in {path}: {e}"))?;
+    load_categories_from_value(&root)
+}
+
+/// Load categories from a parsed toml::Value.
+pub(crate) fn load_categories_from_value(root: &toml::Value) -> Result<Vec<CategoryConfig>, String> {
     let table = root.as_table()
-        .ok_or_else(|| format!("Root must be a table in {path}"))?;
+        .ok_or_else(|| "Root must be a table".to_string())?;
 
     let cats_array = match table.get("categories") {
         Some(toml::Value::Array(arr)) => arr,
@@ -196,12 +201,149 @@ fn load_categories_from_file(path: &str) -> Result<Vec<CategoryConfig>, String> 
 
 pub(crate) fn build_model_costs(routing: &HashMap<String, RouteEntry>) -> ModelCosts {
     let mut costs = crate::intent_classifier::hardcoded_model_costs();
-    for (_category, entry) in routing {
+    for entry in routing.values() {
         if let Some(override_cost) = entry.cost_per_1m_input_tokens {
             costs.insert(entry.model.clone(), override_cost);
         }
     }
     ModelCosts::from_costs(costs)
+}
+
+/// Configuration for the regex classifier backend.
+#[derive(Clone, Debug)]
+pub(crate) struct RegexClassifierConfig {
+    pub enabled: bool,
+}
+
+impl Default for RegexClassifierConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Load regex classifier config from config.toml.
+/// Returns default (enabled) if section is absent.
+pub(crate) fn load_regex_classifier_config(path: &str) -> RegexClassifierConfig {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Cannot read config for regex classifier: {e}");
+            return RegexClassifierConfig::default();
+        }
+    };
+    let root: toml::Value = match toml::from_str(&content) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Invalid TOML for regex classifier section: {e}");
+            return RegexClassifierConfig::default();
+        }
+    };
+    load_regex_classifier_config_from_value(&root)
+}
+
+pub(crate) fn load_regex_classifier_config_from_value(root: &toml::Value) -> RegexClassifierConfig {
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => {
+            tracing::warn!("Config file root is not a table for regex classifier");
+            return RegexClassifierConfig::default();
+        }
+    };
+    let regex_section = match table.get("regex_classifier") {
+        Some(toml::Value::Table(t)) => t,
+        _ => return RegexClassifierConfig::default(),
+    };
+    let enabled = regex_section.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    RegexClassifierConfig { enabled }
+}
+
+/// Configuration for the LLM classifier backend.
+#[derive(Clone, Debug)]
+pub(crate) struct LlmClassifierConfig {
+    #[allow(dead_code)]
+    pub enabled: bool,
+    pub model: String,
+    pub endpoint: String,
+    pub api_key_env: String,
+    pub provider_type: String,
+    pub prompt_template_path: Option<String>,
+    pub timeout_secs: u64,
+}
+
+/// Load LLM classifier config from config.toml.
+/// Returns None if section is absent or enabled = false.
+pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConfig> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Cannot read config for LLM classifier: {e}");
+            return None;
+        }
+    };
+    let root: toml::Value = match toml::from_str(&content) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Invalid TOML for LLM classifier section: {e}");
+            return None;
+        }
+    };
+    load_llm_classifier_config_from_value(&root)
+}
+
+/// Load LLM classifier config from a parsed toml::Value.
+/// Returns None if section is absent or enabled = false.
+pub(crate) fn load_llm_classifier_config_from_value(root: &toml::Value) -> Option<LlmClassifierConfig> {
+    let table = root.as_table()?;
+    let llm_section = table.get("llm_classifier")?.as_table()?;
+
+    let enabled = llm_section.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+
+    let model = llm_section
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("gpt-4o-mini")
+        .to_string();
+
+    let endpoint = llm_section
+        .get("endpoint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let api_key_env = llm_section
+        .get("api_key_env")
+        .and_then(|v| v.as_str())
+        .unwrap_or("OPENAI_API_KEY")
+        .to_string();
+
+    let provider_type = llm_section
+        .get("provider_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("openai_compatible")
+        .to_string();
+
+    let prompt_template_path = llm_section
+        .get("prompt_template_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let timeout_secs = (llm_section
+        .get("timeout_secs")
+        .and_then(|v| v.as_integer())
+        .unwrap_or(3) as u64).max(1);
+
+    Some(LlmClassifierConfig {
+        enabled,
+        model,
+        endpoint,
+        api_key_env,
+        provider_type,
+        prompt_template_path,
+        timeout_secs,
+    })
 }
 
 #[cfg(test)]
@@ -426,5 +568,143 @@ api_key_env = ""
         assert_eq!(costs.get("deepseek-chat"), Some(0.14));
         // Unknown model with override
         assert_eq!(costs.get("unknown-model"), Some(2.50));
+    }
+
+    #[test]
+    fn load_regex_classifier_config_default_enabled() {
+        // Section absent → default enabled
+        let toml_content = r#"
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_regex_default.toml");
+        std::fs::write(&file_path, toml_content).expect("write temp file");
+
+        let cfg = load_regex_classifier_config(file_path.to_str().unwrap());
+        assert!(cfg.enabled);
+    }
+
+    #[test]
+    fn load_regex_classifier_config_explicitly_disabled() {
+        let toml_content = r#"
+[regex_classifier]
+enabled = false
+
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_regex_disabled.toml");
+        std::fs::write(&file_path, toml_content).expect("write temp file");
+
+        let cfg = load_regex_classifier_config(file_path.to_str().unwrap());
+        assert!(!cfg.enabled);
+    }
+
+    #[test]
+    fn load_regex_classifier_config_missing_file_returns_default() {
+        let cfg = load_regex_classifier_config("/nonexistent/config.toml");
+        assert!(cfg.enabled);
+    }
+
+    #[test]
+    fn load_llm_classifier_config_valid() {
+        let toml_content = r#"
+[llm_classifier]
+enabled = true
+model = "gpt-4o-mini"
+endpoint = "https://api.openai.com/v1/chat/completions"
+api_key_env = "MY_API_KEY"
+provider_type = "openai_compatible"
+timeout_secs = 5
+
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_llm_config.toml");
+        std::fs::write(&file_path, toml_content).expect("write temp file");
+
+        let result = load_llm_classifier_config(file_path.to_str().unwrap());
+        assert!(result.is_some());
+        let cfg = result.unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.model, "gpt-4o-mini");
+        assert_eq!(cfg.endpoint, "https://api.openai.com/v1/chat/completions");
+        assert_eq!(cfg.api_key_env, "MY_API_KEY");
+        assert_eq!(cfg.provider_type, "openai_compatible");
+        assert_eq!(cfg.timeout_secs, 5);
+    }
+
+    #[test]
+    fn load_llm_classifier_config_missing() {
+        let toml_content = r#"
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_llm_missing.toml");
+        std::fs::write(&file_path, toml_content).expect("write temp file");
+
+        let result = load_llm_classifier_config(file_path.to_str().unwrap());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_llm_classifier_config_disabled() {
+        let toml_content = r#"
+[llm_classifier]
+enabled = false
+model = "gpt-4o-mini"
+
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_llm_disabled.toml");
+        std::fs::write(&file_path, toml_content).expect("write temp file");
+
+        let result = load_llm_classifier_config(file_path.to_str().unwrap());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_llm_classifier_config_defaults() {
+        let toml_content = r#"
+[llm_classifier]
+enabled = true
+
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 1
+"#;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_llm_defaults.toml");
+        std::fs::write(&file_path, toml_content).expect("write temp file");
+
+        let result = load_llm_classifier_config(file_path.to_str().unwrap());
+        assert!(result.is_some());
+        let cfg = result.unwrap();
+        assert_eq!(cfg.model, "gpt-4o-mini");
+        assert_eq!(cfg.provider_type, "openai_compatible");
+        assert_eq!(cfg.timeout_secs, 3);
     }
 }

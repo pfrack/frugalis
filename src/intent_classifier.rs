@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
+use async_trait::async_trait;
+
 use regex::Regex;
 use regex::RegexSet;
 
@@ -91,8 +93,9 @@ pub enum ClassificationTier {
 }
 
 /// Trait for intent classification backends.
-pub trait IntentClassify {
-    fn classify(&self, prompt: &str) -> ClassificationResult;
+#[async_trait]
+pub trait IntentClassify: Send + Sync {
+    async fn classify(&self, prompt: &str) -> ClassificationResult;
 
     /// Returns a reference to this backend's routing table, if it has one.
     /// Used to construct the merged routing map in `AppState`.
@@ -101,9 +104,10 @@ pub trait IntentClassify {
     }
 }
 
+#[async_trait]
 impl IntentClassify for RegexClassifier {
-    fn classify(&self, prompt: &str) -> ClassificationResult {
-        self.classify(prompt)
+    async fn classify(&self, prompt: &str) -> ClassificationResult {
+        self.classify_internal(prompt)
     }
 
     fn get_routing(&self) -> Option<&std::collections::HashMap<String, RouteEntry>> {
@@ -140,15 +144,16 @@ impl ClassifierChain {
     }
 }
 
+#[async_trait]
 impl IntentClassify for ClassifierChain {
-    fn classify(&self, prompt: &str) -> ClassificationResult {
+    async fn classify(&self, prompt: &str) -> ClassificationResult {
         if self.backends.is_empty() {
             return ClassificationResult::fallback();
         }
 
         let mut last_result = None;
         for backend in &self.backends {
-            let result = backend.classify(prompt);
+            let result = backend.classify(prompt).await;
             if result.tier != ClassificationTier::Fallback {
                 return result;
             }
@@ -157,6 +162,186 @@ impl IntentClassify for ClassifierChain {
         // All backends returned Fallback; return the last one.
         last_result.unwrap_or_else(ClassificationResult::fallback)
     }
+}
+
+// ── LLM Classifier ────────────────────────────────────────────────────────────
+
+use crate::config::LlmClassifierConfig;
+
+/// LLM-based intent classifier that fires when RegexClassifier returns Fallback.
+pub struct LLMClassifier {
+    client: reqwest::Client,
+    pub model: String,
+    pub endpoint: String,
+    api_key_env: String,
+    api_key: String,
+    provider_type: String,
+    categories: Vec<CategoryConfig>,
+    prompt_template: String,
+    timeout: std::time::Duration,
+}
+
+impl LLMClassifier {
+    pub fn new(config: LlmClassifierConfig, client: reqwest::Client, categories: Vec<CategoryConfig>) -> Self {
+        let prompt_template = if let Some(ref path) = config.prompt_template_path {
+            match std::fs::read_to_string(path) {
+                Ok(contents) => contents,
+                Err(e) => {
+                    tracing::warn!("Failed to read prompt template at {}: {}", path, e);
+                    build_llm_classifier_prompt(&categories)
+                }
+            }
+        } else {
+            build_llm_classifier_prompt(&categories)
+        };
+
+        let api_key = std::env::var(&config.api_key_env)
+            .unwrap_or_else(|_| String::new());
+
+        Self {
+            client,
+            model: config.model,
+            endpoint: config.endpoint,
+            api_key_env: config.api_key_env,
+            api_key,
+            provider_type: config.provider_type,
+            categories,
+            prompt_template,
+            timeout: std::time::Duration::from_secs(config.timeout_secs),
+        }
+    }
+
+    async fn classify_async(&self, prompt: &str) -> ClassificationResult {
+        // Build the request body
+        let user_message = format!(
+            "Classify this prompt into one of the categories above:\n\n{}",
+            prompt
+        );
+
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": self.prompt_template},
+                {"role": "user", "content": user_message}
+            ],
+            "max_tokens": 20,
+            "temperature": 0.0,
+            "response_format": { "type": "json_object" }
+        });
+
+        // Use pre-resolved API key
+        let api_key = &self.api_key;
+
+        if api_key.is_empty() {
+            tracing::warn!("LLM classifier API key environment variable {} is empty or unset", self.api_key_env);
+        }
+
+        let request = self.client
+            .post(&self.endpoint)
+            .timeout(self.timeout)
+            .header("Content-Type", "application/json");
+
+        let request = if !api_key.is_empty() {
+            let headers = auth_headers_for(&self.provider_type, api_key);
+            let mut req = request;
+            for (key, value) in headers {
+                req = req.header(&key, &value);
+            }
+            req
+        } else {
+            request
+        };
+
+        // Send request
+        match request.json(&body).send().await {
+            Ok(response) => {
+                if !response.status().is_success() {
+                    tracing::warn!("LLM classifier returned non-success: {}", response.status());
+                    return ClassificationResult::fallback();
+                }
+
+                match response.json::<serde_json::Value>().await {
+                    Ok(json) => {
+                        self.parse_response(json)
+                    }
+                    Err(e) => {
+                        tracing::warn!("LLM classifier failed to parse response: {}", e);
+                        ClassificationResult::fallback()
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("LLM classifier request failed: {}", e);
+                ClassificationResult::fallback()
+            }
+        }
+    }
+
+    fn parse_response(&self, json: serde_json::Value) -> ClassificationResult {
+        let content = json
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str());
+
+        match content {
+            Some(response_text) => {
+                // Parse category from response - look for known category names
+                let response_upper = response_text.to_uppercase();
+                for cat in &self.categories {
+                    if response_upper.trim() == cat.name.to_uppercase() {
+                        return ClassificationResult {
+                            category: cat.name.clone(),
+                            model: self.model.clone(),
+                            endpoint: self.endpoint.clone(),
+                            tier: ClassificationTier::Regex,
+                            provider_type: self.provider_type.clone(),
+                            api_key_env: Some(self.api_key_env.clone()),
+                        };
+                    }
+                }
+                // If no match found, return fallback
+                tracing::warn!("LLM classifier returned unknown category: {}", response_text);
+                ClassificationResult::fallback()
+            }
+            None => {
+                tracing::warn!("LLM classifier response missing choices");
+                ClassificationResult::fallback()
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl IntentClassify for LLMClassifier {
+    async fn classify(&self, prompt: &str) -> ClassificationResult {
+        self.classify_async(prompt).await
+    }
+
+    fn get_routing(&self) -> Option<&std::collections::HashMap<String, RouteEntry>> {
+        None
+    }
+}
+
+/// Build the system prompt for LLM classification from category configs.
+pub fn build_llm_classifier_prompt(categories: &[CategoryConfig]) -> String {
+    let mut prompt = String::from("You are an intent classifier for a coding assistant. ");
+    prompt.push_str("Classify user prompts into exactly one of these categories:\n\n");
+
+    for cat in categories {
+        prompt.push_str(&format!("- {}: {}\n", cat.name, cat.description));
+    }
+
+    prompt.push_str("\nReturn ONLY the category name, nothing else. Examples:\n");
+    // 4 few-shot examples, one per category
+    prompt.push_str("- \"read the file src/main.rs\" -> FILE_READING\n");
+    prompt.push_str("- \"fix this compile error\" -> SYNTAX_FIX\n");
+    prompt.push_str("- \"design a distributed system\" -> COMPLEX_REASONING\n");
+    prompt.push_str("- \"hello how are you\" -> CASUAL\n");
+
+    prompt
 }
 
 // ── Internal Types ──
@@ -280,7 +465,7 @@ pub fn auth_headers_for(provider_type: &str, api_key: &str) -> Vec<(String, Stri
 
 fn code_block_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?s)```[^`]*```").unwrap())
+    RE.get_or_init(|| Regex::new(r"(?s)```[^`]*```").expect("code_block_re regex must be valid"))
 }
 
 // ── Prompt Sanitization ──
@@ -402,7 +587,8 @@ impl RegexClassifier {
 
     /// Classify a prompt string into one of the 4 intent categories.
     /// Never fails — returns Fallback tier for unmatched or ambiguous prompts.
-    pub fn classify(&self, prompt: &str) -> ClassificationResult {
+    /// This is the synchronous implementation (used by the async wrapper).
+    pub fn classify_internal(&self, prompt: &str) -> ClassificationResult {
         let sanitized = sanitize(prompt);
         let matches: Vec<usize> = self.set.matches(&sanitized).into_iter().collect();
 
@@ -556,61 +742,61 @@ mod tests {
         RegexClassifier::from_values(routing, fallback, 30, cats)
     }
 
-    #[test]
-    fn intent_classify_file_reading() {
+    #[tokio::test]
+    async fn intent_classify_file_reading() {
         let c = test_classifier();
-        let result = c.classify("please read the file src/main.rs");
+        let result = c.classify("please read the file src/main.rs").await;
         assert_eq!(result.category, "FILE_READING");
         assert_eq!(result.tier, ClassificationTier::Regex);
     }
 
-    #[test]
-    fn intent_classify_complex_reasoning() {
+    #[tokio::test]
+    async fn intent_classify_complex_reasoning() {
         let c = test_classifier();
-        let result = c.classify("architect a distributed rate limiter");
+        let result = c.classify("architect a distributed rate limiter").await;
         assert_eq!(result.category, "COMPLEX_REASONING");
         assert_eq!(result.tier, ClassificationTier::Regex);
     }
 
-    #[test]
-    fn intent_classify_syntax_fix() {
+    #[tokio::test]
+    async fn intent_classify_syntax_fix() {
         let c = test_classifier();
-        let result = c.classify("fix this bug please");
+        let result = c.classify("fix this bug please").await;
         assert_eq!(result.category, "SYNTAX_FIX");
         assert_eq!(result.tier, ClassificationTier::Regex);
     }
 
-    #[test]
-    fn intent_classify_casual() {
+    #[tokio::test]
+    async fn intent_classify_casual() {
         let c = test_classifier();
-        assert_eq!(c.classify("hello").category, "CASUAL");
+        assert_eq!(c.classify("hello").await.category, "CASUAL");
     }
 
-    #[test]
-    fn intent_classify_empty_prompt() {
+    #[tokio::test]
+    async fn intent_classify_empty_prompt() {
         let c = test_classifier();
-        let result = c.classify("");
+        let result = c.classify("").await;
         assert_eq!(result.category, "CASUAL");
         assert_eq!(result.tier, ClassificationTier::Fallback);
     }
 
-    #[test]
-    fn intent_classify_fallback_on_ambiguous() {
+    #[tokio::test]
+    async fn intent_classify_fallback_on_ambiguous() {
         let c = test_classifier();
-        let result = c.classify("please read this file and fix this bug and compilation error");
+        let result = c.classify("please read this file and fix this bug and compilation error").await;
         assert_eq!(result.category, "CASUAL");
         assert_eq!(result.tier, ClassificationTier::Fallback);
     }
 
-    #[test]
-    fn intent_classify_negative_suppression() {
+    #[tokio::test]
+    async fn intent_classify_negative_suppression() {
         let c = test_classifier();
-        let result = c.classify("read the architecture document");
+        let result = c.classify("read the architecture document").await;
         assert_ne!(result.category, "COMPLEX_REASONING");
     }
 
-    #[test]
-    fn hardcoded_categories_match_test_routing_keys() {
+    #[tokio::test]
+    async fn hardcoded_categories_match_test_routing_keys() {
         let classifier = test_classifier();
         let cats = hardcoded_categories();
         let routing_keys: std::collections::HashSet<&str> = classifier.routing.keys().map(|s| s.as_str()).collect();
@@ -624,14 +810,15 @@ mod tests {
         result: ClassificationResult,
     }
 
+    #[async_trait]
     impl IntentClassify for StubClassifier {
-        fn classify(&self, _prompt: &str) -> ClassificationResult {
+        async fn classify(&self, _prompt: &str) -> ClassificationResult {
             self.result.clone()
         }
     }
 
-    #[test]
-    fn chain_returns_first_regex_match() {
+    #[tokio::test]
+    async fn chain_returns_first_regex_match() {
         let stub1 = StubClassifier {
             result: ClassificationResult {
                 category: "CAT1".to_string(),
@@ -653,13 +840,13 @@ mod tests {
             },
         };
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
-        let result = chain.classify("any prompt");
+        let result = chain.classify("any prompt").await;
         assert_eq!(result.category, "CAT1");
         assert_eq!(result.tier, ClassificationTier::Regex);
     }
 
-    #[test]
-    fn chain_falls_through_to_next() {
+    #[tokio::test]
+    async fn chain_falls_through_to_next() {
         let stub1 = StubClassifier {
             result: ClassificationResult {
                 category: "CASUAL".to_string(),
@@ -681,13 +868,13 @@ mod tests {
             },
         };
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
-        let result = chain.classify("prompt");
+        let result = chain.classify("prompt").await;
         assert_eq!(result.category, "COMPLEX_REASONING");
         assert_eq!(result.tier, ClassificationTier::Regex);
     }
 
-    #[test]
-    fn chain_returns_last_on_all_fallback() {
+    #[tokio::test]
+    async fn chain_returns_last_on_all_fallback() {
         let stub1 = StubClassifier {
             result: ClassificationResult::fallback(),
         };
@@ -702,24 +889,25 @@ mod tests {
             },
         };
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
-        let result = chain.classify("any");
+        let result = chain.classify("any").await;
         assert_eq!(result.category, "CASUAL");
         assert_eq!(result.tier, ClassificationTier::Fallback);
     }
 
-    #[test]
-    fn chain_handles_empty_backends() {
+    #[tokio::test]
+    async fn chain_handles_empty_backends() {
         let chain = ClassifierChain::new(vec![]);
-        let result = chain.classify("prompt");
+        let result = chain.classify("prompt").await;
         assert_eq!(result.tier, ClassificationTier::Fallback);
         assert_eq!(result.category, "CASUAL");
     }
 
-    #[test]
-    fn trait_boundary_compilation() {
+    #[tokio::test]
+    async fn trait_boundary_compilation() {
         struct AnotherStub;
+        #[async_trait]
         impl IntentClassify for AnotherStub {
-            fn classify(&self, _prompt: &str) -> ClassificationResult {
+            async fn classify(&self, _prompt: &str) -> ClassificationResult {
                 ClassificationResult {
                     category: "STUB".to_string(),
                     model: "stub-model".to_string(),
@@ -733,7 +921,7 @@ mod tests {
         // Verify it can be used as a trait object and wrapped in a chain
         let stub = Arc::new(AnotherStub) as Arc<dyn IntentClassify + Send + Sync>;
         let chain = ClassifierChain::new(vec![stub]);
-        let result = chain.classify("test");
+        let result = chain.classify("test").await;
         assert_eq!(result.category, "STUB");
     }
 
@@ -783,5 +971,157 @@ mod tests {
             headers,
             vec![("authorization".to_string(), "Bearer key".to_string())]
         );
+    }
+
+    #[tokio::test]
+    async fn llm_classifier_success() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions");
+            then.status(200)
+                .json_body(serde_json::json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "SYNTAX_FIX"
+                            }
+                        }
+                    ]
+                }));
+        });
+
+        let config = LlmClassifierConfig {
+            enabled: true,
+            model: "gpt-4o-mini".to_string(),
+            endpoint: server.url("/v1/chat/completions"),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            provider_type: "openai_compatible".to_string(),
+            prompt_template_path: None,
+            timeout_secs: 3,
+        };
+
+        let cats = hardcoded_categories();
+        let client = reqwest::Client::new();
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+        
+        let llm = LLMClassifier::new(config, client, cats);
+        let result = llm.classify("fix this bug").await;
+
+        assert_eq!(result.category, "SYNTAX_FIX");
+        assert_eq!(result.tier, ClassificationTier::Regex);
+    }
+
+    #[tokio::test]
+    async fn llm_classifier_malformed_response() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions");
+            then.status(200)
+                .json_body(serde_json::json!({
+                    "choices": []
+                }));
+        });
+
+        let config = LlmClassifierConfig {
+            enabled: true,
+            model: "gpt-4o-mini".to_string(),
+            endpoint: server.url("/v1/chat/completions"),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            provider_type: "openai_compatible".to_string(),
+            prompt_template_path: None,
+            timeout_secs: 3,
+        };
+
+        let cats = hardcoded_categories();
+        let client = reqwest::Client::new();
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+
+        let llm = LLMClassifier::new(config, client, cats);
+        let result = llm.classify("test").await;
+
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+        assert_eq!(result.category, "CASUAL");
+    }
+
+    #[tokio::test]
+    async fn llm_classifier_network_error() {
+        let config = LlmClassifierConfig {
+            enabled: true,
+            model: "gpt-4o-mini".to_string(),
+            endpoint: "http://127.0.0.1:1/nonexistent".to_string(), // Invalid endpoint
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            provider_type: "openai_compatible".to_string(),
+            prompt_template_path: None,
+            timeout_secs: 1,
+        };
+
+        let cats = hardcoded_categories();
+        let client = reqwest::Client::new();
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+
+        let llm = LLMClassifier::new(config, client, cats);
+        let result = llm.classify("test").await;
+
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+        assert_eq!(result.category, "CASUAL");
+    }
+
+    #[tokio::test]
+    async fn llm_classifier_unknown_category() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/chat/completions");
+            then.status(200)
+                .json_body(serde_json::json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "UNKNOWN_CATEGORY"
+                            }
+                        }
+                    ]
+                }));
+        });
+
+        let config = LlmClassifierConfig {
+            enabled: true,
+            model: "gpt-4o-mini".to_string(),
+            endpoint: server.url("/v1/chat/completions"),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            provider_type: "openai_compatible".to_string(),
+            prompt_template_path: None,
+            timeout_secs: 3,
+        };
+
+        let cats = hardcoded_categories();
+        let client = reqwest::Client::new();
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+
+        let llm = LLMClassifier::new(config, client, cats);
+        let result = llm.classify("test").await;
+
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+        assert_eq!(result.category, "CASUAL");
+    }
+
+    #[tokio::test]
+    async fn build_llm_classifier_prompt_has_categories() {
+        let cats = hardcoded_categories();
+        let prompt = build_llm_classifier_prompt(&cats);
+
+        assert!(prompt.contains("FILE_READING"));
+        assert!(prompt.contains("SYNTAX_FIX"));
+        assert!(prompt.contains("COMPLEX_REASONING"));
+        assert!(prompt.contains("CASUAL"));
+        assert!(prompt.contains("Examples:"));
     }
 }

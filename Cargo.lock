@@ -500,6 +500,7 @@ version = "0.1.0"
 dependencies = [
  "askama",
  "askama_web",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "chrono",

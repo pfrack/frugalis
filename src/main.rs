@@ -70,43 +70,67 @@ async fn main() {
             None
         }
     };
+    let config_path_option = std::env::var("CONFIG_PATH").ok();
+
+    // Read and parse config file once, reuse across all loaders
+    let config_root = config_path_option.as_deref()
+        .and_then(|path| {
+            let content = std::fs::read_to_string(path).ok()?;
+            toml::from_str::<toml::Value>(&content).ok()
+        });
+
+    let regex_config = config_root.as_ref()
+        .map(config::load_regex_classifier_config_from_value)
+        .unwrap_or_default();
+    let regex_enabled = regex_config.enabled;
+
     let (classifier, routing, model_costs, baseline_model) = {
         let (routing_map, fallback_entry) = config::load_routing();
         let model_costs = config::build_model_costs(&routing_map);
         let baseline_model =
             config::env_or_default("BASELINE_MODEL", intent_classifier::DEFAULT_MODEL_COMPLEX);
-        let categories = config::load_categories();
-        match intent_classifier::RegexClassifier::from_env(
-            routing_map.clone(),
-            fallback_entry.clone(),
-            intent_classifier::SHORT_PROMPT_LEN,
-            categories,
-        ) {
-            Ok(regex_classifier) => {
-                info!("Intent classifier initialized");
-                // Build classifier chain; currently only one backend (RegexClassifier)
-                let chain = intent_classifier::ClassifierChain::new(vec![Arc::new(
-                    regex_classifier,
-                )]);
-                let classifier = Arc::new(chain);
-                // Merge routing tables from all backends (currently just one)
-                let mut merged_routing = HashMap::new();
-                for backend in classifier.backends().iter() {
-                    if let Some(r) = backend.get_routing() {
-                        merged_routing.extend(r.clone());
+        let categories = config_root.as_ref()
+            .and_then(|root| config::load_categories_from_value(root).ok())
+            .unwrap_or_else(intent_classifier::hardcoded_categories);
+        if !regex_enabled {
+            info!("Regex classifier disabled via config");
+            (
+                None,
+                Arc::new(HashMap::new()),
+                model_costs,
+                baseline_model,
+            )
+        } else {
+            match intent_classifier::RegexClassifier::from_env(
+                routing_map.clone(),
+                fallback_entry.clone(),
+                intent_classifier::SHORT_PROMPT_LEN,
+                categories.clone(),
+            ) {
+                Ok(regex_classifier) => {
+                    info!("Regex classifier initialized");
+                    let chain = intent_classifier::ClassifierChain::new(vec![Arc::new(
+                        regex_classifier,
+                    )]);
+                    let classifier = Arc::new(chain);
+                    let mut merged_routing = HashMap::new();
+                    for backend in classifier.backends().iter() {
+                        if let Some(r) = backend.get_routing() {
+                            merged_routing.extend(r.clone());
+                        }
                     }
+                    let routing = Arc::new(merged_routing);
+                    (Some(classifier), routing, model_costs, baseline_model)
                 }
-                let routing = Arc::new(merged_routing);
-                (Some(classifier), routing, model_costs, baseline_model)
-            }
-            Err(e) => {
-                warn!("intent classification disabled: {e}");
-                (
-                    None,
-                    Arc::new(HashMap::new()),
-                    intent_classifier::ModelCosts::empty(),
-                    String::new(),
-                )
+                Err(e) => {
+                    warn!("intent classification disabled: {e}");
+                    (
+                        None,
+                        Arc::new(HashMap::new()),
+                        intent_classifier::ModelCosts::empty(),
+                        String::new(),
+                    )
+                }
             }
         }
     };
@@ -118,6 +142,56 @@ async fn main() {
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .expect("reqwest client should build");
+
+    // If LLM classifier is configured, add it to the chain
+    let (classifier, routing) = if let Some(llm_config) = config_root.as_ref()
+        .and_then(|root| config::load_llm_classifier_config_from_value(root))
+    {
+        let categories = config_root.as_ref()
+            .and_then(|root| config::load_categories_from_value(root).ok())
+            .unwrap_or_else(intent_classifier::hardcoded_categories);
+        let llm_classifier = intent_classifier::LLMClassifier::new(
+            llm_config,
+            http_client.clone(),
+            categories,
+        );
+        info!(
+            "LLM classifier enabled: model={}, endpoint={}",
+            llm_classifier.model, llm_classifier.endpoint
+        );
+        if let Some(chain) = classifier {
+            // Add LLMClassifier as second backend in the chain
+            let mut backends = chain.backends().to_vec();
+            backends.push(Arc::new(llm_classifier));
+            let new_chain = intent_classifier::ClassifierChain::new(backends);
+            let mut merged_routing = HashMap::new();
+            for backend in new_chain.backends().iter() {
+                if let Some(r) = backend.get_routing() {
+                    merged_routing.extend(r.clone());
+                }
+            }
+            (Some(Arc::new(new_chain)), Arc::new(merged_routing))
+        } else {
+            // No regex classifier (either disabled or failed to build)
+            if regex_enabled {
+                warn!("Regex classifier failed to build; falling back to LLM-only classification");
+            } else {
+                info!("LLM classifier is the only classification backend (regex disabled)");
+            }
+            let new_chain = intent_classifier::ClassifierChain::new(vec![Arc::new(llm_classifier)]);
+            let mut merged_routing = HashMap::new();
+            for backend in new_chain.backends().iter() {
+                if let Some(r) = backend.get_routing() {
+                    merged_routing.extend(r.clone());
+                }
+            }
+            (Some(Arc::new(new_chain)), Arc::new(merged_routing))
+        }
+    } else {
+        debug!("LLM classifier not configured or disabled");
+        (classifier, routing)
+    };
+
     let app_state = Arc::new(AppState {
         persistence: persistence_state,
         classifier,
@@ -189,7 +263,7 @@ fn log_classification(
 /// Shared classify-and-log logic. Validates Content-Type, extracts the prompt,
 /// classifies intent, builds the JSON response, and optionally enqueues a
 /// fire-and-forget inference record with the given `log_status`.
-fn classify_and_log(
+async fn classify_and_log(
     headers: &HeaderMap,
     body_str: &str,
     start: std::time::Instant,
@@ -210,11 +284,10 @@ fn classify_and_log(
 
     let prompt = persistence::extract_last_user_message(body_str);
 
-    let classification = state
-        .classifier
-        .as_ref()
-        .map(|c| c.classify(&prompt))
-        .unwrap_or_else(intent_classifier::ClassificationResult::fallback);
+    let classification = match state.classifier.as_ref() {
+        Some(c) => c.classify(&prompt).await,
+        None => intent_classifier::ClassificationResult::fallback(),
+    };
 
     let response_body = serde_json::json!({
         "status": "classified",
@@ -299,11 +372,10 @@ async fn completion_handler(
             },
             None => {
                 warn!("X-Cerebrum-Category '{category}' not found in routing configuration; degrading to classification JSON");
-                let fallback = state
-                    .classifier
-                    .as_ref()
-                    .map(|c| c.classify(""))
-                    .unwrap_or_else(intent_classifier::ClassificationResult::fallback);
+                let fallback = match state.classifier.as_ref() {
+                    Some(c) => c.classify("").await,
+                    None => intent_classifier::ClassificationResult::fallback(),
+                };
                 let response_body = serde_json::json!({
                     "status": "classified",
                     "category": fallback.category,
@@ -317,11 +389,10 @@ async fn completion_handler(
         }
     } else {
         let prompt = persistence::extract_last_user_message(body_str);
-        state
-            .classifier
-            .as_ref()
-            .map(|c| c.classify(&prompt))
-            .unwrap_or_else(intent_classifier::ClassificationResult::fallback)
+        match state.classifier.as_ref() {
+            Some(c) => c.classify(&prompt).await,
+            None => intent_classifier::ClassificationResult::fallback(),
+        }
     };
 
     let client = match &state.http_client {
@@ -643,7 +714,7 @@ async fn classify_handler(
     } else {
         None
     };
-    classify_and_log(&headers, body_str, start, &state, log_status)
+    classify_and_log(&headers, body_str, start, &state, log_status).await
 }
 
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {

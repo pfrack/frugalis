@@ -1,3 +1,26 @@
+# Uncomment to disable regex classifier (enabled by default)
+# [regex_classifier]
+# enabled = true
+
+# Uncomment to enable LLM classifier backend (Phase 2 of S-09)
+# [llm_classifier]
+# enabled = true
+# model = "gpt-4o-mini"
+# endpoint = "https://api.openai.com/v1/chat/completions"
+# api_key_env = "OPENAI_API_KEY"  # env var name holding the API key
+# provider_type = "openai_compatible"  # openai_compatible, anthropic, ollama, local
+# prompt_template_path = "path/to/prompt.txt"  # optional custom prompt
+# timeout_secs = 3
+
+# Example: LLM Classifier config for testing with Groq free tier
+# [llm_classifier]
+# enabled = true
+# model = "llama3-8b-8192"
+# endpoint = "https://api.groq.com/openai/v1/chat/completions"
+# api_key_env = "GROQ_API_KEY"
+# provider_type = "openai_compatible"
+# timeout_secs = 10
+
 [[categories]]
 name = "FILE_READING"
 description = "Reading files"
