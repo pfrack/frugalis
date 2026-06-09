@@ -114,20 +114,9 @@ async fn main() {
          .ok()
          .and_then(|v| v.parse::<bool>().ok())
          .unwrap_or(false);
-
-     let max_upstream_body_bytes = config::parse_env_int(
-         "MAX_UPSTREAM_BODY_BYTES",
-         10_485_760,
-         Some(1_048_576),
-         Some(100_485_760),
-     );
-     let keepalive_interval_secs = config::parse_env_int(
-         "KEEPALIVE_INTERVAL_SECS",
-         15,
-         Some(1),
-         None,
-     );
-
+    let http_config = config::HttpClientConfig::from_env();
+    let max_upstream_body_bytes = http_config.max_upstream_body_bytes as usize;
+    let keepalive_interval_secs = http_config.keepalive_interval_secs as u64;
      let (classifier, routing, model_costs, baseline_model) = {
         let categories = config_root
             .as_ref()
@@ -814,18 +803,7 @@ mod tests {
             }
         }
         let routing = Arc::new(merged_routing);
-        let max_upstream_body_bytes = config::parse_env_int(
-            "MAX_UPSTREAM_BODY_BYTES",
-            10_485_760,
-            Some(1_048_576),
-            Some(100_485_760),
-        );
-        let keepalive_interval_secs = config::parse_env_int(
-            "KEEPALIVE_INTERVAL_SECS",
-            15,
-            Some(1),
-            None,
-        );
+        let http_config = config::HttpClientConfig::from_env();
         Arc::new(AppState {
             persistence: None,
             classifier: classifier_arc,
@@ -834,8 +812,8 @@ mod tests {
             baseline_model,
             classify_db_log: false,
             http_client,
-            max_upstream_body_bytes: max_upstream_body_bytes as usize,
-            keepalive_interval_secs: keepalive_interval_secs as u64,
+            max_upstream_body_bytes: http_config.max_upstream_body_bytes as usize,
+            keepalive_interval_secs: http_config.keepalive_interval_secs as u64,
         })
     }
 
@@ -847,18 +825,7 @@ mod tests {
             "password",
         ));
         // No-op persistence: persistence is None, so completion_handler skips logging.
-        let max_upstream_body_bytes = config::parse_env_int(
-            "MAX_UPSTREAM_BODY_BYTES",
-            10_485_760,
-            Some(1_048_576),
-            Some(100_485_760),
-        );
-        let keepalive_interval_secs = config::parse_env_int(
-            "KEEPALIVE_INTERVAL_SECS",
-            15,
-            Some(1),
-            None,
-        );
+        let http_config = config::HttpClientConfig::from_env();
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier: None,
@@ -867,8 +834,8 @@ mod tests {
             baseline_model: String::new(),
             classify_db_log: false,
             http_client: None,
-            max_upstream_body_bytes: max_upstream_body_bytes as usize,
-            keepalive_interval_secs: keepalive_interval_secs as u64,
+            max_upstream_body_bytes: http_config.max_upstream_body_bytes as usize,
+            keepalive_interval_secs: http_config.keepalive_interval_secs as u64,
         });
         build_app(auth_config, app_state)
     }

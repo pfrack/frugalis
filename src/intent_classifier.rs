@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
@@ -183,12 +182,12 @@ pub struct LLMClassifier {
     categories: Vec<CategoryConfig>,
     prompt_template: String,
     timeout: std::time::Duration,
-    shutdown: Arc<AtomicBool>,
+    task_handle: tokio::task::AbortHandle,
 }
 
 impl Drop for LLMClassifier {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.task_handle.abort();
     }
 }
 
@@ -212,33 +211,17 @@ impl LLMClassifier {
 
         let api_key = std::env::var(&config.api_key_env).unwrap_or_else(|_| String::new());
         let api_key_rwlock = Arc::new(tokio::sync::RwLock::new(api_key));
-        let shutdown = Arc::new(AtomicBool::new(false));
 
-        let classifier = Self {
-            client,
-            model: config.model,
-            endpoint: config.endpoint,
-            api_key_env: config.api_key_env.clone(),
-            api_key: api_key_rwlock.clone(),
-            provider_type: config.provider_type,
-            categories,
-            prompt_template,
-            timeout: std::time::Duration::from_secs(config.timeout_secs),
-            shutdown: shutdown.clone(),
-        };
+        let classifier_api_key = api_key_rwlock.clone();
+        let key_env = config.api_key_env.clone();
 
-        // Spawn background refresh task for API key rotation
-        let key_env = config.api_key_env;
-        tokio::spawn(async move {
+        // Spawn background refresh task for API key rotation with AbortHandle
+        let task_handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                if shutdown.load(Ordering::Relaxed) {
-                    tracing::debug!("LLM API key refresh task shutting down");
-                    break;
-                }
                 if let Ok(new_key) = std::env::var(&key_env) {
                     if !new_key.is_empty() {
-                        let mut key = api_key_rwlock.write().await;
+                        let mut key = classifier_api_key.write().await;
                         if *key != new_key {
                             tracing::debug!("LLM API key refreshed from env");
                             *key = new_key;
@@ -246,7 +229,20 @@ impl LLMClassifier {
                     }
                 }
             }
-        });
+        }).abort_handle();
+
+        let classifier = Self {
+            client,
+            model: config.model,
+            endpoint: config.endpoint,
+            api_key_env: config.api_key_env,
+            api_key: api_key_rwlock,
+            provider_type: config.provider_type,
+            categories,
+            prompt_template,
+            timeout: std::time::Duration::from_secs(config.timeout_secs),
+            task_handle,
+        };
 
         classifier
     }

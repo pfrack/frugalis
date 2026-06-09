@@ -24,7 +24,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tokio-stream = "0.1"
 futures = "0.3"
-
+hmac = "0.12"
+sha2 = "0.10"
+getrandom = "0.2"
 
 [dev-dependencies]
 httpmock = "0.7"

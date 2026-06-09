@@ -16,6 +16,33 @@ pub(crate) fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// HTTP client configuration with limits and timeouts.
+#[derive(Clone, Debug)]
+pub struct HttpClientConfig {
+    pub max_upstream_body_bytes: i32,
+    pub keepalive_interval_secs: i32,
+}
+
+impl HttpClientConfig {
+    /// Load configuration from environment variables with sensible defaults.
+    pub fn from_env() -> Self {
+        Self {
+            max_upstream_body_bytes: parse_env_int(
+                "MAX_UPSTREAM_BODY_BYTES",
+                10_485_760,
+                Some(1_048_576),
+                Some(100_485_760),
+            ),
+            keepalive_interval_secs: parse_env_int(
+                "KEEPALIVE_INTERVAL_SECS",
+                15,
+                Some(1),
+                None,
+            ),
+        }
+    }
+}
+
 /// Parse an integer environment variable with optional min/max validation.
 /// Returns `default` if the variable is unset, empty, invalid, or out of range.
 /// Logs a warning on invalid or out-of-range values.

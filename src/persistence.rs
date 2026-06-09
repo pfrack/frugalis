@@ -1530,3 +1530,10 @@ mod tests {
         assert_eq!(config.task_semaphore.available_permits(), 7);
     }
 }
+
+/// Test helper: Connect to the database if DATABASE_URL is set, or return None to skip.
+#[cfg(test)]
+pub async fn test_pool() -> Option<std::sync::Arc<PgPool>> {
+    let url = std::env::var("DATABASE_URL").ok()?;
+    sqlx::PgPool::connect(&url).await.ok().map(std::sync::Arc::new)
+}
