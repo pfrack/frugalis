@@ -50,6 +50,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-08 | provider-url-derivation | ~~refactor routing config so endpoint URLs omit `v1/chat/*`; path suffix derived from `provider_type`~~ — descoped (research-only; not worth config complexity at current scale) | — | FR-003 | descoped |
 | S-09 | llm-classifier | implement `LLMClassifier` backend for `IntentClassify` trait: sends prompt to a small/cheap model, parses classification from response; config carries model, endpoint, `UPSTREAM_API_KEY`, classification prompt template | S-07, S-07b | FR-002 | done |
 | S-09a | classifier-config-boundary | extract generic classifier boundary config: per-backend enable/disable flags, clear separation of generic settings (CategoryConfig, chain construction) from backend-specific settings (RegexClassifier: patterns/weights; LLMClassifier: model/endpoint/API key/prompt) | S-07b, S-09 | FR-002 | proposed |
+| S-10 | post-review-cleanup | (tech debt + hardening + reliability) Consolidates review-cleanup, review-hardening, and prod-hardening-reliability into a single 12-phase plan: SSE log timing, handler decomposition, cleanup, test safety, embedded migrations, LLM key refresh, auth hardening, streaming/JSON fixes, dead code, graceful shutdown, configurability, and observability | S-09a | — | planned |
 
 ## Streams
 
@@ -367,16 +368,17 @@ Foundations below assume these are present and do NOT re-scaffold them.
    - Should a disabled/failed backend emit a warning or be silent? Owner: planning. Block: no (warning at info level is sufficient).
 - **Risk:** Low — this is a config layer atop already-working backends. The main risk is getting the boundary wrong and leaking generic config into backend-specific constructors (or vice versa). Mitigated by placing this slice AFTER both backends exist (S-09), so the boundary is informed by real code rather than speculation. Backward compatible: existing deployments without `LLM_CLASSIFIER_ENABLED` see no change (LLM is `false` by default, regex stays `true`).
 
-### S-10: Code review cleanup
+### S-10: Post-Review Cleanup, Hardening & Production Reliability
 
-- **Outcome:** 7 code review findings addressed: SSE streaming log timing fixed (records reflect actual stream outcome), `completion_handler` decomposed into focused helpers, error response JSON deduplicated, `QueryError` simplified to a transparent struct, unused `RegexClassifierConfig.timeout_secs` removed, test environment variable pollution fixed with `EnvGuard` guards, and `reqwest::Client` timeout reduced from 300s to 120s with a 30s connect timeout.
-- **Change ID:** `review-cleanup`
+- **Outcome:** All code review findings from 2026-06-08 and 2026-06-09 plus production hardening gaps addressed in 12 ordered phases: (1) SSE streaming log timing fix, (2) `completion_handler` decomposition and error deduplication, (3) `QueryError`/`timeout`/`timeout_secs`/`EnvGuard` cleanup, (4) `serial_test` for UB elimination, (5) `sqlx::migrate!()` embedded migrations, (6) LLM API key refresh, (7) auth constant-time comparison hardening, (8) streaming and JSON edge-case fixes, (9) dead code cleanup, (10) graceful shutdown + slow_tests + DB validation, (11) configurable limits and env parsing, (12) Prometheus metrics + health enhancements + docs.
+- **Change ID:** `post-review-cleanup`
+- **Consolidates:** `review-cleanup` (2026-06-08) + `review-hardening` (2026-06-09) + `prod-hardening-reliability` (2026-06-09)
 - **PRD refs:** —
 - **Prerequisites:** S-09a (classifier-config-boundary merged — avoids merge conflicts on `main.rs`)
 - **Parallel with:** — (maintenance pass)
 - **Blockers:** —
 - **Unknowns:** —
-- **Risk:** Low — pure maintenance/cleanup. `completion_handler` decomposition is the riskiest change (has a documented regression history — see `lessons.md:12-17`); mitigated by comprehensive test suite and phased delivery with the critical bug fix shipping first.
+- **Risk:** Low-Medium — 12-phase plan touches all core modules (`main.rs`, `persistence.rs`, `config.rs`, `intent_classifier.rs`, `auth.rs`). `completion_handler` decomposition is the riskiest change (documented regression history — see `lessons.md:12-17`); mitigated by comprehensive test suite. Production hardening phases (10-12) are additive and independently verifiable.
 
 ## Backlog Handoff
 
@@ -402,7 +404,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 | S-08 | provider-url-derivation | Config: ~~Derive URL path suffix from provider_type; endpoints omit v1/chat/*~~ — descoped (research-only) | no | Descoped after research. |
 | S-09 | llm-classifier | Classifier: LLM-based backend implementing IntentClassify for fallback classification | no | Proposed; depends on S-07 trait + S-07b shared config. Research: `context/changes/llm-classifier/research.md`. |
 | S-09a | classifier-config-boundary | Classifier: Formalize generic/specific config boundary with per-backend enable/disable flags; placed after S-09 to validate against two real backends | no | Proposed; depends on S-07b + S-09. Research: `context/changes/classifier-config-boundary/research.md`. |
-| S-10 | review-cleanup | (tech debt) Fix SSE streaming log timing bug + decompose completion_handler + deduplicate errors + cleanup QueryError, timeout, unused field, and test env vars | S-09a | — | planned |
+| S-10 | post-review-cleanup | (tech debt + hardening + reliability) 12-phase consolidated plan: SSE log fix, handler decomposition, cleanup, test safety, migrations, LLM key refresh, auth hardening, streaming/JSON fixes, dead code, graceful shutdown, configurability, observability | S-09a | — | planned |
 
 ## Open Roadmap Questions
 

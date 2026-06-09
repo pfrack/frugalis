@@ -16,6 +16,44 @@ pub(crate) fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// Parse an integer environment variable with optional min/max validation.
+/// Returns `default` if the variable is unset, empty, invalid, or out of range.
+/// Logs a warning on invalid or out-of-range values.
+pub(crate) fn parse_env_int(
+    var: &str,
+    default: i32,
+    min: Option<i32>,
+    max: Option<i32>,
+) -> i32 {
+    let val_str = match std::env::var(var) {
+        Ok(s) => s,
+        Err(_) => return default,
+    };
+    if val_str.trim().is_empty() {
+        return default;
+    }
+    let val: i32 = match val_str.trim().parse() {
+        Ok(v) => v,
+        Err(_) => {
+            warn!("Invalid integer value for {}: '{:?}'; using default {}", var, val_str, default);
+            return default;
+        }
+    };
+    if let Some(min) = min {
+        if val < min {
+            warn!("{} value {} below minimum {}; using default {}", var, val, min, default);
+            return default;
+        }
+    }
+    if let Some(max) = max {
+        if val > max {
+            warn!("{} value {} above maximum {}; using default {}", var, val, max, default);
+            return default;
+        }
+    }
+    val
+}
+
 fn hardcoded_model_default(env_var: &str) -> &'static str {
     match env_var {
         "DEFAULT_MODEL" => DEFAULT_MODEL,
@@ -931,5 +969,48 @@ priority = 1
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
         assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
+    }
+
+    #[test]
+    #[serial]
+    fn parse_env_int_returns_default_when_unset() {
+        std::env::remove_var("TEST_PARSE_INT");
+        assert_eq!(parse_env_int("TEST_PARSE_INT", 42, None, None), 42);
+    }
+
+    #[test]
+    #[serial]
+    fn parse_env_int_uses_env_when_valid() {
+        std::env::set_var("TEST_PARSE_INT", "100");
+        let res = parse_env_int("TEST_PARSE_INT", 42, None, None);
+        assert_eq!(res, 100);
+        std::env::remove_var("TEST_PARSE_INT");
+    }
+
+    #[test]
+    #[serial]
+    fn parse_env_int_fallback_on_invalid() {
+        std::env::set_var("TEST_PARSE_INT", "abc");
+        let res = parse_env_int("TEST_PARSE_INT", 42, None, None);
+        assert_eq!(res, 42);
+        std::env::remove_var("TEST_PARSE_INT");
+    }
+
+    #[test]
+    #[serial]
+    fn parse_env_int_clamps_below_min() {
+        std::env::set_var("TEST_PARSE_INT", "5");
+        let res = parse_env_int("TEST_PARSE_INT", 42, Some(10), None);
+        assert_eq!(res, 42);
+        std::env::remove_var("TEST_PARSE_INT");
+    }
+
+    #[test]
+    #[serial]
+    fn parse_env_int_clamps_above_max() {
+        std::env::set_var("TEST_PARSE_INT", "200");
+        let res = parse_env_int("TEST_PARSE_INT", 42, None, Some(100));
+        assert_eq!(res, 42);
+        std::env::remove_var("TEST_PARSE_INT");
     }
 }

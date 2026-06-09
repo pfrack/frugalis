@@ -37,6 +37,8 @@ pub struct AppState {
     baseline_model: String,
     classify_db_log: bool,
     http_client: Option<reqwest::Client>,
+    max_upstream_body_bytes: usize,
+    keepalive_interval_secs: u64,
 }
 
 #[tokio::main]
@@ -108,12 +110,25 @@ async fn main() {
         .build()
         .expect("reqwest client should build");
 
-    let classify_db_log = std::env::var("CLASSIFY_DB_LOG")
-        .ok()
-        .and_then(|v| v.parse::<bool>().ok())
-        .unwrap_or(false);
+     let classify_db_log = std::env::var("CLASSIFY_DB_LOG")
+         .ok()
+         .and_then(|v| v.parse::<bool>().ok())
+         .unwrap_or(false);
 
-    let (classifier, routing, model_costs, baseline_model) = {
+     let max_upstream_body_bytes = config::parse_env_int(
+         "MAX_UPSTREAM_BODY_BYTES",
+         10_485_760,
+         Some(1_048_576),
+         Some(100_485_760),
+     );
+     let keepalive_interval_secs = config::parse_env_int(
+         "KEEPALIVE_INTERVAL_SECS",
+         15,
+         Some(1),
+         None,
+     );
+
+     let (classifier, routing, model_costs, baseline_model) = {
         let categories = config_root
             .as_ref()
             .and_then(|root| config::load_categories_from_value(root).ok())
@@ -210,12 +225,11 @@ async fn main() {
         baseline_model,
         classify_db_log,
         http_client: Some(http_client),
+        max_upstream_body_bytes: max_upstream_body_bytes as usize,
+        keepalive_interval_secs: keepalive_interval_secs as u64,
     });
 
-    let port: u16 = std::env::var("PORT")
-        .unwrap_or_else(|_| "10000".to_string())
-        .parse()
-        .expect("PORT must be a number");
+    let port: u16 = config::parse_env_int("PORT", 10000, Some(1), Some(65535)) as u16;
 
     let app = build_app(auth_config, app_state);
     let bind_addr = format!("0.0.0.0:{port}");
@@ -382,6 +396,7 @@ fn build_upstream_request(
 
 async fn handle_buffered_response(
     mut upstream_response: reqwest::Response,
+    max_upstream_body_bytes: usize,
 ) -> (StatusCode, String) {
     let upstream_status = upstream_response.status();
     if !upstream_status.is_success() {
@@ -417,12 +432,11 @@ async fn handle_buffered_response(
         );
     }
 
-    const MAX_UPSTREAM_BODY: usize = 10 * 1024 * 1024;
     let mut upstream_body_bytes: Vec<u8> = Vec::new();
     let upstream_body = loop {
         match upstream_response.chunk().await {
             Ok(Some(chunk)) => {
-                if upstream_body_bytes.len() + chunk.len() > MAX_UPSTREAM_BODY {
+                if upstream_body_bytes.len() + chunk.len() > max_upstream_body_bytes {
                     return (
                         StatusCode::BAD_GATEWAY,
                         upstream_error_json(502, "upstream response too large"),
@@ -456,6 +470,7 @@ fn handle_streaming_response(
     body_str: String,
     start: Instant,
     byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
+    keepalive_interval_secs: u64,
 ) -> Response<Body> {
     let channel_capacity = std::env::var("STREAMING_CHANNEL_CAPACITY")
         .ok()
@@ -466,10 +481,7 @@ fn handle_streaming_response(
     log_classification(&state, &classification, &body_str, start, "streaming");
 
     tokio::spawn(async move {
-        let keepalive_secs = std::env::var("KEEPALIVE_INTERVAL_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(15);
+        let keepalive_secs = keepalive_interval_secs;
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(keepalive_secs));
         let mut stream = byte_stream;
         let mut stream_status = "ok";
@@ -689,16 +701,18 @@ async fn completion_handler(
             return resp;
         }
 
+        let keepalive_interval_secs = state.keepalive_interval_secs;
         return handle_streaming_response(
             state,
             classification,
             body_str,
             start,
             upstream_response.bytes_stream(),
+            keepalive_interval_secs,
         );
     }
 
-    let (status, body) = handle_buffered_response(upstream_response).await;
+    let (status, body) = handle_buffered_response(upstream_response, state.max_upstream_body_bytes).await;
     let log_status = if status == StatusCode::OK {
         "ok"
     } else {
@@ -800,6 +814,18 @@ mod tests {
             }
         }
         let routing = Arc::new(merged_routing);
+        let max_upstream_body_bytes = config::parse_env_int(
+            "MAX_UPSTREAM_BODY_BYTES",
+            10_485_760,
+            Some(1_048_576),
+            Some(100_485_760),
+        );
+        let keepalive_interval_secs = config::parse_env_int(
+            "KEEPALIVE_INTERVAL_SECS",
+            15,
+            Some(1),
+            None,
+        );
         Arc::new(AppState {
             persistence: None,
             classifier: classifier_arc,
@@ -808,6 +834,8 @@ mod tests {
             baseline_model,
             classify_db_log: false,
             http_client,
+            max_upstream_body_bytes: max_upstream_body_bytes as usize,
+            keepalive_interval_secs: keepalive_interval_secs as u64,
         })
     }
 
@@ -819,6 +847,18 @@ mod tests {
             "password",
         ));
         // No-op persistence: persistence is None, so completion_handler skips logging.
+        let max_upstream_body_bytes = config::parse_env_int(
+            "MAX_UPSTREAM_BODY_BYTES",
+            10_485_760,
+            Some(1_048_576),
+            Some(100_485_760),
+        );
+        let keepalive_interval_secs = config::parse_env_int(
+            "KEEPALIVE_INTERVAL_SECS",
+            15,
+            Some(1),
+            None,
+        );
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier: None,
@@ -827,6 +867,8 @@ mod tests {
             baseline_model: String::new(),
             classify_db_log: false,
             http_client: None,
+            max_upstream_body_bytes: max_upstream_body_bytes as usize,
+            keepalive_interval_secs: keepalive_interval_secs as u64,
         });
         build_app(auth_config, app_state)
     }
@@ -949,6 +991,53 @@ mod tests {
             "expected classified status"
         );
         assert!(body.contains(r#""tier":"Regex""#), "expected Regex tier");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_max_upstream_body_bytes_truncation() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        struct EnvGuard(&'static str);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _guard1 = EnvGuard("MAX_UPSTREAM_BODY_BYTES");
+        let _guard2 = EnvGuard("TEST_API_KEY");
+        // Set limit to 1.1MB (above 1MB min) and send response > limit to trigger truncation
+        std::env::set_var("MAX_UPSTREAM_BODY_BYTES", "1100000");
+        std::env::set_var("TEST_API_KEY", "sk-test");
+        let (app, server) = test_app_with_http_client("TEST_API_KEY");
+        let large_content = "x".repeat(2_000_000); // 2MB payload
+        let body = format!("{{\"choices\":[{{\"message\":{{\"content\":\"{large_content}\"}}}}]}}");
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(body);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body_str = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body_str.contains("upstream response too large"));
+        mock.assert();
     }
 
     fn test_app_with_enriched_classifier(
@@ -1709,6 +1798,18 @@ mod tests {
                 }
             }
         }
+        let max_upstream_body_bytes = config::parse_env_int(
+            "MAX_UPSTREAM_BODY_BYTES",
+            10_485_760,
+            Some(1_048_576),
+            Some(100_485_760),
+        );
+        let keepalive_interval_secs = config::parse_env_int(
+            "KEEPALIVE_INTERVAL_SECS",
+            15,
+            Some(1),
+            None,
+        );
         let app_state = Arc::new(AppState {
             persistence: Some(persistence::PersistenceConfig {
                 pool,
@@ -1720,6 +1821,8 @@ mod tests {
             baseline_model: String::new(),
             classify_db_log: false,
             http_client: Some(client),
+            max_upstream_body_bytes: max_upstream_body_bytes as usize,
+            keepalive_interval_secs: keepalive_interval_secs as u64,
         });
         let app = build_app(auth_config, app_state);
         (app, server)
@@ -2524,6 +2627,18 @@ mod slow_tests {
             }
         }
         let routing = Arc::new(merged_routing);
+        let max_upstream_body_bytes = config::parse_env_int(
+            "MAX_UPSTREAM_BODY_BYTES",
+            10_485_760,
+            Some(1_048_576),
+            Some(100_485_760),
+        );
+        let keepalive_interval_secs = config::parse_env_int(
+            "KEEPALIVE_INTERVAL_SECS",
+            15,
+            Some(1),
+            None,
+        );
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
             "user",
@@ -2537,6 +2652,8 @@ mod slow_tests {
             baseline_model,
             classify_db_log: false,
             http_client: Some(client),
+            max_upstream_body_bytes: max_upstream_body_bytes as usize,
+            keepalive_interval_secs: keepalive_interval_secs as u64,
         });
         let app = build_app(auth_config, app_state);
 
@@ -2578,4 +2695,32 @@ mod slow_tests {
         );
         let _ = server_handle.await;
     }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_graceful_shutdown() {
+        use std::time::Duration;
+        use tokio::sync::oneshot;
+        let app = Router::new().route("/slow", get(|| async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            "OK"
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+            shutdown_rx.await.ok();
+        });
+        let server_task = tokio::spawn(async move {
+            server.await.expect("server task");
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let client = reqwest::Client::new();
+        let resp = client.get(format!("http://{}/slow", addr)).send().await.unwrap();
+        shutdown_tx.send(()).unwrap();
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "OK");
+        server_task.await.unwrap();
+    }
+
 }
