@@ -135,8 +135,8 @@ dashboard_page! {
 async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let db_connected = state.persistence.is_some();
     let classifier_active = state.classifier.is_some();
-    let model_costs = state.model_costs.clone();
-    let baseline_model = state.baseline_model.clone();
+    let model_costs = state.model_costs.read().await.clone();
+    let baseline_model = state.baseline_model.read().await.clone();
 
     let persistence = match &state.persistence {
         Some(p) => p,
@@ -303,8 +303,8 @@ async fn savings_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
         }
     };
 
-    let model_costs = state.model_costs.clone();
-    let baseline_model = state.baseline_model.clone();
+    let model_costs = state.model_costs.read().await.clone();
+    let baseline_model = state.baseline_model.read().await.clone();
 
     match persistence
         .fetch_savings_estimate(24, &model_costs, &baseline_model)

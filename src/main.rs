@@ -32,13 +32,15 @@ use intent_classifier::IntentClassify;
 pub struct AppState {
     persistence: Option<persistence::PersistenceConfig>,
     classifier: Option<Arc<intent_classifier::ClassifierChain>>,
-    routing: Arc<std::collections::HashMap<String, intent_classifier::RouteEntry>>,
-    model_costs: intent_classifier::ModelCosts,
-    baseline_model: String,
-    classify_db_log: bool,
+    routing: Arc<tokio::sync::RwLock<std::collections::HashMap<String, intent_classifier::RouteEntry>>>,
+    model_costs: Arc<tokio::sync::RwLock<intent_classifier::ModelCosts>>,
+    baseline_model: Arc<tokio::sync::RwLock<String>>,
+    classify_db_log: Arc<std::sync::atomic::AtomicBool>,
     http_client: Option<reqwest::Client>,
-    max_upstream_body_bytes: usize,
-    keepalive_interval_secs: u64,
+    max_upstream_body_bytes: Arc<tokio::sync::RwLock<usize>>,
+    keepalive_interval_secs: Arc<tokio::sync::RwLock<u64>>,
+    dashboard_config: config::DashboardConfig,
+    auth_providers: Arc<Vec<config::AuthProviderConfig>>,
 }
 
 #[tokio::main]
@@ -146,7 +148,7 @@ async fn main() {
             config::env_or_default("BASELINE_MODEL", intent_classifier::DEFAULT_MODEL_COMPLEX);
         if !classifiers_config.enabled {
             info!("All classifiers disabled via config");
-            (None, Arc::new(HashMap::new()), model_costs, baseline_model)
+            (None, HashMap::new(), model_costs, baseline_model)
         } else {
             let mut backends: Vec<Arc<dyn intent_classifier::IntentClassify + Send + Sync>> =
                 Vec::new();
@@ -196,7 +198,7 @@ async fn main() {
 
             if backends.is_empty() {
                 warn!("no classifier backends enabled");
-                (None, Arc::new(HashMap::new()), model_costs, baseline_model)
+                (None, HashMap::new(), model_costs, baseline_model)
             } else {
                 let chain = intent_classifier::ClassifierChain::new(backends);
                 let mut merged_routing = HashMap::new();
@@ -205,8 +207,7 @@ async fn main() {
                         merged_routing.extend(r.clone());
                     }
                 }
-                let routing = Arc::new(merged_routing);
-                (Some(Arc::new(chain)), routing, model_costs, baseline_model)
+                (Some(Arc::new(chain)), merged_routing, model_costs, baseline_model)
             }
         }
     };
@@ -214,13 +215,15 @@ async fn main() {
     let app_state = Arc::new(AppState {
         persistence: persistence_state,
         classifier,
-        routing,
-        model_costs,
-        baseline_model,
-        classify_db_log,
+        routing: Arc::new(tokio::sync::RwLock::new(routing)),
+        model_costs: Arc::new(tokio::sync::RwLock::new(model_costs)),
+        baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
+        classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(classify_db_log)),
         http_client: Some(http_client),
-        max_upstream_body_bytes: max_upstream_body_bytes as usize,
-        keepalive_interval_secs: keepalive_interval_secs as u64,
+        max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(max_upstream_body_bytes as usize)),
+        keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(keepalive_interval_secs as u64)),
+        dashboard_config: config::DashboardConfig::default(),
+        auth_providers: Arc::new(vec![]),
     });
 
     let port: u16 = config::parse_env_int("PORT", 10000, Some(1), Some(65535)) as u16;
@@ -606,7 +609,8 @@ async fn completion_handler(
     let classification = if let (Some(category), Some(model)) =
         (x_category.as_ref(), x_model.as_ref())
     {
-        match state.routing.get(category) {
+        let routing = state.routing.read().await;
+        match routing.get(category) {
             Some(entry) => intent_classifier::ClassificationResult {
                 category: category.clone(),
                 model: model.clone(),
@@ -695,7 +699,7 @@ async fn completion_handler(
             return resp;
         }
 
-        let keepalive_interval_secs = state.keepalive_interval_secs;
+        let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
         return handle_streaming_response(
             state,
             classification,
@@ -706,7 +710,8 @@ async fn completion_handler(
         );
     }
 
-    let (status, body) = handle_buffered_response(upstream_response, state.max_upstream_body_bytes).await;
+    let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
+    let (status, body) = handle_buffered_response(upstream_response, max_upstream_body_bytes).await;
     let log_status = if status == StatusCode::OK {
         "ok"
     } else {
@@ -726,7 +731,7 @@ async fn classify_handler(
 ) -> impl IntoResponse {
     let start = std::time::Instant::now();
     let body_str = std::str::from_utf8(&body).unwrap_or("");
-    let log_status = if state.classify_db_log {
+    let log_status = if state.classify_db_log.load(std::sync::atomic::Ordering::Relaxed) {
         Some("classified")
     } else {
         None
@@ -807,18 +812,18 @@ mod tests {
                 }
             }
         }
-        let routing = Arc::new(merged_routing);
-        let http_config = config::HttpClientConfig::from_env();
         Arc::new(AppState {
             persistence: None,
             classifier: classifier_arc,
-            routing,
-            model_costs,
-            baseline_model,
-            classify_db_log: false,
+            routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
+            model_costs: Arc::new(tokio::sync::RwLock::new(model_costs)),
+            baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
+            classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client,
-            max_upstream_body_bytes: http_config.max_upstream_body_bytes as usize,
-            keepalive_interval_secs: http_config.keepalive_interval_secs as u64,
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(10_485_760)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
+            dashboard_config: config::DashboardConfig::default(),
+            auth_providers: Arc::new(vec![]),
         })
     }
 
@@ -830,17 +835,18 @@ mod tests {
             "password",
         ));
         // No-op persistence: persistence is None, so completion_handler skips logging.
-        let http_config = config::HttpClientConfig::from_env();
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier: None,
-            routing: Arc::new(std::collections::HashMap::new()),
-            model_costs: intent_classifier::ModelCosts::empty(),
-            baseline_model: String::new(),
-            classify_db_log: false,
+            routing: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            model_costs: Arc::new(tokio::sync::RwLock::new(intent_classifier::ModelCosts::empty())),
+            baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
+            classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client: None,
-            max_upstream_body_bytes: http_config.max_upstream_body_bytes as usize,
-            keepalive_interval_secs: http_config.keepalive_interval_secs as u64,
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(10_485_760)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
+            dashboard_config: config::DashboardConfig::default(),
+            auth_providers: Arc::new(vec![]),
         });
         build_app(auth_config, app_state)
     }
@@ -1788,13 +1794,15 @@ mod tests {
                 task_semaphore: semaphore,
             }),
             classifier: classifier_arc,
-            routing: Arc::new(merged_routing),
-            model_costs: intent_classifier::ModelCosts::empty(),
-            baseline_model: String::new(),
-            classify_db_log: false,
+            routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
+            model_costs: Arc::new(tokio::sync::RwLock::new(intent_classifier::ModelCosts::empty())),
+            baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
+            classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client: Some(client),
-            max_upstream_body_bytes: max_upstream_body_bytes as usize,
-            keepalive_interval_secs: keepalive_interval_secs as u64,
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(max_upstream_body_bytes as usize)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(keepalive_interval_secs as u64)),
+            dashboard_config: config::DashboardConfig::default(),
+            auth_providers: Arc::new(vec![]),
         });
         let app = build_app(auth_config, app_state);
         (app, server)
@@ -2598,7 +2606,6 @@ mod slow_tests {
                 }
             }
         }
-        let routing = Arc::new(merged_routing);
         let max_upstream_body_bytes = config::parse_env_int(
             "MAX_UPSTREAM_BODY_BYTES",
             10_485_760,
@@ -2619,13 +2626,15 @@ mod slow_tests {
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier,
-            routing,
-            model_costs,
-            baseline_model,
-            classify_db_log: false,
+            routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
+            model_costs: Arc::new(tokio::sync::RwLock::new(model_costs)),
+            baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
+            classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client: Some(client),
-            max_upstream_body_bytes: max_upstream_body_bytes as usize,
-            keepalive_interval_secs: keepalive_interval_secs as u64,
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(max_upstream_body_bytes as usize)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(keepalive_interval_secs as u64)),
+            dashboard_config: config::DashboardConfig::default(),
+            auth_providers: Arc::new(vec![]),
         });
         let app = build_app(auth_config, app_state);
 
