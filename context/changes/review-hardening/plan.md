@@ -374,9 +374,9 @@ Fix the dual-log on streaming error path (log single "upstream_error" instead of
 
 #### Automated
 
-- [x] 1.1 `cargo test` passes all tests (run twice consecutively)
-- [x] 1.2 `cargo clippy` zero warnings
-- [x] 1.3 `cargo fmt --check` passes
+- [x] 1.1 `cargo test` passes all tests (run twice consecutively) — a76f300
+- [x] 1.2 `cargo clippy` zero warnings — a76f300
+- [x] 1.3 `cargo fmt --check` passes — a76f300
 
 #### Manual
 
