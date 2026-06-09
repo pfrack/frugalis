@@ -1,5 +1,7 @@
 use std::sync::Arc;
+use std::time::{SystemTime, Duration};
 
+use crate::config::parse_env_int;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use sqlx::Row;
@@ -15,15 +17,11 @@ pub trait CostProvider {
 
 /// Custom error type for inference query failures.
 #[derive(Debug, Clone)]
-pub enum QueryError {
-    Database(String), // Connection, query, or pool error
-}
+pub struct QueryError(pub String);
 
 impl std::fmt::Display for QueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Self::Database(msg) => write!(f, "Database error: {}", msg),
-        }
+        write!(f, "Database error: {}", self.0)
     }
 }
 
@@ -103,17 +101,57 @@ impl PersistenceConfig {
             .idle_timeout(std::time::Duration::from_secs(1800))
             .connect_lazy_with(options);
 
-        // Idempotent schema migration: add the prompt_char_count column if absent.
-        let pool_for_migration = pool.clone();
-        sqlx::query("ALTER TABLE inferences ADD COLUMN IF NOT EXISTS prompt_char_count INTEGER")
-            .execute(&pool_for_migration)
-            .await
-            .map_err(|e| format!("Schema migration failed: {e}"))?;
-        info!("Schema migration: prompt_char_count column ensured");
+        // Parse configurable retry settings
+        let db_retries = parse_env_int("DB_CONNECTION_RETRIES", 3, Some(1), Some(10)) as u32;
+        let db_retry_base_ms = parse_env_int("DB_RETRY_BASE_MS", 1000, Some(100), Some(60_000)) as u64;
+        let base_delay = Duration::from_millis(db_retry_base_ms);
+
+        // Validate DB connectivity with retries (exponential backoff with jitter)
+        let mut last_err = None;
+
+        for attempt in 0..db_retries {
+            match sqlx::query("SELECT 1").fetch_one(&pool).await {
+                Ok(_) => {
+                    // success, break out
+                    break;
+                }
+                Err(e) => {
+                    if attempt < db_retries - 1 {
+                        warn!("DB health check failed (attempt {}): {}. Retrying...", attempt + 1, &e);
+                        // Exponential backoff
+                        let backoff = base_delay * (1u32 << attempt);
+                        // Add jitter: random amount between 0 and base_delay
+                        let now_nanos = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos();
+                        let jitter_nanos = now_nanos % base_delay.as_nanos();
+                        let jitter = Duration::from_nanos(jitter_nanos as u64);
+                        let delay = backoff + jitter;
+                        tokio::time::sleep(delay).await;
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        if let Some(e) = last_err {
+            // DATABASE_URL is set, so we panic
+            panic!("Database health check failed after {} retries: {}", db_retries, e);
+        }
+
+        // Run migrations (fatal if fails)
+        if let Err(e) = sqlx::migrate!().run(&pool).await {
+            panic!("Migrations failed: {e}");
+        }
+        info!("Migrations applied successfully");
+
+        // Parse concurrency limit for logging tasks
+        let log_concurrency_limit = parse_env_int("LOG_CONCURRENCY_LIMIT", 100, Some(1), Some(1000)) as usize;
 
         Ok(Self {
             pool: Arc::new(pool),
-            task_semaphore: Arc::new(Semaphore::new(100)),
+            task_semaphore: Arc::new(Semaphore::new(log_concurrency_limit)),
         })
     }
 
@@ -129,13 +167,30 @@ impl PersistenceConfig {
         filter_category: Option<&str>,
         filter_model: Option<&str>,
     ) -> Result<(Vec<InferenceLog>, i64), QueryError> {
-        // Build WHERE clause based on filter presence.
-        let (where_clause, limit_ph, offset_ph) = match (filter_category, filter_model) {
-            (Some(_), Some(_)) => (" WHERE category = $1 AND upstream_model = $2", "$3", "$4"),
-            (Some(_), None) => (" WHERE category = $1", "$2", "$3"),
-            (None, Some(_)) => (" WHERE upstream_model = $1", "$2", "$3"),
-            (None, None) => ("", "$1", "$2"),
+        // Build WHERE clause dynamically with auto-incrementing bind count.
+        let mut bind_count = 1;
+        let mut where_clause = String::new();
+
+        if filter_category.is_some() {
+            where_clause.push_str(&format!("category = ${} ", bind_count));
+            bind_count += 1;
+        }
+        if filter_model.is_some() {
+            if !where_clause.is_empty() {
+                where_clause.push_str("AND ");
+            }
+            where_clause.push_str(&format!("upstream_model = ${} ", bind_count));
+            bind_count += 1;
+        }
+        let where_clause = if where_clause.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", where_clause.trim_end())
         };
+
+        let limit_ph = format!("${}", bind_count);
+        bind_count += 1;
+        let offset_ph = format!("${}", bind_count);
 
         let data_sql = format!(
             "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
@@ -155,9 +210,9 @@ impl PersistenceConfig {
         let total_count: i64 = count_query
             .fetch_one(self.pool.as_ref())
             .await
-            .map_err(|e| QueryError::Database(e.to_string()))?
+            .map_err(|e| QueryError(e.to_string()))?
             .try_get(0)
-            .map_err(|e| QueryError::Database(e.to_string()))?;
+            .map_err(|e| QueryError(e.to_string()))?;
 
         // Execute data query.
         let mut data_query = sqlx::query(&data_sql);
@@ -172,7 +227,7 @@ impl PersistenceConfig {
             .bind(offset as i64)
             .fetch_all(self.pool.as_ref())
             .await
-            .map_err(|e| QueryError::Database(e.to_string()))?;
+            .map_err(|e| QueryError(e.to_string()))?;
 
         // Map rows to InferenceLog, formatting timestamps and durations.
         // Propagate any row extraction errors to fail fast on data issues.
@@ -194,7 +249,7 @@ impl PersistenceConfig {
                 })
             })
             .collect::<Result<Vec<_>, sqlx::Error>>()
-            .map_err(|e| QueryError::Database(e.to_string()))?;
+            .map_err(|e| QueryError(e.to_string()))?;
 
         Ok((records, total_count))
     }
@@ -219,7 +274,7 @@ impl PersistenceConfig {
         .bind(hours as i64)
         .fetch_all(self.pool.as_ref())
         .await
-        .map_err(|e| QueryError::Database(e.to_string()))?;
+        .map_err(|e| QueryError(e.to_string()))?;
 
         let mut summary_rows = Vec::<LatencySummaryRow>::new();
         let mut unclassified_count: i64 = 0;
@@ -285,7 +340,7 @@ impl PersistenceConfig {
         .bind(hours as i64)
         .fetch_all(self.pool.as_ref())
         .await
-        .map_err(|e| QueryError::Database(e.to_string()))?;
+        .map_err(|e| QueryError(e.to_string()))?;
 
         let mut total_actual_cost: f64 = 0.0;
         let mut total_chars_all: i64 = 0;
@@ -1403,4 +1458,82 @@ mod tests {
             "old record should be excluded from 1-hour window, but found category {cat}"
         );
     }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn test_db_connection_retry_panics_after_failures() {
+        // Use an invalid DATABASE_URL to trigger connection failure.
+        // The function should retry according to DB_CONNECTION_RETRIES and then panic.
+        struct EnvGuard(&'static str);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _guard1 = EnvGuard("DATABASE_URL");
+        let _guard2 = EnvGuard("DB_CONNECTION_RETRIES");
+        let _guard3 = EnvGuard("DB_RETRY_BASE_MS");
+        std::env::set_var(
+            "DATABASE_URL",
+            "postgres://invalid:invalid@127.0.0.1:0/invalid",
+        );
+        // Use fast and minimal retries to keep test quick
+        std::env::set_var("DB_CONNECTION_RETRIES", "1");
+        std::env::set_var("DB_RETRY_BASE_MS", "10");
+
+        // Attempt to create PersistenceConfig; should panic.
+        PersistenceConfig::from_env().await;
+    }
+
+    #[tokio::test]
+    async fn test_log_concurrency_limit_parsed_from_env() {
+        // This test requires a live DATABASE_URL. It verifies that the LOG_CONCURRENCY_LIMIT
+        // environment variable is respected and the semaphore is created with the correct permit count.
+        // Fast settings to avoid delays.
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+
+        // Quick check: ensure DATABASE_URL is set and we can actually connect.
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("SKIP test_log_concurrency_limit_parsed_from_env: DATABASE_URL not set");
+                return;
+            }
+        };
+        // Attempt a quick connection to verify DB is up; if fails, skip.
+        match sqlx::PgPool::connect(&url).await {
+            Ok(pool) => {
+                // Immediately close the pool; we just wanted to check connectivity.
+                drop(pool);
+            }
+            Err(_) => {
+                eprintln!("SKIP test_log_concurrency_limit_parsed_from_env: cannot connect to DB");
+                return;
+            }
+        }
+
+        struct EnvGuard(&'static str);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _guard1 = EnvGuard("LOG_CONCURRENCY_LIMIT");
+        let _guard2 = EnvGuard("DB_CONNECTION_RETRIES");
+        let _guard3 = EnvGuard("DB_RETRY_BASE_MS");
+        std::env::set_var("LOG_CONCURRENCY_LIMIT", "7");
+        // Use fast retries to speed up the test
+        std::env::set_var("DB_CONNECTION_RETRIES", "1");
+        std::env::set_var("DB_RETRY_BASE_MS", "10");
+
+        let config = PersistenceConfig::from_env().await.expect("PersistenceConfig should succeed");
+        assert_eq!(config.task_semaphore.available_permits(), 7);
+    }
+}
+
+/// Test helper: Connect to the database if DATABASE_URL is set, or return None to skip.
+#[cfg(test)]
+pub async fn test_pool() -> Option<std::sync::Arc<PgPool>> {
+    let url = std::env::var("DATABASE_URL").ok()?;
+    sqlx::PgPool::connect(&url).await.ok().map(std::sync::Arc::new)
 }

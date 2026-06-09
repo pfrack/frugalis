@@ -8,7 +8,9 @@ use regex::Regex;
 use regex::RegexSet;
 
 #[allow(unused_imports)]
-pub use crate::routing::{RouteEntry, ModelCosts, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX, DEFAULT_MODEL_READING};
+pub use crate::routing::{
+    ModelCosts, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX, DEFAULT_MODEL_READING,
+};
 
 /// Hardcoded default costs per 1M input tokens for known models.
 pub(crate) fn hardcoded_model_costs() -> HashMap<String, f64> {
@@ -175,15 +177,26 @@ pub struct LLMClassifier {
     pub model: String,
     pub endpoint: String,
     api_key_env: String,
-    api_key: String,
+    api_key: Arc<tokio::sync::RwLock<String>>,
     provider_type: String,
     categories: Vec<CategoryConfig>,
     prompt_template: String,
     timeout: std::time::Duration,
+    task_handle: tokio::task::AbortHandle,
+}
+
+impl Drop for LLMClassifier {
+    fn drop(&mut self) {
+        self.task_handle.abort();
+    }
 }
 
 impl LLMClassifier {
-    pub fn new(config: LlmClassifierConfig, client: reqwest::Client, categories: Vec<CategoryConfig>) -> Self {
+    pub fn new(
+        config: LlmClassifierConfig,
+        client: reqwest::Client,
+        categories: Vec<CategoryConfig>,
+    ) -> Self {
         let prompt_template = if let Some(ref path) = config.prompt_template_path {
             match std::fs::read_to_string(path) {
                 Ok(contents) => contents,
@@ -196,20 +209,42 @@ impl LLMClassifier {
             build_llm_classifier_prompt(&categories)
         };
 
-        let api_key = std::env::var(&config.api_key_env)
-            .unwrap_or_else(|_| String::new());
+        let api_key = std::env::var(&config.api_key_env).unwrap_or_else(|_| String::new());
+        let api_key_rwlock = Arc::new(tokio::sync::RwLock::new(api_key));
 
-        Self {
+        let classifier_api_key = api_key_rwlock.clone();
+        let key_env = config.api_key_env.clone();
+
+        // Spawn background refresh task for API key rotation with AbortHandle
+        let task_handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                if let Ok(new_key) = std::env::var(&key_env) {
+                    if !new_key.is_empty() {
+                        let mut key = classifier_api_key.write().await;
+                        if *key != new_key {
+                            tracing::debug!("LLM API key refreshed from env");
+                            *key = new_key;
+                        }
+                    }
+                }
+            }
+        }).abort_handle();
+
+        let classifier = Self {
             client,
             model: config.model,
             endpoint: config.endpoint,
             api_key_env: config.api_key_env,
-            api_key,
+            api_key: api_key_rwlock,
             provider_type: config.provider_type,
             categories,
             prompt_template,
             timeout: std::time::Duration::from_secs(config.timeout_secs),
-        }
+            task_handle,
+        };
+
+        classifier
     }
 
     async fn classify_async(&self, prompt: &str) -> ClassificationResult {
@@ -227,23 +262,26 @@ impl LLMClassifier {
             ],
             "max_tokens": 20,
             "temperature": 0.0,
-            "response_format": { "type": "json_object" }
         });
 
         // Use pre-resolved API key
-        let api_key = &self.api_key;
+        let api_key = self.api_key.read().await.clone();
 
         if api_key.is_empty() {
-            tracing::warn!("LLM classifier API key environment variable {} is empty or unset", self.api_key_env);
+            tracing::warn!(
+                "LLM classifier API key environment variable {} is empty or unset",
+                self.api_key_env
+            );
         }
 
-        let request = self.client
+        let request = self
+            .client
             .post(&self.endpoint)
             .timeout(self.timeout)
             .header("Content-Type", "application/json");
 
         let request = if !api_key.is_empty() {
-            let headers = auth_headers_for(&self.provider_type, api_key);
+            let headers = auth_headers_for(&self.provider_type, &api_key);
             let mut req = request;
             for (key, value) in headers {
                 req = req.header(&key, &value);
@@ -262,9 +300,7 @@ impl LLMClassifier {
                 }
 
                 match response.json::<serde_json::Value>().await {
-                    Ok(json) => {
-                        self.parse_response(json)
-                    }
+                    Ok(json) => self.parse_response(json),
                     Err(e) => {
                         tracing::warn!("LLM classifier failed to parse response: {}", e);
                         ClassificationResult::fallback()
@@ -304,7 +340,10 @@ impl LLMClassifier {
                     }
                 }
                 // If no match found, return fallback
-                tracing::warn!("LLM classifier returned unknown category: {}", response_text);
+                tracing::warn!(
+                    "LLM classifier returned unknown category: {}",
+                    response_text
+                );
                 ClassificationResult::fallback()
             }
             None => {
@@ -442,10 +481,22 @@ const NEGATIVE: &[&str] = &[
 // ── Negative suppression metadata (parallel to NEGATIVE patterns) ──
 
 const NEGATIVE_META: &[NegativeMeta] = &[
-    NegativeMeta { suppressed: "COMPLEX_REASONING", penalty: 2 },
-    NegativeMeta { suppressed: "COMPLEX_REASONING", penalty: 2 },
-    NegativeMeta { suppressed: "SYNTAX_FIX",         penalty: 2 },
-    NegativeMeta { suppressed: "FILE_READING",       penalty: 2 },
+    NegativeMeta {
+        suppressed: "COMPLEX_REASONING",
+        penalty: 2,
+    },
+    NegativeMeta {
+        suppressed: "COMPLEX_REASONING",
+        penalty: 2,
+    },
+    NegativeMeta {
+        suppressed: "SYNTAX_FIX",
+        penalty: 2,
+    },
+    NegativeMeta {
+        suppressed: "FILE_READING",
+        penalty: 2,
+    },
 ];
 
 // ── Auth Header Lookup ──
@@ -480,7 +531,9 @@ fn sanitize(text: &str) -> String {
 
 // ── Pattern assembly ──
 
-fn build_all_patterns(categories: &[CategoryConfig]) -> (Vec<&'static str>, Vec<PatternMeta>, Range<usize>) {
+fn build_all_patterns(
+    categories: &[CategoryConfig],
+) -> (Vec<&'static str>, Vec<PatternMeta>, Range<usize>) {
     let mut patterns = Vec::new();
     let mut metadata = Vec::new();
 
@@ -489,25 +542,37 @@ fn build_all_patterns(categories: &[CategoryConfig]) -> (Vec<&'static str>, Vec<
             "FILE_READING" => {
                 for (i, p) in FILE_READING.iter().enumerate() {
                     patterns.push(*p);
-                    metadata.push(PatternMeta { category: "FILE_READING", weight: FR_WEIGHTS[i] });
+                    metadata.push(PatternMeta {
+                        category: "FILE_READING",
+                        weight: FR_WEIGHTS[i],
+                    });
                 }
             }
             "COMPLEX_REASONING" => {
                 for (i, p) in COMPLEX_REASONING.iter().enumerate() {
                     patterns.push(*p);
-                    metadata.push(PatternMeta { category: "COMPLEX_REASONING", weight: CR_WEIGHTS[i] });
+                    metadata.push(PatternMeta {
+                        category: "COMPLEX_REASONING",
+                        weight: CR_WEIGHTS[i],
+                    });
                 }
             }
             "SYNTAX_FIX" => {
                 for (i, p) in SYNTAX_FIX.iter().enumerate() {
                     patterns.push(*p);
-                    metadata.push(PatternMeta { category: "SYNTAX_FIX", weight: SF_WEIGHTS[i] });
+                    metadata.push(PatternMeta {
+                        category: "SYNTAX_FIX",
+                        weight: SF_WEIGHTS[i],
+                    });
                 }
             }
             "CASUAL" => {
                 for (i, p) in CASUAL.iter().enumerate() {
                     patterns.push(*p);
-                    metadata.push(PatternMeta { category: "CASUAL", weight: CA_WEIGHTS[i] });
+                    metadata.push(PatternMeta {
+                        category: "CASUAL",
+                        weight: CA_WEIGHTS[i],
+                    });
                 }
             }
             unknown => {
@@ -521,7 +586,10 @@ fn build_all_patterns(categories: &[CategoryConfig]) -> (Vec<&'static str>, Vec<
 
     for p in NEGATIVE.iter() {
         patterns.push(*p);
-        metadata.push(PatternMeta { category: "NEG", weight: 0 });
+        metadata.push(PatternMeta {
+            category: "NEG",
+            weight: 0,
+        });
     }
     let negative_idx = negative_start..(negative_start + NEG_COUNT);
 
@@ -529,7 +597,8 @@ fn build_all_patterns(categories: &[CategoryConfig]) -> (Vec<&'static str>, Vec<
 }
 
 fn fallback_category(categories: &[CategoryConfig]) -> &str {
-    categories.iter()
+    categories
+        .iter()
         .max_by_key(|c| c.priority)
         .map(|c| c.name.as_str())
         .unwrap_or("CASUAL")
@@ -556,7 +625,12 @@ impl RegexClassifier {
     /// Build the classifier from built-in patterns and environment configuration.
     /// Always succeeds — regex compilation errors are the only failure mode.
     /// When routing.toml is missing, hardcoded defaults are used.
-    pub fn from_env(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry, short_prompt_len: usize, categories: Vec<CategoryConfig>) -> Result<Self, String> {
+    pub fn from_env(
+        routing: HashMap<String, RouteEntry>,
+        fallback_entry: RouteEntry,
+        short_prompt_len: usize,
+        categories: Vec<CategoryConfig>,
+    ) -> Result<Self, String> {
         let (patterns, metadata, negative_idx) = build_all_patterns(&categories);
         let set = RegexSet::new(&patterns).map_err(|e| format!("regex compilation failed: {e}"))?;
 
@@ -572,7 +646,12 @@ impl RegexClassifier {
     }
 
     #[cfg(test)]
-    pub fn from_values(routing: HashMap<String, RouteEntry>, fallback_entry: RouteEntry, short_prompt_len: usize, categories: Vec<CategoryConfig>) -> Self {
+    pub fn from_values(
+        routing: HashMap<String, RouteEntry>,
+        fallback_entry: RouteEntry,
+        short_prompt_len: usize,
+        categories: Vec<CategoryConfig>,
+    ) -> Self {
         let (patterns, metadata, negative_idx) = build_all_patterns(&categories);
         let set = RegexSet::new(&patterns).expect("built-in patterns should always compile");
         IntentClassifier {
@@ -622,7 +701,9 @@ impl RegexClassifier {
         }
 
         // Check thresholds per config-driven algorithm
-        let mut met: Vec<(&CategoryConfig, bool)> = self.categories.iter()
+        let mut met: Vec<(&CategoryConfig, bool)> = self
+            .categories
+            .iter()
             .map(|c| {
                 let score = *scores.get(c.name.as_str()).unwrap_or(&0);
                 (c, score >= c.threshold)
@@ -689,6 +770,7 @@ impl RegexClassifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     fn test_classifier() -> RegexClassifier {
         let cats = hardcoded_categories();
@@ -784,7 +866,9 @@ mod tests {
     #[tokio::test]
     async fn intent_classify_fallback_on_ambiguous() {
         let c = test_classifier();
-        let result = c.classify("please read this file and fix this bug and compilation error").await;
+        let result = c
+            .classify("please read this file and fix this bug and compilation error")
+            .await;
         assert_eq!(result.category, "CASUAL");
         assert_eq!(result.tier, ClassificationTier::Fallback);
     }
@@ -800,9 +884,14 @@ mod tests {
     async fn hardcoded_categories_match_test_routing_keys() {
         let classifier = test_classifier();
         let cats = hardcoded_categories();
-        let routing_keys: std::collections::HashSet<&str> = classifier.routing.keys().map(|s| s.as_str()).collect();
-        let cat_names: std::collections::HashSet<&str> = cats.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(routing_keys, cat_names, "test_classifier routing keys must match hardcoded_categories names");
+        let routing_keys: std::collections::HashSet<&str> =
+            classifier.routing.keys().map(|s| s.as_str()).collect();
+        let cat_names: std::collections::HashSet<&str> =
+            cats.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            routing_keys, cat_names,
+            "test_classifier routing keys must match hardcoded_categories names"
+        );
     }
 
     // ── ClassifierChain Tests ────────────────────────────────────────────────────
@@ -975,27 +1064,25 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn llm_classifier_success() {
         use httpmock::prelude::*;
 
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST)
-                .path("/v1/chat/completions");
-            then.status(200)
-                .json_body(serde_json::json!({
-                    "choices": [
-                        {
-                            "message": {
-                                "content": "SYNTAX_FIX"
-                            }
+            when.method(POST).path("/v1/chat/completions");
+            then.status(200).json_body(serde_json::json!({
+                "choices": [
+                    {
+                        "message": {
+                            "content": "SYNTAX_FIX"
                         }
-                    ]
-                }));
+                    }
+                ]
+            }));
         });
 
         let config = LlmClassifierConfig {
-
             model: "gpt-4o-mini".to_string(),
             endpoint: server.url("/v1/chat/completions"),
             api_key_env: "OPENAI_API_KEY".to_string(),
@@ -1007,7 +1094,7 @@ mod tests {
         let cats = hardcoded_categories();
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
-        
+
         let llm = LLMClassifier::new(config, client, cats);
         let result = llm.classify("fix this bug").await;
 
@@ -1016,21 +1103,19 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn llm_classifier_malformed_response() {
         use httpmock::prelude::*;
 
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST)
-                .path("/v1/chat/completions");
-            then.status(200)
-                .json_body(serde_json::json!({
-                    "choices": []
-                }));
+            when.method(POST).path("/v1/chat/completions");
+            then.status(200).json_body(serde_json::json!({
+                "choices": []
+            }));
         });
 
         let config = LlmClassifierConfig {
-
             model: "gpt-4o-mini".to_string(),
             endpoint: server.url("/v1/chat/completions"),
             api_key_env: "OPENAI_API_KEY".to_string(),
@@ -1051,9 +1136,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn llm_classifier_network_error() {
         let config = LlmClassifierConfig {
-
             model: "gpt-4o-mini".to_string(),
             endpoint: "http://127.0.0.1:1/nonexistent".to_string(), // Invalid endpoint
             api_key_env: "OPENAI_API_KEY".to_string(),
@@ -1074,27 +1159,25 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn llm_classifier_unknown_category() {
         use httpmock::prelude::*;
 
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST)
-                .path("/v1/chat/completions");
-            then.status(200)
-                .json_body(serde_json::json!({
-                    "choices": [
-                        {
-                            "message": {
-                                "content": "UNKNOWN_CATEGORY"
-                            }
+            when.method(POST).path("/v1/chat/completions");
+            then.status(200).json_body(serde_json::json!({
+                "choices": [
+                    {
+                        "message": {
+                            "content": "UNKNOWN_CATEGORY"
                         }
-                    ]
-                }));
+                    }
+                ]
+            }));
         });
 
         let config = LlmClassifierConfig {
-
             model: "gpt-4o-mini".to_string(),
             endpoint: server.url("/v1/chat/completions"),
             api_key_env: "OPENAI_API_KEY".to_string(),

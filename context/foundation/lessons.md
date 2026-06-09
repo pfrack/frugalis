@@ -43,3 +43,10 @@
 - **Problem**: `unwrap_or_else` silently swallows errors and falls back, making it difficult to diagnose why alternate code paths are being used. Example: `std::fs::read_to_string(path).unwrap_or_else(|_| default_value)` masks permission errors, file corruption, or misconfiguration.
 - **Rule**: When using a fallback for failed operations, log the failure before falling back so operators can diagnose configuration or environmental issues. Use `warn!` for user-configurable paths, `debug!` for internal defaults.
 - **Applies to**: implement, impl-review
+
+## Delete dead code rather than suppressing warnings
+
+- **Context**: Any `#[cfg(test)]` helper, utility function, or module path that triggers `dead_code` warnings
+- **Problem**: Dead test helpers accumulate when written speculatively ("we might need this later") but never called. Suppressing with `#[allow(dead_code)]` hides the rot — the code stays, confuses future readers, and eventually someone has to figure out whether it's safe to remove or if something depends on it.
+- **Rule**: When a `dead_code` warning fires on code with zero callers, delete it. Tests are the best documentation for how helpers work — if there's no test, there's no value. YAGNI: if you aren't using it now, you don't need it.
+- **Applies to**: implement, impl-review
