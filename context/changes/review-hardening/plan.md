@@ -386,9 +386,9 @@ Fix the dual-log on streaming error path (log single "upstream_error" instead of
 
 #### Automated
 
-- [x] 2.1 `cargo build --release` succeeds
-- [x] 2.2 `cargo test` passes all tests
-- [x] 2.3 Integration tests with DATABASE_URL pass
+- [x] 2.1 `cargo build --release` succeeds — 521e00b
+- [x] 2.2 `cargo test` passes all tests — 521e00b
+- [x] 2.3 Integration tests with DATABASE_URL pass — 521e00b
 
 #### Manual
 
@@ -400,9 +400,9 @@ Fix the dual-log on streaming error path (log single "upstream_error" instead of
 
 #### Automated
 
-- [ ] 3.1 `cargo test` passes all tests
-- [ ] 3.2 `cargo clippy` zero warnings
-- [ ] 3.3 LLM classifier tests pass
+- [x] 3.1 `cargo test` passes all tests
+- [x] 3.2 `cargo clippy` zero warnings
+- [x] 3.3 LLM classifier tests pass
 
 #### Manual
 

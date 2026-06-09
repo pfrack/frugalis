@@ -177,7 +177,7 @@ pub struct LLMClassifier {
     pub model: String,
     pub endpoint: String,
     api_key_env: String,
-    api_key: String,
+    api_key: Arc<tokio::sync::RwLock<String>>,
     provider_type: String,
     categories: Vec<CategoryConfig>,
     prompt_template: String,
@@ -203,18 +203,38 @@ impl LLMClassifier {
         };
 
         let api_key = std::env::var(&config.api_key_env).unwrap_or_else(|_| String::new());
+        let api_key_rwlock = Arc::new(tokio::sync::RwLock::new(api_key));
 
-        Self {
+        let classifier = Self {
             client,
             model: config.model,
             endpoint: config.endpoint,
-            api_key_env: config.api_key_env,
-            api_key,
+            api_key_env: config.api_key_env.clone(),
+            api_key: api_key_rwlock.clone(),
             provider_type: config.provider_type,
             categories,
             prompt_template,
             timeout: std::time::Duration::from_secs(config.timeout_secs),
-        }
+        };
+
+        // Spawn background refresh task for API key rotation
+        let key_env = config.api_key_env;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                if let Ok(new_key) = std::env::var(&key_env) {
+                    if !new_key.is_empty() {
+                        let mut key = api_key_rwlock.write().await;
+                        if *key != new_key {
+                            tracing::debug!("LLM API key refreshed from env");
+                            *key = new_key;
+                        }
+                    }
+                }
+            }
+        });
+
+        classifier
     }
 
     async fn classify_async(&self, prompt: &str) -> ClassificationResult {
@@ -236,7 +256,7 @@ impl LLMClassifier {
         });
 
         // Use pre-resolved API key
-        let api_key = &self.api_key;
+        let api_key = self.api_key.read().await.clone();
 
         if api_key.is_empty() {
             tracing::warn!(
@@ -252,7 +272,7 @@ impl LLMClassifier {
             .header("Content-Type", "application/json");
 
         let request = if !api_key.is_empty() {
-            let headers = auth_headers_for(&self.provider_type, api_key);
+            let headers = auth_headers_for(&self.provider_type, &api_key);
             let mut req = request;
             for (key, value) in headers {
                 req = req.header(&key, &value);
