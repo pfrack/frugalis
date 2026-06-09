@@ -414,9 +414,9 @@ Fix the dual-log on streaming error path (log single "upstream_error" instead of
 
 #### Automated
 
-- [x] 4.1 `cargo test` passes all tests
-- [x] 4.2 `cargo clippy` zero warnings
-- [x] 4.3 Auth tests pass unchanged
+- [x] 4.1 `cargo test` passes all tests — 4d310f5
+- [x] 4.2 `cargo clippy` zero warnings — 4d310f5
+- [x] 4.3 Auth tests pass unchanged — 4d310f5
 
 #### Manual
 
@@ -428,10 +428,10 @@ Fix the dual-log on streaming error path (log single "upstream_error" instead of
 
 #### Automated
 
-- [ ] 5.1 `cargo test` passes all tests
-- [ ] 5.2 `persistence_integration_sse_streaming_error` passes with updated assertion
-- [ ] 5.3 `test_streaming_handler_non_2xx_returns_sse_error_event` passes
-- [ ] 5.4 `cargo clippy` zero warnings
+- [x] 5.1 `cargo test` passes all tests
+- [x] 5.2 `persistence_integration_sse_streaming_error` passes with updated assertion
+- [x] 5.3 `test_streaming_handler_non_2xx_returns_sse_error_event` passes
+- [x] 5.4 `cargo clippy` zero warnings
 
 #### Manual
 

@@ -485,9 +485,10 @@ fn handle_streaming_response(
                         Some(Ok(bytes)) => { if tx.send(bytes).await.is_err() { break; } }
                         Some(Err(_e)) => {
                             stream_status = "stream_error";
-                            let sanitized = _e.to_string().replace('\\', "\\\\").replace('"', "\\\"").replace(['\n', '\r'], " ");
+                            let error_msg = _e.to_string();
+                            let json_payload = serde_json::json!({"error": error_msg}).to_string();
                             let _ = tx.send(Bytes::from(
-                                format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", sanitized)
+                                format!("event: error\ndata: {}\n\n", json_payload)
                             )).await;
                             break;
                         }
@@ -687,7 +688,6 @@ async fn completion_handler(
 
     if client_wants_stream {
         if !upstream_response.status().is_success() {
-            log_classification(&state, &classification, &body_str, start, "streaming");
             let resp = handle_streaming_error(upstream_response).await;
             log_classification(&state, &classification, &body_str, start, "upstream_error");
             return resp;
@@ -1418,8 +1418,8 @@ mod tests {
 
         assert_eq!(
             statuses,
-            vec!["streaming", "upstream_error"],
-            "expected streaming then upstream_error records"
+            vec!["upstream_error"],
+            "expected upstream_error record only"
         );
     }
 
