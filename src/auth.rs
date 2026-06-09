@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::{
     body::Body,
@@ -165,14 +165,32 @@ pub fn parse_basic_credentials(auth_header: &str) -> Option<(String, String)> {
     Some((username.to_string(), password.to_string()))
 }
 
+fn hmac_key() -> &'static [u8; 32] {
+    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    KEY.get_or_init(|| {
+        use getrandom::getrandom;
+        let mut buf = [0u8; 32];
+        let _ = getrandom(&mut buf);
+        buf
+    })
+}
+
 fn constant_time_eq_str(left: &str, right: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
     use subtle::ConstantTimeEq;
 
-    if left.len() != right.len() {
-        return false;
-    }
+    type HmacSha256 = Hmac<Sha256>;
 
-    left.as_bytes().ct_eq(right.as_bytes()).into()
+    let mut mac_left = HmacSha256::new_from_slice(hmac_key()).expect("key length valid");
+    mac_left.update(left.as_bytes());
+    let left_mac = mac_left.finalize().into_bytes();
+
+    let mut mac_right = HmacSha256::new_from_slice(hmac_key()).expect("key length valid");
+    mac_right.update(right.as_bytes());
+    let right_mac = mac_right.finalize().into_bytes();
+
+    left_mac.ct_eq(&right_mac).into()
 }
 
 fn api_unauthorized_response(message: &str) -> Response<Body> {

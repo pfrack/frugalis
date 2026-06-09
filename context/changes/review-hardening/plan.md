@@ -400,9 +400,9 @@ Fix the dual-log on streaming error path (log single "upstream_error" instead of
 
 #### Automated
 
-- [x] 3.1 `cargo test` passes all tests
-- [x] 3.2 `cargo clippy` zero warnings
-- [x] 3.3 LLM classifier tests pass
+- [x] 3.1 `cargo test` passes all tests — 3adf840
+- [x] 3.2 `cargo clippy` zero warnings — 3adf840
+- [x] 3.3 LLM classifier tests pass — 3adf840
 
 #### Manual
 
@@ -414,9 +414,9 @@ Fix the dual-log on streaming error path (log single "upstream_error" instead of
 
 #### Automated
 
-- [ ] 4.1 `cargo test` passes all tests
-- [ ] 4.2 `cargo clippy` zero warnings
-- [ ] 4.3 Auth tests pass unchanged
+- [x] 4.1 `cargo test` passes all tests
+- [x] 4.2 `cargo clippy` zero warnings
+- [x] 4.3 Auth tests pass unchanged
 
 #### Manual
 
