@@ -53,10 +53,6 @@ Expand `config.toml` from a 42-line documentation template to a ~200-line self-s
 
 **File**: `config.toml`
 
-**Intent**: Transform the file into the complete single source of truth for all non-secret configuration. Every section that currently has a hardcoded fallback or env var default gets an explicit entry here.
-
-**Contract**: The file must parse as valid TOML. Section structure:
-
 ```toml
 [server]
 port = 10000

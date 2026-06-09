@@ -47,4 +47,3 @@ impl ModelCosts {
 
 pub const DEFAULT_MODEL: &str = "meta/llama-3.1-8b-instruct";
 pub const DEFAULT_MODEL_COMPLEX: &str = "meta/llama-3.3-70b-instruct";
-pub const DEFAULT_MODEL_READING: &str = "meta/llama-3.1-70b-instruct";

@@ -9,7 +9,7 @@ use regex::RegexSet;
 
 #[allow(unused_imports)]
 pub use crate::routing::{
-    ModelCosts, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX, DEFAULT_MODEL_READING,
+    ModelCosts, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX,
 };
 
 /// Hardcoded default costs per 1M input tokens for known models.
@@ -164,7 +164,7 @@ impl IntentClassify for ClassifierChain {
 
 // ── LLM Classifier ────────────────────────────────────────────────────────────
 
-use crate::config::LlmClassifierConfig;
+use crate::config::{AuthProviderConfig, LlmClassifierConfig};
 
 /// LLM-based intent classifier that fires when RegexClassifier returns Fallback.
 pub struct LLMClassifier {
@@ -174,6 +174,7 @@ pub struct LLMClassifier {
     api_key_env: String,
     api_key: Arc<tokio::sync::RwLock<String>>,
     provider_type: String,
+    auth_providers: Arc<Vec<AuthProviderConfig>>,
     categories: Vec<CategoryConfig>,
     prompt_template: String,
     timeout: std::time::Duration,
@@ -191,6 +192,7 @@ impl LLMClassifier {
         config: LlmClassifierConfig,
         client: reqwest::Client,
         categories: Vec<CategoryConfig>,
+        auth_providers: Arc<Vec<AuthProviderConfig>>,
     ) -> Self {
         let prompt_template = if let Some(ref path) = config.prompt_template_path {
             match std::fs::read_to_string(path) {
@@ -233,6 +235,7 @@ impl LLMClassifier {
             api_key_env: config.api_key_env,
             api_key: api_key_rwlock,
             provider_type: config.provider_type,
+            auth_providers,
             categories,
             prompt_template,
             timeout: std::time::Duration::from_secs(config.timeout_secs),
@@ -276,7 +279,7 @@ impl LLMClassifier {
             .header("Content-Type", "application/json");
 
         let request = if !api_key.is_empty() {
-            let headers = auth_headers_for(&self.provider_type, &api_key);
+            let headers = auth_headers_for(&self.auth_providers, &self.provider_type, &api_key);
             let mut req = request;
             for (key, value) in headers {
                 req = req.header(&key, &value);
@@ -496,16 +499,23 @@ const NEGATIVE_META: &[NegativeMeta] = &[
 
 // ── Auth Header Lookup ──
 
-/// Maps a provider_type string and resolved API key to HTTP auth header tuples.
-/// Called by the upstream proxy to attach the correct auth header
-/// before forwarding the request to the provider.
-pub fn auth_headers_for(provider_type: &str, api_key: &str) -> Vec<(String, String)> {
-    match provider_type {
-        "openai_compatible" | "" => vec![("authorization".into(), format!("Bearer {api_key}"))],
-        "anthropic" => vec![("x-api-key".into(), api_key.to_string())],
-        "ollama" | "local" => vec![],
-        _ => vec![("authorization".into(), format!("Bearer {api_key}"))],
+/// Maps a provider_type string and resolved API key to HTTP auth header tuples
+/// using the configured auth provider list.
+/// Falls back to Bearer Authorization for unknown or unconfigured provider types.
+pub fn auth_headers_for(providers: &[AuthProviderConfig], provider_type: &str, api_key: &str) -> Vec<(String, String)> {
+    let pt = if provider_type.is_empty() { "openai_compatible" } else { provider_type };
+    for provider in providers {
+        if provider.type_ == pt {
+            return match (&provider.header, &provider.value_template) {
+                (Some(header), Some(template)) => {
+                    let value = template.replace("{api_key}", api_key);
+                    vec![(header.clone(), value)]
+                }
+                _ => vec![],
+            };
+        }
     }
+    vec![("authorization".into(), format!("Bearer {api_key}"))]
 }
 
 // ── Code-block regex (lazily compiled once) ──
@@ -1010,9 +1020,20 @@ mod tests {
         assert_eq!(result.category, "STUB");
     }
 
+    fn default_auth_providers() -> Vec<AuthProviderConfig> {
+        vec![
+            AuthProviderConfig { type_: "openai_compatible".into(), header: Some("authorization".into()), value_template: Some("Bearer {api_key}".into()) },
+            AuthProviderConfig { type_: "anthropic".into(), header: Some("x-api-key".into()), value_template: Some("{api_key}".into()) },
+            AuthProviderConfig { type_: "ollama".into(), header: None, value_template: None },
+            AuthProviderConfig { type_: "local".into(), header: None, value_template: None },
+            AuthProviderConfig { type_: "nvidia_nim".into(), header: Some("authorization".into()), value_template: Some("Bearer {api_key}".into()) },
+        ]
+    }
+
     #[test]
     fn auth_headers_for_openai_compatible() {
-        let headers = auth_headers_for("openai_compatible", "sk-123");
+        let providers = default_auth_providers();
+        let headers = auth_headers_for(&providers, "openai_compatible", "sk-123");
         assert_eq!(
             headers,
             vec![("authorization".to_string(), "Bearer sk-123".to_string())]
@@ -1021,7 +1042,8 @@ mod tests {
 
     #[test]
     fn auth_headers_for_empty_defaults_to_openai_compatible() {
-        let headers = auth_headers_for("", "sk-123");
+        let providers = default_auth_providers();
+        let headers = auth_headers_for(&providers, "", "sk-123");
         assert_eq!(
             headers,
             vec![("authorization".to_string(), "Bearer sk-123".to_string())]
@@ -1030,7 +1052,8 @@ mod tests {
 
     #[test]
     fn auth_headers_for_anthropic() {
-        let headers = auth_headers_for("anthropic", "sk-ant-123");
+        let providers = default_auth_providers();
+        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-123");
         assert_eq!(
             headers,
             vec![("x-api-key".to_string(), "sk-ant-123".to_string())]
@@ -1039,19 +1062,22 @@ mod tests {
 
     #[test]
     fn auth_headers_for_ollama() {
-        let headers = auth_headers_for("ollama", "dummy");
+        let providers = default_auth_providers();
+        let headers = auth_headers_for(&providers, "ollama", "dummy");
         assert!(headers.is_empty());
     }
 
     #[test]
     fn auth_headers_for_local() {
-        let headers = auth_headers_for("local", "dummy");
+        let providers = default_auth_providers();
+        let headers = auth_headers_for(&providers, "local", "dummy");
         assert!(headers.is_empty());
     }
 
     #[test]
     fn auth_headers_for_unknown() {
-        let headers = auth_headers_for("unknown_provider", "key");
+        let providers = default_auth_providers();
+        let headers = auth_headers_for(&providers, "unknown_provider", "key");
         assert_eq!(
             headers,
             vec![("authorization".to_string(), "Bearer key".to_string())]
@@ -1090,7 +1116,7 @@ mod tests {
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
 
-        let llm = LLMClassifier::new(config, client, cats);
+        let llm = LLMClassifier::new(config, client, cats, Arc::new(vec![]));
         let result = llm.classify("fix this bug").await;
 
         assert_eq!(result.category, "SYNTAX_FIX");
@@ -1123,7 +1149,7 @@ mod tests {
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
 
-        let llm = LLMClassifier::new(config, client, cats);
+        let llm = LLMClassifier::new(config, client, cats, Arc::new(vec![]));
         let result = llm.classify("test").await;
 
         assert_eq!(result.tier, ClassificationTier::Fallback);
@@ -1146,7 +1172,7 @@ mod tests {
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
 
-        let llm = LLMClassifier::new(config, client, cats);
+        let llm = LLMClassifier::new(config, client, cats, Arc::new(vec![]));
         let result = llm.classify("test").await;
 
         assert_eq!(result.tier, ClassificationTier::Fallback);
@@ -1185,7 +1211,7 @@ mod tests {
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
 
-        let llm = LLMClassifier::new(config, client, cats);
+        let llm = LLMClassifier::new(config, client, cats, Arc::new(vec![]));
         let result = llm.classify("test").await;
 
         assert_eq!(result.tier, ClassificationTier::Fallback);

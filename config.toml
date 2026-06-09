@@ -105,6 +105,10 @@ api_key_env = "NVIDIA_API_KEY"
 "gpt-4o-mini" = 0.15
 "deepseek-chat" = 0.14
 
+baseline_model = "meta/llama-3.3-70b-instruct"
+
+classify_db_log = false
+
 [dashboard]
 default_hours = 24
 hours_min = 1

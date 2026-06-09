@@ -69,16 +69,6 @@ pub(crate) fn load_server_config_from_value(root: &toml::Value) -> ServerConfig 
             .get("port")
             .and_then(|v| v.as_integer())
             .unwrap_or(10000) as u16,
-        log_level: server_section
-            .get("log_level")
-            .and_then(|v| v.as_str())
-            .unwrap_or("info")
-            .to_string(),
-        log_format: server_section
-            .get("log_format")
-            .and_then(|v| v.as_str())
-            .unwrap_or("compact")
-            .to_string(),
     }
 }
 
@@ -198,29 +188,20 @@ pub(crate) fn load_auth_providers_from_value(root: &toml::Value) -> Vec<AuthProv
     providers
 }
 
-/// HTTP client configuration with limits and timeouts.
-#[derive(Clone, Debug)]
-pub struct HttpClientConfig {
-    pub max_upstream_body_bytes: i32,
-    pub keepalive_interval_secs: i32,
-}
-
-impl HttpClientConfig {
-    /// Load configuration from environment variables with sensible defaults.
-    pub fn from_env() -> Self {
-        Self {
-            max_upstream_body_bytes: parse_env_int(
-                "MAX_UPSTREAM_BODY_BYTES",
-                10_485_760,
-                Some(1_048_576),
-                Some(100_485_760),
-            ),
-            keepalive_interval_secs: parse_env_int(
-                "KEEPALIVE_INTERVAL_SECS",
-                15,
-                Some(1),
-                None,
-            ),
+/// Recursively merge overlay TOML values into base, with overlay values taking precedence.
+pub(crate) fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
+    if let (toml::Value::Table(base_table), toml::Value::Table(overlay_table)) = (base, overlay) {
+        for (key, overlay_val) in overlay_table.iter() {
+            match (base_table.get_mut(key), overlay_val) {
+                (Some(ref mut base_val @ toml::Value::Table(_)), toml::Value::Table(overlay_nested)) => {
+                    // Recursively merge nested tables
+                    merge_toml_values(base_val, &toml::Value::Table(overlay_nested.clone()));
+                }
+                _ => {
+                    // Overlay value wins for non-table keys or when base doesn't exist
+                    base_table.insert(key.clone(), overlay_val.clone());
+                }
+            }
         }
     }
 }
@@ -249,20 +230,16 @@ impl Default for DashboardConfig {
     }
 }
 
-/// Server configuration for port and logging.
+/// Server configuration.
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub port: u16,
-    pub log_level: String,
-    pub log_format: String,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: 10000,
-            log_level: "info".to_string(),
-            log_format: "compact".to_string(),
         }
     }
 }
@@ -359,15 +336,6 @@ pub(crate) fn parse_env_int(
         }
     }
     val
-}
-
-fn hardcoded_model_default(env_var: &str) -> &'static str {
-    match env_var {
-        "DEFAULT_MODEL" => DEFAULT_MODEL,
-        "DEFAULT_MODEL_COMPLEX" => DEFAULT_MODEL_COMPLEX,
-        "DEFAULT_MODEL_READING" => DEFAULT_MODEL_READING,
-        _ => DEFAULT_MODEL,
-    }
 }
 
 pub(crate) fn hardcoded_routing(
