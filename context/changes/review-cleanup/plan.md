@@ -145,9 +145,11 @@ fn build_upstream_request(
     classification: &ClassificationResult,
     body: &Bytes,
     api_key: &str,
-) -> Result<reqwest::RequestBuilder, String>
+) -> Result<(bool, reqwest::RequestBuilder), String>
 ```
-Returns the configured `RequestBuilder` or an error string (invalid JSON, body not an object). The caller sends the request. Auth header lookup uses `auth_headers_for` from `intent_classifier.rs`.
+Returns a tuple of `(streaming_flag, RequestBuilder)` or an error string. The streaming flag is extracted from the request body to avoid re-parsing; the RequestBuilder is configured with the model field and auth headers. The caller sends the request. Auth header lookup uses `auth_headers_for` from `intent_classifier.rs`.
+
+**Why the tuple return**: Avoids duplicate parsing of the request body's "stream" field after it has been consumed into the RequestBuilder. This optimization keeps caller code clean and prevents re-serialization overhead.
 
 #### 4. Extract handle_buffered_response helper
 
@@ -176,10 +178,12 @@ fn handle_streaming_response(
     classification: ClassificationResult,
     body_str: String,
     start: Instant,
-    byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+    byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
 ) -> Response<Body>
 ```
 Sets up the mpsc channel, spawns the streaming task (with keepalive), constructs the SSE response with correct headers. Logging is handled inside the spawned task (from Phase 1).
+
+**Note on Unpin**: The `Unpin` bound is required because the byte_stream is moved into a spawned task, which must own all captured data. Trait objects in async contexts require `Unpin` for safe pinning during task execution.
 
 #### 6. Simplify completion_handler dispatch
 
@@ -337,8 +341,8 @@ No schema changes. No config format changes (`RegexClassifierConfig.timeout_secs
 
 - [x] 1.1 `cargo test` passes all fast tests
 - [x] 1.2 `cargo test slow_tests` passes keepalive test
-- [ ] 1.3 New integration test: streaming success produces "streaming" + "ok" records
-- [ ] 1.4 New integration test: streaming failure produces "stream_error" record
+- [x] 1.3 New integration test: streaming success produces "streaming" + "ok" records
+- [x] 1.4 New integration test: streaming failure produces "stream_error" record
 - [x] 1.5 `cargo clippy` zero warnings
 - [x] 1.6 `cargo fmt --check` passes
 

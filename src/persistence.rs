@@ -128,11 +128,11 @@ impl PersistenceConfig {
         let mut bind_count = 1;
         let mut where_clause = String::new();
 
-        if let Some(_) = filter_category {
+        if filter_category.is_some() {
             where_clause.push_str(&format!("category = ${} ", bind_count));
             bind_count += 1;
         }
-        if let Some(_) = filter_model {
+        if filter_model.is_some() {
             if !where_clause.is_empty() {
                 where_clause.push_str("AND ");
             }

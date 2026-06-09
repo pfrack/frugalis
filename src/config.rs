@@ -209,26 +209,6 @@ pub(crate) fn routing_from_value(
     Ok((routing, fallback))
 }
 
-#[cfg(test)]
-pub(crate) fn load_categories() -> Vec<CategoryConfig> {
-    let path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| CONFIG_DEFAULT.to_string());
-    match load_categories_from_file(&path) {
-        Ok(cats) => cats,
-        Err(e) => {
-            tracing::warn!("{e}; using hardcoded category defaults");
-            hardcoded_categories()
-        }
-    }
-}
-
-#[cfg(test)]
-fn load_categories_from_file(path: &str) -> Result<Vec<CategoryConfig>, String> {
-    let content = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {path}: {e}"))?;
-    let root: toml::Value =
-        toml::from_str(&content).map_err(|e| format!("Invalid TOML in {path}: {e}"))?;
-    load_categories_from_value(&root).map_err(|e| format!("Error in {}: {}", path, e))
-}
-
 /// Load categories from a parsed toml::Value.
 pub(crate) fn load_categories_from_value(
     root: &toml::Value,
@@ -589,6 +569,7 @@ api_key_env = ""
     }
 
     #[test]
+    #[serial]
     fn hardcoded_routing_produces_expected_defaults() {
         let cats = hardcoded_categories();
         let (routing, fallback) = hardcoded_routing(&cats);

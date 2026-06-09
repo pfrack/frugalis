@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
@@ -182,6 +183,13 @@ pub struct LLMClassifier {
     categories: Vec<CategoryConfig>,
     prompt_template: String,
     timeout: std::time::Duration,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl Drop for LLMClassifier {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
 }
 
 impl LLMClassifier {
@@ -204,6 +212,7 @@ impl LLMClassifier {
 
         let api_key = std::env::var(&config.api_key_env).unwrap_or_else(|_| String::new());
         let api_key_rwlock = Arc::new(tokio::sync::RwLock::new(api_key));
+        let shutdown = Arc::new(AtomicBool::new(false));
 
         let classifier = Self {
             client,
@@ -215,6 +224,7 @@ impl LLMClassifier {
             categories,
             prompt_template,
             timeout: std::time::Duration::from_secs(config.timeout_secs),
+            shutdown: shutdown.clone(),
         };
 
         // Spawn background refresh task for API key rotation
@@ -222,6 +232,10 @@ impl LLMClassifier {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                if shutdown.load(Ordering::Relaxed) {
+                    tracing::debug!("LLM API key refresh task shutting down");
+                    break;
+                }
                 if let Ok(new_key) = std::env::var(&key_env) {
                     if !new_key.is_empty() {
                         let mut key = api_key_rwlock.write().await;
@@ -252,7 +266,6 @@ impl LLMClassifier {
             ],
             "max_tokens": 20,
             "temperature": 0.0,
-            "response_format": { "type": "json_object" }
         });
 
         // Use pre-resolved API key

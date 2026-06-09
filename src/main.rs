@@ -324,14 +324,10 @@ fn json_response(status: StatusCode, body: String) -> Response<Body> {
 }
 
 fn upstream_error_json(status: u16, message: &str) -> String {
-    let escaped = message
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace(['\n', '\r'], " ");
     serde_json::json!({
         "error": "upstream_error",
         "status": status,
-        "message": escaped,
+        "message": message,
     })
     .to_string()
 }

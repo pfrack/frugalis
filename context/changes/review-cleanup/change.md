@@ -1,7 +1,7 @@
 # Change: Code Review Cleanup
 
 - **id**: review-cleanup
-- **status**: implemented
+- **status**: impl_reviewed
 - **created**: 2026-06-08
 - **updated**: 2026-06-09
 - **roadmap**: —
