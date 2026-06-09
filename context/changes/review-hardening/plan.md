@@ -380,15 +380,15 @@ Fix the dual-log on streaming error path (log single "upstream_error" instead of
 
 #### Manual
 
-- [ ] 1.4 Both `--test-threads=1` and default multi-threaded produce identical results
+- [x] 1.4 Both `--test-threads=1` and default multi-threaded produce identical results — a76f300
 
 ### Phase 2: Embedded Migrations
 
 #### Automated
 
-- [ ] 2.1 `cargo build --release` succeeds
-- [ ] 2.2 `cargo test` passes all tests
-- [ ] 2.3 Integration tests with DATABASE_URL pass
+- [x] 2.1 `cargo build --release` succeeds
+- [x] 2.2 `cargo test` passes all tests
+- [x] 2.3 Integration tests with DATABASE_URL pass
 
 #### Manual
 

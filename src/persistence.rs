@@ -99,13 +99,12 @@ impl PersistenceConfig {
             .idle_timeout(std::time::Duration::from_secs(1800))
             .connect_lazy_with(options);
 
-        // Idempotent schema migration: add the prompt_char_count column if absent.
-        let pool_for_migration = pool.clone();
-        sqlx::query("ALTER TABLE inferences ADD COLUMN IF NOT EXISTS prompt_char_count INTEGER")
-            .execute(&pool_for_migration)
+        // Run all pending migrations from ./migrations directory
+        sqlx::migrate!()
+            .run(&pool)
             .await
-            .map_err(|e| format!("Schema migration failed: {e}"))?;
-        info!("Schema migration: prompt_char_count column ensured");
+            .map_err(|e| format!("Migrations failed: {e}"))?;
+        info!("Migrations applied successfully");
 
         Ok(Self {
             pool: Arc::new(pool),
@@ -125,13 +124,30 @@ impl PersistenceConfig {
         filter_category: Option<&str>,
         filter_model: Option<&str>,
     ) -> Result<(Vec<InferenceLog>, i64), QueryError> {
-        // Build WHERE clause based on filter presence.
-        let (where_clause, limit_ph, offset_ph) = match (filter_category, filter_model) {
-            (Some(_), Some(_)) => (" WHERE category = $1 AND upstream_model = $2", "$3", "$4"),
-            (Some(_), None) => (" WHERE category = $1", "$2", "$3"),
-            (None, Some(_)) => (" WHERE upstream_model = $1", "$2", "$3"),
-            (None, None) => ("", "$1", "$2"),
+        // Build WHERE clause dynamically with auto-incrementing bind count.
+        let mut bind_count = 1;
+        let mut where_clause = String::new();
+
+        if let Some(_) = filter_category {
+            where_clause.push_str(&format!("category = ${} ", bind_count));
+            bind_count += 1;
+        }
+        if let Some(_) = filter_model {
+            if !where_clause.is_empty() {
+                where_clause.push_str("AND ");
+            }
+            where_clause.push_str(&format!("upstream_model = ${} ", bind_count));
+            bind_count += 1;
+        }
+        let where_clause = if where_clause.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", where_clause.trim_end())
         };
+
+        let limit_ph = format!("${}", bind_count);
+        bind_count += 1;
+        let offset_ph = format!("${}", bind_count);
 
         let data_sql = format!(
             "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
