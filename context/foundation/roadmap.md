@@ -4,7 +4,7 @@ project: cerebrum
 version: 1
 status: draft
 created: 2026-05-26
-updated: 2026-06-08
+updated: 2026-06-09
 prd_version: 1
 main_goal: speed
 top_blocker: time
@@ -49,7 +49,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-07b | shared-category-config | extract shared `CategoryConfig` (names, descriptions, thresholds, priorities) consumed by both `RegexClassifier` and `LLMClassifier` from a single source of truth | S-07, S-01a | FR-002 | done |
 | S-08 | provider-url-derivation | ~~refactor routing config so endpoint URLs omit `v1/chat/*`; path suffix derived from `provider_type`~~ — descoped (research-only; not worth config complexity at current scale) | — | FR-003 | descoped |
 | S-09 | llm-classifier | implement `LLMClassifier` backend for `IntentClassify` trait: sends prompt to a small/cheap model, parses classification from response; config carries model, endpoint, `UPSTREAM_API_KEY`, classification prompt template | S-07, S-07b | FR-002 | done |
-| S-09a | classifier-config-boundary | extract generic classifier boundary config: per-backend enable/disable flags, clear separation of generic settings (CategoryConfig, chain construction) from backend-specific settings (RegexClassifier: patterns/weights; LLMClassifier: model/endpoint/API key/prompt) | S-07b, S-09 | FR-002 | proposed |
+| S-09a | classifier-config-boundary | extract generic classifier boundary config: per-backend enable/disable flags, clear separation of generic settings (CategoryConfig, chain construction) from backend-specific settings (RegexClassifier: patterns/weights; LLMClassifier: model/endpoint/API key/prompt) | S-07b, S-09 | FR-002 | done |
 | S-10 | post-review-cleanup | (tech debt + hardening + reliability) Consolidates review-cleanup, review-hardening, and prod-hardening-reliability into a single 12-phase plan: SSE log timing, handler decomposition, cleanup, test safety, embedded migrations, LLM key refresh, auth hardening, streaming/JSON fixes, dead code, graceful shutdown, configurability, and observability | S-09a | — | planned |
 | S-11 | opentelemetry-integration | export application traces, metrics, and logs via OTLP to an observability backend (Grafana Cloud); leverages existing `tracing` crate with zero business-logic changes for traces | S-10 | FR-005 | proposed |
 | S-12 | in-memory-db-fallback | persistence always available: 3-tier backend config (`memory` / `sqlite` / `postgres`) via `DB_BACKEND` env; enables zero-dep dev startup and real persistence in tests | S-13 | FR-005, NFR (testing) | proposed |
@@ -490,4 +490,4 @@ The 3-week MVP budget under a 6-week hard deadline makes calendar time the #1 bl
 **Sequential chain:** After S-01a, proceed to S-01b (`reqwest-upstream-routing`), then S-01c (`provider-agnostic-config`), then S-01d (`sse-streaming-proxy`), then S-01e (`proxy-intent-routing`) for end-to-end integration.
 
 **After S-01e lands:** S-02, S-03, S-04 can proceed in parallel. S-05 (dashboard consolidation) follows after those. F-04 (critical logging) and S-06 (logs page) can be planned concurrently to enhance observability.
-*** End Updated File ***
+*** End Updated File ***- **S-09a: With both `RegexClassifier` and `LLMClassifier` backends operational, the config boundary between generic and classifier-specific settings is formalized. Per-backend enable/disable and ordering flags control chain construction at startup.** — Archived 2026-06-09 → `context/archive/2026-06-07-classifier-config-boundary/`. Lesson: —.
