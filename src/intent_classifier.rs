@@ -741,6 +741,7 @@ impl RegexClassifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     fn test_classifier() -> RegexClassifier {
         let cats = hardcoded_categories();
@@ -1034,6 +1035,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn llm_classifier_success() {
         use httpmock::prelude::*;
 
@@ -1072,6 +1074,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn llm_classifier_malformed_response() {
         use httpmock::prelude::*;
 
@@ -1104,6 +1107,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn llm_classifier_network_error() {
         let config = LlmClassifierConfig {
             model: "gpt-4o-mini".to_string(),
@@ -1126,6 +1130,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn llm_classifier_unknown_category() {
         use httpmock::prelude::*;
 

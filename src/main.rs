@@ -451,6 +451,9 @@ async fn handle_buffered_response(
     (StatusCode::OK, response_body)
 }
 
+/// Set up SSE streaming response with keepalive and logging.
+/// The `Unpin` bound is required because the byte_stream is moved into a spawned task.
+/// Spawned tasks must own all captured data (trait objects require `Unpin` for safe pinning).
 fn handle_streaming_response(
     state: Arc<AppState>,
     classification: intent_classifier::ClassificationResult,
@@ -684,7 +687,10 @@ async fn completion_handler(
 
     if client_wants_stream {
         if !upstream_response.status().is_success() {
-            return handle_streaming_error(upstream_response).await;
+            log_classification(&state, &classification, &body_str, start, "streaming");
+            let resp = handle_streaming_error(upstream_response).await;
+            log_classification(&state, &classification, &body_str, start, "upstream_error");
+            return resp;
         }
 
         return handle_streaming_response(
@@ -768,6 +774,7 @@ mod tests {
         body::Body,
         http::{header, Request},
     };
+    use serial_test::serial;
     use tower::util::ServiceExt;
 
     /// Guard that removes an env var on drop to prevent test pollution.
@@ -1000,6 +1007,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_completion_does_not_include_enriched_fields() {
         let _guard = EnvGuard("TEST_API_KEY");
         std::env::set_var("TEST_API_KEY", "sk-test-value-123");
@@ -1265,6 +1273,156 @@ mod tests {
         );
     }
 
+    /// Integration test: verifies that a successful SSE streaming request
+    /// produces exactly two inference records with statuses "streaming" and "ok".
+    /// Requires DATABASE_URL to be set; skips gracefully otherwise.
+    #[tokio::test]
+    #[serial]
+    async fn persistence_integration_sse_streaming_success() {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!(
+                    "SKIP persistence_integration_sse_streaming_success: DATABASE_URL not set"
+                );
+                return;
+            }
+        };
+
+        std::env::set_var("MOCK_API_KEY", "sk-test");
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("integration test DB connect should succeed");
+        let pool = Arc::new(pool);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
+
+        let (app, server) = build_app_with_persistence(pool.clone(), semaphore.clone(), None);
+
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let test_message = format!("fix this bug {}", unique_id);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body("data: hello\n\n");
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"messages":[{{"role":"user","content":"{}"}}],"stream":true}}"#,
+                        test_message
+                    )))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+
+        // Wait for the background logging task to complete
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        // Verify DB records: should have exactly "streaming" and "ok"
+        let rows = sqlx::query(&format!("SELECT status FROM inferences WHERE prompt_snippet LIKE '%{}%' ORDER BY created_at ASC", test_message))
+            .fetch_all(pool.as_ref())
+            .await
+            .expect("query should succeed");
+
+        use sqlx::Row;
+        let statuses: Vec<String> = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("status").unwrap())
+            .collect();
+
+        assert_eq!(
+            statuses,
+            vec!["streaming", "ok"],
+            "expected streaming then ok records"
+        );
+    }
+
+    /// Integration test: verifies that a failed SSE streaming request (upstream error)
+    /// produces records with "streaming" and "stream_error".
+    /// Requires DATABASE_URL to be set; skips gracefully otherwise.
+    #[tokio::test]
+    #[serial]
+    async fn persistence_integration_sse_streaming_error() {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("SKIP persistence_integration_sse_streaming_error: DATABASE_URL not set");
+                return;
+            }
+        };
+
+        std::env::set_var("MOCK_API_KEY", "sk-test");
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("integration test DB connect should succeed");
+        let pool = Arc::new(pool);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
+
+        let (app, server) = build_app_with_persistence(pool.clone(), semaphore.clone(), None);
+
+        let unique_id = uuid::Uuid::new_v4().to_string();
+        let test_message = format!("fix this error {}", unique_id);
+
+        // Mock upstream that returns error
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"service unavailable"}"#);
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"messages":[{{"role":"user","content":"{}"}}],"stream":true}}"#,
+                        test_message
+                    )))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        mock.assert();
+
+        // Wait for the background logging task to complete
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        // Verify DB records: should have "streaming" and "upstream_error"
+        let rows = sqlx::query(&format!("SELECT status FROM inferences WHERE prompt_snippet LIKE '%{}%' ORDER BY created_at ASC", test_message))
+            .fetch_all(pool.as_ref())
+            .await
+            .expect("query should succeed");
+
+        use sqlx::Row;
+        let statuses: Vec<String> = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("status").unwrap())
+            .collect();
+
+        assert_eq!(
+            statuses,
+            vec!["streaming", "upstream_error"],
+            "expected streaming then upstream_error records"
+        );
+    }
+
     #[tokio::test]
     async fn test_dashboard_authenticated_returns_html() {
         let response = test_app()
@@ -1492,6 +1650,85 @@ mod tests {
         (app, server)
     }
 
+    /// Build app state and router with a real database pool for integration tests.
+    pub(crate) fn build_app_with_persistence(
+        pool: Arc<sqlx::PgPool>,
+        semaphore: Arc<tokio::sync::Semaphore>,
+        http_client: Option<reqwest::Client>,
+    ) -> (Router, httpmock::MockServer) {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        use std::collections::HashMap;
+        let cats = intent_classifier::hardcoded_categories();
+        let server = httpmock::MockServer::start();
+        let client = http_client.unwrap_or_else(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .expect("test reqwest client should build")
+        });
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let endpoint = server.url("/v1/chat/completions");
+        let mut routing = HashMap::new();
+        routing.insert(
+            cats[1].name.clone(),
+            intent_classifier::RouteEntry {
+                model: "sf-model".to_string(),
+                endpoint: endpoint.clone(),
+                cost_per_1m_input_tokens: None,
+                provider_type: "openai_compatible".to_string(),
+                api_key_env: Some("MOCK_API_KEY".to_string()),
+            },
+        );
+        routing.insert(
+            cats[3].name.clone(),
+            intent_classifier::RouteEntry {
+                model: "ca-model".to_string(),
+                endpoint,
+                cost_per_1m_input_tokens: None,
+                provider_type: "openai_compatible".to_string(),
+                api_key_env: Some("MOCK_API_KEY".to_string()),
+            },
+        );
+        let fallback = intent_classifier::RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        let regex_classifier =
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
+        let classifier_chain =
+            intent_classifier::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
+        let classifier_arc = Some(Arc::new(classifier_chain));
+        let mut merged_routing = std::collections::HashMap::new();
+        if let Some(cls) = classifier_arc.as_ref() {
+            for backend in cls.backends().iter() {
+                if let Some(r) = backend.get_routing() {
+                    merged_routing.extend(r.clone());
+                }
+            }
+        }
+        let app_state = Arc::new(AppState {
+            persistence: Some(persistence::PersistenceConfig {
+                pool,
+                task_semaphore: semaphore,
+            }),
+            classifier: classifier_arc,
+            routing: Arc::new(merged_routing),
+            model_costs: intent_classifier::ModelCosts::empty(),
+            baseline_model: String::new(),
+            classify_db_log: false,
+            http_client: Some(client),
+        });
+        let app = build_app(auth_config, app_state);
+        (app, server)
+    }
+
     fn test_app_with_dead_endpoint(env_var_name: &str) -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
@@ -1545,6 +1782,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_upstream_returns_response() {
         let env = "TEST_UPSTREAM_RESP";
         let _guard = EnvGuard(env);
@@ -1584,6 +1822,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_upstream_request_includes_auth_header() {
         let env = "TEST_UPSTREAM_AUTH";
         let _guard = EnvGuard(env);
@@ -1617,6 +1856,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_upstream_request_includes_content_type_json() {
         let env = "TEST_UPSTREAM_CT";
         let _guard = EnvGuard(env);
@@ -1650,6 +1890,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_upstream_unreachable_returns_502() {
         let env = "TEST_UPSTREAM_DEAD";
         let _guard = EnvGuard(env);
@@ -1682,6 +1923,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_upstream_skip_classify_via_headers() {
         let env = "TEST_UPSTREAM_SKIP";
         let _guard = EnvGuard(env);
@@ -1725,6 +1967,7 @@ mod tests {
     // ── SSE streaming tests ─────────────────────────────────────────────────
 
     #[tokio::test]
+    #[serial]
     async fn test_streaming_handler_returns_sse_content_type() {
         let env = "TEST_STREAM_CT";
         let _guard = EnvGuard(env);
@@ -1779,6 +2022,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_streaming_handler_forwards_upstream_bytes() {
         let env = "TEST_STREAM_FWD";
         std::env::set_var(env, "sk-test");
@@ -1826,6 +2070,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_streaming_handler_non_2xx_returns_sse_error_event() {
         let env = "TEST_STREAM_ERR";
         std::env::set_var(env, "sk-test");
@@ -1864,8 +2109,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_streaming_true_returns_sse_content() {
         let env = "TEST_STREAM_TSSE";
+        let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
         let (app, server) = test_app_with_http_client(env);
         let mock = server.mock(|when, then| {
@@ -1903,8 +2150,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_streaming_false_returns_buffered_json() {
         let env = "TEST_STREAM_FJSON";
+        let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
         let (app, server) = test_app_with_http_client(env);
         let mock = server.mock(|when, then| {
@@ -1942,8 +2191,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_streaming_absent_returns_buffered_json() {
         let env = "TEST_STREAM_AJSON";
+        let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
         let (app, server) = test_app_with_http_client(env);
         let mock = server.mock(|when, then| {
@@ -2190,6 +2441,7 @@ mod slow_tests {
         body::Body,
         http::{header, Request},
     };
+    use serial_test::serial;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::util::ServiceExt;
 
@@ -2226,6 +2478,7 @@ mod slow_tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_streaming_keepalive_injected() {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         std::env::set_var("KEEPALIVE_INTERVAL_SECS", "1");

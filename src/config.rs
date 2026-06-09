@@ -489,9 +489,11 @@ mod tests {
     use super::*;
     use crate::intent_classifier::hardcoded_categories;
     use crate::routing::RouteEntry;
+    use serial_test::serial;
     use std::collections::HashMap;
 
     #[test]
+    #[serial]
     fn env_or_default_returns_env_var_when_set() {
         std::env::set_var("TEST_CONFIG_VAR", "override");
         assert_eq!(env_or_default("TEST_CONFIG_VAR", "default"), "override");
@@ -499,6 +501,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn env_or_default_returns_default_when_unset() {
         std::env::remove_var("UNSET_CONFIG_VAR");
         assert_eq!(env_or_default("UNSET_CONFIG_VAR", "default"), "default");
@@ -618,6 +621,7 @@ api_key_env = ""
     }
 
     #[test]
+    #[serial]
     fn hardcoded_routing_respects_nvidia_endpoint_env() {
         struct EnvGuard;
         impl Drop for EnvGuard {
@@ -639,6 +643,7 @@ api_key_env = ""
     }
 
     #[test]
+    #[serial]
     fn load_routing_behavior() {
         // 1. When ROUTING_CONFIG_PATH points to a valid file, load_routing returns parsed routing and fallback
         let toml_content = r#"
