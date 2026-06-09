@@ -43,7 +43,6 @@ pub(crate) struct CategoryConfig {
     pub description: String,
     pub threshold: u32,
     pub priority: u8,
-    pub model_env_var: Option<String>,
 }
 
 pub(crate) fn hardcoded_categories() -> Vec<CategoryConfig> {
@@ -53,28 +52,24 @@ pub(crate) fn hardcoded_categories() -> Vec<CategoryConfig> {
             description: "Reading, viewing, inspecting, searching, or navigating files or code".to_string(),
             threshold: 3,
             priority: 1,
-            model_env_var: Some("DEFAULT_MODEL_READING".to_string()),
         },
         CategoryConfig {
             name: "SYNTAX_FIX".to_string(),
             description: "Fixing bugs, errors, typos, compilation issues, or broken code".to_string(),
             threshold: 3,
             priority: 2,
-            model_env_var: Some("DEFAULT_MODEL".to_string()),
         },
         CategoryConfig {
             name: "COMPLEX_REASONING".to_string(),
             description: "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization".to_string(),
             threshold: 3,
             priority: 3,
-            model_env_var: Some("DEFAULT_MODEL_COMPLEX".to_string()),
         },
         CategoryConfig {
             name: "CASUAL".to_string(),
             description: "Simple questions, greetings, general conversation, or short prompts".to_string(),
             threshold: 1,
             priority: 4,
-            model_env_var: Some("DEFAULT_MODEL".to_string()),
         },
     ]
 }
@@ -502,7 +497,7 @@ const NEGATIVE_META: &[NegativeMeta] = &[
 // ── Auth Header Lookup ──
 
 /// Maps a provider_type string and resolved API key to HTTP auth header tuples.
-/// Called by the upstream proxy (Change 4) to attach the correct auth header
+/// Called by the upstream proxy to attach the correct auth header
 /// before forwarding the request to the provider.
 pub fn auth_headers_for(provider_type: &str, api_key: &str) -> Vec<(String, String)> {
     match provider_type {

@@ -9,11 +9,193 @@ use crate::routing::*;
 pub(crate) const CONFIG_DEFAULT: &str = "config.toml";
 #[cfg(test)]
 pub(crate) const ROUTING_CONFIG_LEGACY: &str = "routing.toml";
-pub(crate) const NVIDIA_ENDPOINT_DEFAULT: &str =
-    "https://integrate.api.nvidia.com/v1/chat/completions";
 
 pub(crate) fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Load dashboard configuration from a parsed TOML value.
+/// Returns defaults if section is absent.
+pub(crate) fn load_dashboard_config_from_value(root: &toml::Value) -> DashboardConfig {
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => return DashboardConfig::default(),
+    };
+    let dashboard_section = match table.get("dashboard").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => return DashboardConfig::default(),
+    };
+    DashboardConfig {
+        default_hours: dashboard_section
+            .get("default_hours")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(24) as u32,
+        hours_min: dashboard_section
+            .get("hours_min")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(1) as u32,
+        hours_max: dashboard_section
+            .get("hours_max")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(720) as u32,
+        page_limit: dashboard_section
+            .get("page_limit")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(20) as u32,
+        page_limit_max: dashboard_section
+            .get("page_limit_max")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(100) as u32,
+        recent_count: dashboard_section
+            .get("recent_count")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(5) as u32,
+    }
+}
+
+/// Load server configuration from a parsed TOML value.
+/// Returns defaults if section is absent.
+pub(crate) fn load_server_config_from_value(root: &toml::Value) -> ServerConfig {
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => return ServerConfig::default(),
+    };
+    let server_section = match table.get("server").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => return ServerConfig::default(),
+    };
+    ServerConfig {
+        port: server_section
+            .get("port")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(10000) as u16,
+        log_level: server_section
+            .get("log_level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info")
+            .to_string(),
+        log_format: server_section
+            .get("log_format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("compact")
+            .to_string(),
+    }
+}
+
+/// Load HTTP configuration from a parsed TOML value.
+/// Returns defaults if section is absent.
+pub(crate) fn load_http_config_from_value(root: &toml::Value) -> HttpConfig {
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => return HttpConfig::default(),
+    };
+    let http_section = match table.get("http").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => return HttpConfig::default(),
+    };
+    HttpConfig {
+        max_upstream_body_bytes: http_section
+            .get("max_upstream_body_bytes")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(10_485_760) as usize,
+        keepalive_interval_secs: http_section
+            .get("keepalive_interval_secs")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(15) as u64,
+        request_body_limit_bytes: http_section
+            .get("request_body_limit_bytes")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(10_485_760) as usize,
+        client_timeout_secs: http_section
+            .get("client_timeout_secs")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(120) as u64,
+        client_connect_timeout_secs: http_section
+            .get("client_connect_timeout_secs")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(30) as u64,
+        streaming_channel_capacity: http_section
+            .get("streaming_channel_capacity")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(32) as usize,
+    }
+}
+
+/// Load database configuration from a parsed TOML value.
+/// Returns defaults if section is absent.
+pub(crate) fn load_database_config_from_value(root: &toml::Value) -> DatabaseConfig {
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => return DatabaseConfig::default(),
+    };
+    let db_section = match table.get("database").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => return DatabaseConfig::default(),
+    };
+    DatabaseConfig {
+        connection_retries: db_section
+            .get("connection_retries")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(3) as u32,
+        retry_base_ms: db_section
+            .get("retry_base_ms")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(1000) as u64,
+        max_connections: db_section
+            .get("max_connections")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(10) as u32,
+        acquire_timeout_secs: db_section
+            .get("acquire_timeout_secs")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(30) as u64,
+        idle_timeout_secs: db_section
+            .get("idle_timeout_secs")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(1800) as u64,
+        log_concurrency_limit: db_section
+            .get("log_concurrency_limit")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(100) as u32,
+    }
+}
+
+/// Load auth providers from a parsed TOML value.
+/// Returns empty vec if section is absent.
+pub(crate) fn load_auth_providers_from_value(root: &toml::Value) -> Vec<AuthProviderConfig> {
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => return vec![],
+    };
+    let providers_array = match table.get("auth_provider").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return vec![],
+    };
+
+    let mut providers = Vec::new();
+    for provider in providers_array {
+        if let Some(provider_table) = provider.as_table() {
+            let type_str = provider_table
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let header = provider_table
+                .get("header")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let value_template = provider_table
+                .get("value_template")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            providers.push(AuthProviderConfig {
+                type_: type_str,
+                header,
+                value_template,
+            });
+        }
+    }
+    providers
 }
 
 /// HTTP client configuration with limits and timeouts.
@@ -41,6 +223,104 @@ impl HttpClientConfig {
             ),
         }
     }
+}
+
+/// Dashboard configuration for page defaults.
+#[derive(Clone, Debug)]
+pub struct DashboardConfig {
+    pub default_hours: u32,
+    pub hours_min: u32,
+    pub hours_max: u32,
+    pub page_limit: u32,
+    pub page_limit_max: u32,
+    pub recent_count: u32,
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            default_hours: 24,
+            hours_min: 1,
+            hours_max: 720,
+            page_limit: 20,
+            page_limit_max: 100,
+            recent_count: 5,
+        }
+    }
+}
+
+/// Server configuration for port and logging.
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    pub port: u16,
+    pub log_level: String,
+    pub log_format: String,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            port: 10000,
+            log_level: "info".to_string(),
+            log_format: "compact".to_string(),
+        }
+    }
+}
+
+/// HTTP configuration for client limits and timeouts.
+#[derive(Clone, Debug)]
+pub struct HttpConfig {
+    pub max_upstream_body_bytes: usize,
+    pub keepalive_interval_secs: u64,
+    pub request_body_limit_bytes: usize,
+    pub client_timeout_secs: u64,
+    pub client_connect_timeout_secs: u64,
+    pub streaming_channel_capacity: usize,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            max_upstream_body_bytes: 10_485_760,
+            keepalive_interval_secs: 15,
+            request_body_limit_bytes: 10_485_760,
+            client_timeout_secs: 120,
+            client_connect_timeout_secs: 30,
+            streaming_channel_capacity: 32,
+        }
+    }
+}
+
+/// Database configuration for pool and retry settings.
+#[derive(Clone, Debug)]
+pub struct DatabaseConfig {
+    pub connection_retries: u32,
+    pub retry_base_ms: u64,
+    pub max_connections: u32,
+    pub acquire_timeout_secs: u64,
+    pub idle_timeout_secs: u64,
+    pub log_concurrency_limit: u32,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            connection_retries: 3,
+            retry_base_ms: 1000,
+            max_connections: 10,
+            acquire_timeout_secs: 30,
+            idle_timeout_secs: 1800,
+            log_concurrency_limit: 100,
+        }
+    }
+}
+
+/// Authentication provider configuration.
+#[derive(Clone, Debug)]
+pub struct AuthProviderConfig {
+    pub type_: String,
+    pub header: Option<String>,
+    pub value_template: Option<String>,
 }
 
 /// Parse an integer environment variable with optional min/max validation.
@@ -93,18 +373,14 @@ fn hardcoded_model_default(env_var: &str) -> &'static str {
 pub(crate) fn hardcoded_routing(
     categories: &[CategoryConfig],
 ) -> (HashMap<String, RouteEntry>, RouteEntry) {
-    let endpoint = env_or_default("NVIDIA_ENDPOINT", NVIDIA_ENDPOINT_DEFAULT);
+    let endpoint = env_or_default("NVIDIA_ENDPOINT", "https://integrate.api.nvidia.com/v1/chat/completions");
     let mut routing = HashMap::new();
 
     for cat in categories {
-        let model = match &cat.model_env_var {
-            Some(env_var) => env_or_default(env_var, hardcoded_model_default(env_var)),
-            None => DEFAULT_MODEL.to_string(),
-        };
         routing.insert(
             cat.name.clone(),
             RouteEntry {
-                model,
+                model: DEFAULT_MODEL.to_string(),
                 endpoint: endpoint.clone(),
                 cost_per_1m_input_tokens: None,
                 provider_type: "nvidia_nim".to_string(),
@@ -304,17 +580,12 @@ pub(crate) fn load_categories_from_value(
             .to_string();
         let threshold = t.get("threshold").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
         let priority = t.get("priority").and_then(|v| v.as_integer()).unwrap_or(99) as u8;
-        let model_env_var = t
-            .get("model_env_var")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
 
         categories.push(CategoryConfig {
             name,
             description,
             threshold,
             priority,
-            model_env_var,
         });
     }
 
@@ -324,8 +595,19 @@ pub(crate) fn load_categories_from_value(
     Ok(categories)
 }
 
-pub(crate) fn build_model_costs(routing: &HashMap<String, RouteEntry>) -> ModelCosts {
+pub(crate) fn build_model_costs(root: &toml::Value, routing: &HashMap<String, RouteEntry>) -> ModelCosts {
     let mut costs = crate::intent_classifier::hardcoded_model_costs();
+    
+    // Override with values from [model_costs] section in TOML
+    if let Some(model_costs_table) = root.get("model_costs").and_then(|v| v.as_table()) {
+        for (model_name, cost_value) in model_costs_table {
+            if let Some(cost) = cost_value.as_float() {
+                costs.insert(model_name.clone(), cost);
+            }
+        }
+    }
+    
+    // Apply per-route overrides
     for entry in routing.values() {
         if let Some(override_cost) = entry.cost_per_1m_input_tokens {
             costs.insert(entry.model.clone(), override_cost);
@@ -647,13 +929,7 @@ api_key_env = ""
                 cat.name
             );
             let entry = routing.get(cat.name.as_str()).unwrap();
-            let expected_model = match cat.model_env_var.as_deref() {
-                Some("DEFAULT_MODEL") => DEFAULT_MODEL,
-                Some("DEFAULT_MODEL_COMPLEX") => DEFAULT_MODEL_COMPLEX,
-                Some("DEFAULT_MODEL_READING") => DEFAULT_MODEL_READING,
-                _ => DEFAULT_MODEL,
-            };
-            assert_eq!(entry.model, expected_model);
+            assert_eq!(entry.model, DEFAULT_MODEL);
             assert!(entry.endpoint.contains("integrate.api.nvidia.com"));
             assert_eq!(entry.provider_type, "nvidia_nim");
             assert_eq!(entry.api_key_env, Some("NVIDIA_API_KEY".to_string()));
@@ -780,7 +1056,10 @@ api_key_env = ""
             },
         );
 
-        let costs = build_model_costs(&routing);
+        let costs = {
+            let empty_root: toml::Value = toml::from_str("").unwrap_or_else(|_| toml::Value::Table(Default::default()));
+            build_model_costs(&empty_root, &routing)
+        };
 
         // Hardcoded defaults
         assert_eq!(costs.get("claude-3.5-sonnet"), Some(5.00)); // Overridden

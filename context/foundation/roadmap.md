@@ -51,6 +51,9 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-09 | llm-classifier | implement `LLMClassifier` backend for `IntentClassify` trait: sends prompt to a small/cheap model, parses classification from response; config carries model, endpoint, `UPSTREAM_API_KEY`, classification prompt template | S-07, S-07b | FR-002 | done |
 | S-09a | classifier-config-boundary | extract generic classifier boundary config: per-backend enable/disable flags, clear separation of generic settings (CategoryConfig, chain construction) from backend-specific settings (RegexClassifier: patterns/weights; LLMClassifier: model/endpoint/API key/prompt) | S-07b, S-09 | FR-002 | proposed |
 | S-10 | post-review-cleanup | (tech debt + hardening + reliability) Consolidates review-cleanup, review-hardening, and prod-hardening-reliability into a single 12-phase plan: SSE log timing, handler decomposition, cleanup, test safety, embedded migrations, LLM key refresh, auth hardening, streaming/JSON fixes, dead code, graceful shutdown, configurability, and observability | S-09a | — | planned |
+| S-11 | opentelemetry-integration | export application traces, metrics, and logs via OTLP to an observability backend (Grafana Cloud); leverages existing `tracing` crate with zero business-logic changes for traces | S-10 | FR-005 | proposed |
+| S-12 | in-memory-db-fallback | persistence always available: 3-tier backend config (`memory` / `sqlite` / `postgres`) via `DB_BACKEND` env; enables zero-dep dev startup and real persistence in tests | S-13 | FR-005, NFR (testing) | proposed |
+| S-13 | in-memory-config-filesystem | single-source-of-truth config: embed config.toml via `include_str!()`, eliminate all hardcoded fallbacks, add dashboard-driven config reload — 3 phases | S-09a | FR-002, FR-003 | preparing |
 
 ## Streams
 
@@ -62,6 +65,8 @@ Navigation aid — groups items that share a Prerequisites chain. Canonical orde
 | B | Dashboard | `F-03` → `S-02` → `S-03` → `S-04` → `S-05` | Observability: incremental features (S-02/S-03/S-04) followed by consolidation into polished MVP UI (S-05). S-02 depends on S-01e (proxy must be logging inferences). |
 | C | Metrics | — | All metrics features (S-04) integrated into dashboard stream (B). |
 | D | Critical Logging | `F-04` → `S-06` | Ensures all critical paths have observability logs and a dedicated UI page. |
+| E | Observability | `S-10` → `S-11` | Production hardening followed by OpenTelemetry integration for distributed tracing, metrics export, and log correlation. |
+| F | Config | `S-09a` → `S-13` → `S-12` | Config boundary formalization (S-09a) → single-source-of-truth TOML config + dashboard reload (S-13) → persistence backend leverages unified TOML (S-12). |
 
 ## Baseline
 
@@ -405,6 +410,9 @@ Foundations below assume these are present and do NOT re-scaffold them.
 | S-09 | llm-classifier | Classifier: LLM-based backend implementing IntentClassify for fallback classification | no | Proposed; depends on S-07 trait + S-07b shared config. Research: `context/changes/llm-classifier/research.md`. |
 | S-09a | classifier-config-boundary | Classifier: Formalize generic/specific config boundary with per-backend enable/disable flags; placed after S-09 to validate against two real backends | no | Proposed; depends on S-07b + S-09. Research: `context/changes/classifier-config-boundary/research.md`. |
 | S-10 | post-review-cleanup | (tech debt + hardening + reliability) 12-phase consolidated plan: SSE log fix, handler decomposition, cleanup, test safety, migrations, LLM key refresh, auth hardening, streaming/JSON fixes, dead code, graceful shutdown, configurability, observability | S-09a | — | planned |
+| S-11 | opentelemetry-integration | Observability: OTLP export of traces, metrics, and logs to Grafana Cloud (feature-gated) | S-10 | FR-005 | proposed |
+| S-12 | in-memory-db-fallback | Persistence: 3-tier backend config (memory/sqlite/postgres); `[persistence]` section in unified TOML | S-13 | FR-005, NFR | proposed |
+| S-13 | in-memory-config-filesystem | Config: single-source-of-truth TOML, eliminate ~65 hardcoded fallbacks, dashboard reload (3 phases) | S-09a | FR-002, FR-003 | preparing |
 
 ## Open Roadmap Questions
 
@@ -461,8 +469,8 @@ The 3-week MVP budget under a 6-week hard deadline makes calendar time the #1 bl
 **#1 blocker:** time (6-week hard deadline)
 **Baseline present:** Backend/API, Deploy/infra (partial)
 **Foundations:** 4
-**Slices:** 16 (S-01a through S-01e, S-02, S-03, S-04, S-05, S-06, S-07, S-07a, S-07b, S-08, S-09, S-09a)
-**Status breakdown:** ready: 3 (F-01, F-02, F-03) | proposed: 7 (F-04, S-06, S-07a, S-07b, S-09, S-09a, S-07) | planned: 1 (S-10) | implemented: 9 | descoped: 1 (S-08) | blocked: 0
+**Slices:** 18 (S-01a through S-01e, S-02, S-03, S-04, S-05, S-06, S-07, S-07a, S-07b, S-08, S-09, S-09a, S-10, S-11, S-12, S-13)
+**Status breakdown:** ready: 3 | proposed: 9 (F-04, S-06, S-07a, S-07b, S-09, S-09a, S-07, S-11, S-12) | planned: 1 (S-10) | preparing: 1 (S-13) | implemented: 9 | descoped: 1 (S-08) | blocked: 0
 **PRD coverage:** 6 must-have FRs covered | 1 nice-to-have FR (implemented)
 **Open Roadmap Q:** 3 (intent classification rules, cheap fallback model, upstream model choices)
 **Parked items:** 0

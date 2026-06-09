@@ -136,7 +136,12 @@ async fn main() {
         } else {
             config::hardcoded_routing(&categories)
         };
-        let model_costs = config::build_model_costs(&routing_map);
+        let model_costs = if let Some(ref root) = config_root {
+            config::build_model_costs(root, &routing_map)
+        } else {
+            let empty_root = toml::from_str("").unwrap_or_else(|_| toml::Value::Table(Default::default()));
+            config::build_model_costs(&empty_root, &routing_map)
+        };
         let baseline_model =
             config::env_or_default("BASELINE_MODEL", intent_classifier::DEFAULT_MODEL_COMPLEX);
         if !classifiers_config.enabled {

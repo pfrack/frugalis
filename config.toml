@@ -1,42 +1,135 @@
-# Global classifiers configuration
+# Cerebrum Configuration
+# This is the single source of truth for all non-secret configuration.
+# Secrets (API keys, database URLs, auth tokens) remain exclusively in environment variables.
+# 
+# To override settings: set CONFIG_PATH=/path/to/custom.toml
+# Your custom file merges on top of these embedded defaults—specify only what you want to change.
+
+[server]
+port = 10000
+log_level = "info"
+log_format = "compact"
+
+[http]
+max_upstream_body_bytes = 10485760
+keepalive_interval_secs = 15
+request_body_limit_bytes = 10485760
+client_timeout_secs = 120
+client_connect_timeout_secs = 30
+streaming_channel_capacity = 32
+
+[cors]
+allowed_origins = []
+
+[database]
+connection_retries = 3
+retry_base_ms = 1000
+max_connections = 10
+acquire_timeout_secs = 30
+idle_timeout_secs = 1800
+log_concurrency_limit = 100
+
 [classifiers]
-# enabled = true           # Master switch to enable/disable all classification
-# order = ["regex", "llm"] # Backend priority order (regex checked first, then llm)
+enabled = true
+order = ["regex", "llm"]
 
-# Uncomment to disable regex classifier (enabled by default)
-# [regex_classifier]
-# enabled = true
-# timeout_secs = 5         # Regex classifier timeout in seconds
+[regex_classifier]
+enabled = true
 
-# Uncomment to enable LLM classifier backend (Phase 2 of S-09)
-# [llm_classifier]
+# [llm_classifier] — uncomment to enable LLM backend
 # enabled = true
 # model = "gpt-4o-mini"
 # endpoint = "https://api.openai.com/v1/chat/completions"
-# api_key_env = "OPENAI_API_KEY"  # env var name holding the API key
-# provider_type = "openai_compatible"  # openai_compatible, anthropic, ollama, local
-# prompt_template_path = "path/to/prompt.txt"  # optional custom prompt
-# timeout_secs = 3
-
-# Example: LLM Classifier config for testing with Groq free tier
-# [llm_classifier]
-# enabled = true
-# model = "llama3-8b-8192"
-# endpoint = "https://api.groq.com/openai/v1/chat/completions"
-# api_key_env = "GROQ_API_KEY"
+# api_key_env = "OPENAI_API_KEY"
 # provider_type = "openai_compatible"
-# timeout_secs = 10
+# prompt_template_path = "path/to/prompt.txt"
+# timeout_secs = 3
 
 [[categories]]
 name = "FILE_READING"
-description = "Reading files"
+description = "Reading, viewing, inspecting, searching, or navigating files or code"
 threshold = 3
 priority = 1
-model_env_var = "DEFAULT_MODEL_READING"
+
+[[categories]]
+name = "SYNTAX_FIX"
+description = "Fixing bugs, errors, typos, compilation issues, or broken code"
+threshold = 3
+priority = 2
+
+[[categories]]
+name = "COMPLEX_REASONING"
+description = "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization"
+threshold = 3
+priority = 3
 
 [[categories]]
 name = "CASUAL"
-description = "Simple questions"
+description = "Simple questions, greetings, general conversation, or short prompts"
 threshold = 1
 priority = 4
-model_env_var = "DEFAULT_MODEL"
+
+[FILE_READING]
+model = "meta/llama-3.1-70b-instruct"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+provider_type = "nvidia_nim"
+api_key_env = "NVIDIA_API_KEY"
+
+[SYNTAX_FIX]
+model = "meta/llama-3.1-8b-instruct"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+provider_type = "nvidia_nim"
+api_key_env = "NVIDIA_API_KEY"
+
+[COMPLEX_REASONING]
+model = "meta/llama-3.3-70b-instruct"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+provider_type = "nvidia_nim"
+api_key_env = "NVIDIA_API_KEY"
+
+[CASUAL]
+model = "meta/llama-3.1-8b-instruct"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+provider_type = "nvidia_nim"
+api_key_env = "NVIDIA_API_KEY"
+
+[FALLBACK]
+model = "meta/llama-3.1-8b-instruct"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+provider_type = "nvidia_nim"
+api_key_env = "NVIDIA_API_KEY"
+
+[model_costs]
+"claude-3.5-sonnet" = 3.00
+"gpt-4o" = 2.50
+"gpt-4o-mini" = 0.15
+"deepseek-chat" = 0.14
+
+[dashboard]
+default_hours = 24
+hours_min = 1
+hours_max = 720
+page_limit = 20
+page_limit_max = 100
+recent_count = 5
+
+[[auth_provider]]
+type = "openai_compatible"
+header = "authorization"
+value_template = "Bearer {api_key}"
+
+[[auth_provider]]
+type = "anthropic"
+header = "x-api-key"
+value_template = "{api_key}"
+
+[[auth_provider]]
+type = "ollama"
+
+[[auth_provider]]
+type = "local"
+
+[[auth_provider]]
+type = "nvidia_nim"
+header = "authorization"
+value_template = "Bearer {api_key}"
