@@ -292,6 +292,47 @@ impl Default for DatabaseConfig {
     }
 }
 
+/// Persistence backend configuration loaded from [persistence] section.
+#[derive(Clone, Debug)]
+pub struct PersistenceSettings {
+    pub backend: String,
+    pub sqlite_path: String,
+}
+
+impl Default for PersistenceSettings {
+    fn default() -> Self {
+        Self {
+            backend: "memory".to_string(),
+            sqlite_path: "./cerebrum.db".to_string(),
+        }
+    }
+}
+
+/// Load persistence configuration from a parsed TOML value.
+/// Returns defaults if section is absent.
+pub(crate) fn load_persistence_config_from_value(root: &toml::Value) -> PersistenceSettings {
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => return PersistenceSettings::default(),
+    };
+    let persistence_section = match table.get("persistence").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => return PersistenceSettings::default(),
+    };
+    PersistenceSettings {
+        backend: persistence_section
+            .get("backend")
+            .and_then(|v| v.as_str())
+            .unwrap_or("memory")
+            .to_string(),
+        sqlite_path: persistence_section
+            .get("sqlite_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("./cerebrum.db")
+            .to_string(),
+    }
+}
+
 /// Authentication provider configuration.
 #[derive(Clone, Debug)]
 pub struct AuthProviderConfig {

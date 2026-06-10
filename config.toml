@@ -29,6 +29,10 @@ acquire_timeout_secs = 30
 idle_timeout_secs = 1800
 log_concurrency_limit = 100
 
+[persistence]
+backend = "memory"
+# sqlite_path = "./cerebrum.db"
+
 [classifiers]
 enabled = true
 order = ["regex", "llm"]
