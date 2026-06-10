@@ -12,14 +12,26 @@ pub use crate::routing::{
     ModelCosts, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX,
 };
 
-/// Hardcoded default costs per 1M input tokens for known models.
-pub(crate) fn hardcoded_model_costs() -> HashMap<String, f64> {
-    let mut m = HashMap::new();
-    m.insert("claude-3.5-sonnet".to_string(), 3.00);
-    m.insert("gpt-4o".to_string(), 2.50);
-    m.insert("gpt-4o-mini".to_string(), 0.15);
-    m.insert("deepseek-chat".to_string(), 0.14);
-    m
+/// A single regex pattern entry with its weight for intent classification.
+#[derive(Clone, Debug)]
+pub(crate) struct PatternEntry {
+    pub regex: String,
+    pub weight: u8,
+}
+
+/// Dual-threshold configuration for a category.
+#[derive(Clone, Debug)]
+pub(crate) struct DualThreshold {
+    pub alt_score: u32,
+    pub suppress_if_present: String,
+}
+
+/// A negative suppression pattern configuration.
+#[derive(Clone, Debug)]
+pub(crate) struct NegativePatternConfig {
+    pub regex: String,
+    pub suppressed: String,
+    pub penalty: u8,
 }
 
 /// Single source of truth for intent category definitions.
@@ -43,6 +55,8 @@ pub(crate) struct CategoryConfig {
     pub description: String,
     pub threshold: u32,
     pub priority: u8,
+    pub patterns: Vec<PatternEntry>,
+    pub dual_threshold: Option<DualThreshold>,
 }
 
 pub(crate) fn hardcoded_categories() -> Vec<CategoryConfig> {
@@ -52,24 +66,32 @@ pub(crate) fn hardcoded_categories() -> Vec<CategoryConfig> {
             description: "Reading, viewing, inspecting, searching, or navigating files or code".to_string(),
             threshold: 3,
             priority: 1,
+            patterns: vec![],
+            dual_threshold: None,
         },
         CategoryConfig {
             name: "SYNTAX_FIX".to_string(),
             description: "Fixing bugs, errors, typos, compilation issues, or broken code".to_string(),
             threshold: 3,
             priority: 2,
+            patterns: vec![],
+            dual_threshold: None,
         },
         CategoryConfig {
             name: "COMPLEX_REASONING".to_string(),
             description: "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization".to_string(),
             threshold: 3,
             priority: 3,
+            patterns: vec![],
+            dual_threshold: None,
         },
         CategoryConfig {
             name: "CASUAL".to_string(),
             description: "Simple questions, greetings, general conversation, or short prompts".to_string(),
             threshold: 1,
             priority: 4,
+            patterns: vec![],
+            dual_threshold: None,
         },
     ]
 }
@@ -385,7 +407,7 @@ pub fn build_llm_classifier_prompt(categories: &[CategoryConfig]) -> String {
 // ── Internal Types ──
 
 pub struct PatternMeta {
-    pub category: &'static str,
+    pub category: String,
     pub weight: u8,
 }
 
@@ -548,7 +570,7 @@ fn build_all_patterns(
                 for (i, p) in FILE_READING.iter().enumerate() {
                     patterns.push(*p);
                     metadata.push(PatternMeta {
-                        category: "FILE_READING",
+                        category: "FILE_READING".to_string(),
                         weight: FR_WEIGHTS[i],
                     });
                 }
@@ -557,7 +579,7 @@ fn build_all_patterns(
                 for (i, p) in COMPLEX_REASONING.iter().enumerate() {
                     patterns.push(*p);
                     metadata.push(PatternMeta {
-                        category: "COMPLEX_REASONING",
+                        category: "COMPLEX_REASONING".to_string(),
                         weight: CR_WEIGHTS[i],
                     });
                 }
@@ -566,7 +588,7 @@ fn build_all_patterns(
                 for (i, p) in SYNTAX_FIX.iter().enumerate() {
                     patterns.push(*p);
                     metadata.push(PatternMeta {
-                        category: "SYNTAX_FIX",
+                        category: "SYNTAX_FIX".to_string(),
                         weight: SF_WEIGHTS[i],
                     });
                 }
@@ -575,7 +597,7 @@ fn build_all_patterns(
                 for (i, p) in CASUAL.iter().enumerate() {
                     patterns.push(*p);
                     metadata.push(PatternMeta {
-                        category: "CASUAL",
+                        category: "CASUAL".to_string(),
                         weight: CA_WEIGHTS[i],
                     });
                 }
@@ -592,7 +614,7 @@ fn build_all_patterns(
     for p in NEGATIVE.iter() {
         patterns.push(*p);
         metadata.push(PatternMeta {
-            category: "NEG",
+            category: "NEG".to_string(),
             weight: 0,
         });
     }
@@ -682,7 +704,7 @@ impl RegexClassifier {
         for &i in &matches {
             if i < self.negative_idx.start {
                 let meta = &self.metadata[i];
-                *scores.entry(meta.category).or_insert(0) += meta.weight as u32;
+                *scores.entry(meta.category.as_str()).or_insert(0) += meta.weight as u32;
             }
         }
 

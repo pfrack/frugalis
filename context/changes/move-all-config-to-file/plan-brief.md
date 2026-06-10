@@ -1,86 +1,112 @@
-# Move All Config to File — Plan Brief
+# Split RegexClassifier into Engine + Config-Driven Data — Plan Brief
 
 > Full plan: `context/changes/move-all-config-to-file/plan.md`
+> Research: `context/changes/move-all-config-to-file/research-regex-split.md`
 
 ## What & Why
 
-Move all non-secret env var reads into `config.toml`, the single source of truth for operational configuration. The codebase already embeds `config.toml` at compile time and loads most settings from it, but several env vars (`LOG_FORMAT`, `ALLOWED_ORIGINS`, `PORT`, `DEFAULT_MODEL`, `NVIDIA_ENDPOINT`) still bypass the config file. After this change, only secrets (API keys, auth tokens, `DATABASE_URL`) and meta-config (`CONFIG_PATH`, `RUST_LOG` as runtime override) remain as env vars.
+The `src/intent_classifier.rs` file (1232 lines) mixes two concerns: a generic regex classification engine and hardcoded category data (44 patterns, 4 weight arrays, model costs, negative suppression rules, dual-threshold logic referencing category names by string). We're splitting them so the engine becomes fully transparent — it works with any category config provided via `config.toml`. A user who supplies a custom `CONFIG_PATH` with their own `[[categories]]` (including patterns and weights) gets a completely custom classifier with zero trace of built-in FILE_READING/SYNTAX_FIX/etc. categories.
 
 ## Starting Point
 
-`config.toml` is embedded at compile time, parsed into a generic `toml::Value`, merged with an optional `CONFIG_PATH` overlay, and individual sections are extracted by loader functions (`load_server_config_from_value`, `load_http_config_from_value`, etc.) into typed structs in `src/config.rs`. The pattern is well-established — the work is extending it to cover the remaining env vars that duplicate or bypass it.
+Phases 1–3 of the existing plan are complete: all env-var-based config (`PORT`, `LOG_FORMAT`, `ALLOWED_ORIGINS`, `DEFAULT_MODEL`, etc.) has been moved to `config.toml`. The config loading pipeline (embedded `include_str!` + `CONFIG_PATH` overlay + per-section loader functions) is established and stable. What remains: the 48 hardcoded data items in `intent_classifier.rs` still bypass the config system entirely.
 
 ## Desired End State
 
-- All non-secret settings sourced from `config.toml` (with `CONFIG_PATH` overlay)
-- `RUST_LOG` env var kept as runtime override for `log_level` from config (standard Rust pattern)
-- `CONFIG_PATH` kept as the only non-secret env var (meta-configuration)
-- `render.yaml` only lists secrets + optional `RUST_LOG`
-- `env_or_default()` helper and `ROUTING_CONFIG_PATH` removed as dead code
-- Tests use programmatic config instead of env var sniffing
+- `CategoryConfig` carries `patterns: Vec<PatternEntry>` and optional `dual_threshold: Option<DualThreshold>` — all read from `config.toml`
+- `config.toml` contains every pattern, weight, negative suppression rule, model cost, and threshold that was previously hardcoded
+- `build_all_patterns()` iterates categories generically — zero `match` on category name
+- `classify_internal()` drives dual-threshold logic from `DualThreshold` config, not from hardcoded `"SYNTAX_FIX"` / `"FILE_READING"` string lookups
+- `PatternMeta.category` is `String` (owned) since patterns come from runtime config
+- `hardcoded_model_costs()`, `hardcoded_categories()`, all pattern/weight arrays, `NEGATIVE_META`, and `SHORT_PROMPT_LEN` const are removed
+- No `regex_defaults.rs` file — the embedded `config.toml` IS the default data
+- Existing tests pass against config-driven categories; new tests verify engine works with fully custom category sets
 
 ## Key Decisions Made
 
 | Decision | Choice | Why (1 sentence) | Source |
 |---|---|---|---|
-| RUST_LOG handling | Keep as env override of config.toml `log_level` | Standard Rust ecosystem pattern; enables per-module debug at runtime without config changes. | Plan |
-| CONFIG_PATH | Keep as env var | Meta-configuration — the path to config file can't be inside the config file itself. | Plan |
-| DEFAULT_MODEL / NVIDIA_ENDPOINT | Rename `[FALLBACK]` → `[DEFAULT]` in config.toml, use as default routing spec | `[FALLBACK]` already has model+endpoint+provider+api_key_env — the full routing context. Rename and use it instead of scattered env vars. | Plan |
-| ROUTING_CONFIG_PATH | Remove entirely | Only used in test-only `load_routing()` — dead code in production; render.yaml has it wrong too. | Plan |
-| Port override | Remove PORT env read | `config.toml` is the source; Render's PORT injection is a platform concern handled by config overlay. | Plan |
-| CORS origins format | TOML array of strings | Natural TOML format; config.toml already has `[cors] allowed_origins = []`. | Plan |
-| Config merge strategy | Routing/classifier sections get complete override; server/http/db/cors get field-level merge | Routing entries and classifier configs are complete specs — partial merge would silently combine base+overlay incorrectly. Operational config benefits from partial overrides. | Plan |
-| Test config overrides | Programmatic struct construction | Tests already build AppState manually; env vars for test config pollute the global namespace. | Plan |
+| Patterns location | Inline in `config.toml` | Single source of truth, no extra path resolution, matches existing overlay model. | Plan |
+| Rust defaults fallback | None — embedded config.toml is sufficient | `include_str!` bakes it into the binary; it can't be missing or corrupt at runtime. | Plan |
+| Negative pattern scope | Global `[[negative_patterns]]` (current behavior) | Least behavior change risk; expressions like "explain this file" cross-suppress across categories. | Research |
+| LLM few-shot examples | Generated dynamically from category config | Adapts to custom categories without hardcoding names; users who want hand-tuned examples provide `prompt_template_path`. | Plan |
+| Dual-threshold TOML format | Inline table `dual_threshold = { alt_score, suppress_if_present }` | Self-contained within the category entry; clean TOML syntax. | Plan |
+| Plan integration | Extend existing `plan.md` (Phase 4+) | One change-id, coherent progress tracking across all config migration work. | Plan |
 
 ## Scope
 
 **In scope:**
-- Expand `ServerConfig` with `log_level`, `log_format`
-- Create `CorsConfig` + loader (TOML array of origins)
-- Rename `[FALLBACK]` → `[DEFAULT]` in config.toml; use as default model/endpoint source
-- Replace `LOG_FORMAT`/`ALLOWED_ORIGINS`/`PORT`/`DEFAULT_MODEL`/`NVIDIA_ENDPOINT` env reads with config values
-- Remove `ROUTING_CONFIG_PATH` and `env_or_default()` helper
-- Clean up test env var usage → programmatic config
-- Update `render.yaml` and `AGENTS.md`
+- Extend `CategoryConfig` with `patterns`, `PatternEntry`, `DualThreshold`
+- Add `NegativePatternConfig` struct and `[[negative_patterns]]` TOML loader
+- Populate `config.toml` with all 44 positive patterns, 4 negative patterns, model costs
+- Change `PatternMeta.category` from `&'static str` to `String`
+- Refactor `build_all_patterns()` to be generic
+- Refactor `classify_internal()` for config-driven dual-threshold
+- Remove CASUAL special cases in `route_match()`, `fallback()`, `fallback_category()`
+- Generate LLM few-shot examples dynamically
+- Remove all hardcoded arrays and constants
+- Remove `hardcoded_model_costs()`, `hardcoded_categories()`
+- Update tests and add engine-generality tests
 
 **Out of scope:**
-- Serde-based TOML deserialization (keeping manual `toml::Value` extraction)
-- Moving secrets to config file
-- Removing `CONFIG_PATH` env var
-- Removing `RUST_LOG` env override
+- Creating `regex_defaults.rs` (embedded config serves this role)
+- Changing the `merge_toml_values()` mechanism
+- Adding serde-based deserialization (stays manual TOML extraction)
+- Changing how `RegexSet` is compiled or how the scoring algorithm works
+- Moving `[[categories]].patterns` to a separate file
 
 ## Architecture / Approach
 
-Follow the existing pattern for every change: define struct → write loader function using `toml::Value` getters → call loader in `main()` → use struct instead of env var.
-
-Key data flow change: settings that were read at point-of-use via `std::env::var()` or `env_or_default()` are now loaded once in `main()`, stored in a typed struct, and passed to consumers as parameters.
-
 ```
-Before:  env var → std::env::var() at point of use
-After:   config.toml → toml::Value → loader → typed struct → passed as param
+Before:                                     After:
+intent_classifier.rs (1232 lines)           intent_classifier.rs (~900 lines)
+├── hardcoded_model_costs() [DATA]          ├── Engine only: structs, traits,
+├── hardcoded_categories() [DATA]               algorithm, routing, tests
+├── CategoryConfig (bare) [SCHEMA]          ├── CategoryConfig (extended with
+├── 44+4 pattern arrays [DATA]                  patterns, dual_threshold)
+├── 4 weight arrays [DATA]                  └── PatternEntry, DualThreshold,
+├── NEGATIVE_META [DATA]                        NegativePatternConfig
+├── build_all_patterns() (match-based)
+├── classify_internal() (hardcoded SF)      config.toml (~350 lines)
+├── engine: ClassifierChain, LLMClassifier  ├── [[categories]] with patterns,
+│   routing, traits                             weights, dual_threshold
+└── tests                                   ├── [[negative_patterns]]
+                                            ├── [model_costs] (complete)
+config.rs                                   ├── [regex_classifier].short_prompt_len
+├── build_model_costs() seeds from          └── all existing sections
+│   hardcoded_model_costs() [REMOVED]
+├── load_categories_from_value()            config.rs
+│   4 fields [EXTENDED: +patterns,           ├── build_model_costs() starts empty
+│   +dual_threshold]                        ├── load_categories_from_value()
+│                                           │   parses patterns, dual_threshold
+│                                           ├── load_negative_patterns_from_value() [NEW]
+│                                           └── RegexClassifierConfig
+│                                               +short_prompt_len
 ```
+
+The data flows: `config.toml` → TOML parser → loader functions → `CategoryConfig` (with patterns) / `NegativePatternConfig` → `build_all_patterns()` (generic) → `RegexSet` + `Vec<PatternMeta>` → scoring algorithm.
 
 ## Phases at a Glance
 
 | Phase | What it delivers | Key risk |
 |---|---|---|
-| 1. Expand config structs & config.toml | `ServerConfig` gains `log_level`/`log_format`; new `CorsConfig` struct + loader; `[FALLBACK]` renamed to `[DEFAULT]`; merge supports per-key override for routing entries | Struct field defaults must match current behavior |
-| 2. Wire up config.toml in main.rs | `LOG_FORMAT`, `ALLOWED_ORIGINS`, `PORT` env reads replaced; `RUST_LOG` override wired; `DEFAULT_MODEL`/`NVIDIA_ENDPOINT` sourced from config | Silent behavior change if config.toml defaults differ from env defaults |
-| 3. Clean up tests, render.yaml, dead code | `env_or_default()` removed; `ROUTING_CONFIG_PATH` removed; tests use programmatic config; render.yaml cleaned | Test regressions from env var removal |
+| 4. Config Schema & Data Migration | Extended structs, TOML loaders, populated config.toml, PatternMeta.category→String, removed hardcoded_model_costs | Schema changes break existing callers; must update all construction sites simultaneously |
+| 5. Engine Refactor | Generic build_all_patterns(), config-driven classify_internal(), CASUAL de-hardcoding, dynamic LLM examples, all hardcoded arrays removed | classify_internal() scoring behavior must match current output exactly — regression risk |
+| 6. Tests & Cleanup | Updated test helpers, engine-generality tests, dead code removal, full suite green | Test changes are extensive; some tests assert on specific category names |
 
-**Prerequisites:** None (self-contained refactor)
-**Estimated effort:** ~1 session, 3 phases
+**Prerequisites:** Phases 1–3 complete (done). `config.toml` has `[model_costs]`, `[[categories]]`, `[regex_classifier]` sections (done).
+**Estimated effort:** ~2–3 sessions across 3 phases.
 
 ## Open Risks & Assumptions
 
-- Render injects `PORT` automatically but the app will now use `[server].port` (default `10000`) — Render routes external traffic to the container's `PORT`, so the process must bind to the Render-assigned port. Mitigation: embed `PORT` fallback logic for Render or document CONFIG_PATH overlay usage.
-- Removing `ALLOWED_ORIGINS` env var breaks any deployment that sets it but hasn't updated config.toml. This is intentional — the config.toml becomes the single source.
-- `routing_from_value()` needs the default model to fill missing fields on per-category entries, but the default model comes from the `[DEFAULT]` entry which is extracted after all entries are processed. Requires a peek-ahead or two-pass approach.
-- Runtime-mutable config values (`allowed_origins`) stored behind `Arc<RwLock<...>>` matching existing keepalive/max_body pattern — ready for future live config reload. Startup-only values (`log_level`, `port`) stay as plain fields.
+- **Dual-threshold regression**: The current SYNTAX_FIX dual-threshold is the only production user of this feature. Changing it to config-driven must produce identical scoring for the default config. The dual-threshold loop in `classify_internal()` must be verified against the current hardcoded logic before removing it.
+- **TOML regex escaping**: The 44 regex patterns use `\b`, `\d`, `\w`, `\s`, `(?i)`, etc. TOML basic strings (`'...'`) don't interpret backslash escapes, which is correct for regex. But some patterns contain `'` (single quotes) — those must use TOML literal strings or escape properly.
+- **CASUAL as lowest-priority fallback**: Currently `fallback_category()` hardcodes `"CASUAL"` as the `unwrap_or`. After the change, the fallback is the highest-priority (lowest `priority` number) category whose name sorts first — which with default config is FILE_READING (priority=1). This may change fallback behavior. Mitigation: keep "CASUAL" semantics by using the **lowest**-priority category (highest `priority` value) as fallback.
+- **`config.toml` merge semantics for `[[categories]]`**: The plan assumes `[[categories]]` arrays in an overlay config completely replace the base (established in Phase 1.4). Verify this holds — a partial categories overlay would be confusing.
 
 ## Success Criteria (Summary)
 
-- App starts and operates correctly with only secrets as env vars
-- `RUST_LOG` env still works as a log-level override
-- All existing tests pass
-- `render.yaml` only lists secrets + optional `RUST_LOG`
+- `cargo build --release` compiles with zero hardcoded category name references in engine code
+- `cargo test` — full test suite passes with config-driven categories
+- A user-provided `CONFIG_PATH` with custom `[[categories]]` (different names, patterns, thresholds) produces correct classification output
+- The service starts and classifies correctly using only the embedded `config.toml` (no env vars beyond secrets)

@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
 
-use crate::intent_classifier::{hardcoded_categories, CategoryConfig};
+use crate::intent_classifier::{
+    hardcoded_categories, CategoryConfig, DualThreshold, NegativePatternConfig, PatternEntry,
+};
 use crate::routing::*;
 
 #[cfg(test)]
@@ -689,11 +691,48 @@ pub(crate) fn load_categories_from_value(
             .and_then(|v| v.as_integer())
             .unwrap_or(99) as u8;
 
+        let patterns = match t.get("patterns").and_then(|v| v.as_array()) {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| {
+                    v.as_table().map(|pt| {
+                        let regex = pt
+                            .get("regex")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let weight = pt
+                            .get("weight")
+                            .and_then(|v| v.as_integer())
+                            .unwrap_or(1) as u8;
+                        PatternEntry { regex, weight }
+                    })
+                })
+                .collect(),
+            None => vec![],
+        };
+
+        let dual_threshold = t.get("dual_threshold").and_then(|v| v.as_table()).map(|dt| {
+            DualThreshold {
+                alt_score: dt
+                    .get("alt_score")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(1) as u32,
+                suppress_if_present: dt
+                    .get("suppress_if_present")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            }
+        });
+
         categories.push(CategoryConfig {
             name,
             description,
             threshold,
             priority,
+            patterns,
+            dual_threshold,
         });
     }
 
@@ -708,8 +747,55 @@ pub(crate) fn load_categories_from_value(
     Ok(categories)
 }
 
+/// Load negative suppression patterns from a parsed toml::Value.
+/// Returns empty vec if section is absent.
+pub(crate) fn load_negative_patterns_from_value(root: &toml::Value) -> Vec<NegativePatternConfig> {
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => return vec![],
+    };
+    let neg_array = match table.get("negative_patterns").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => {
+            debug!("[negative_patterns] section not found; no negative patterns configured");
+            return vec![];
+        }
+    };
+
+    let mut patterns = Vec::new();
+    for (i, entry) in neg_array.iter().enumerate() {
+        let t = match entry.as_table() {
+            Some(t) => t,
+            None => {
+                warn!("negative_patterns[{}] is not a table; skipping", i);
+                continue;
+            }
+        };
+        let regex = t
+            .get("regex")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let suppressed = t
+            .get("suppressed")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let penalty = t
+            .get("penalty")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(2) as u8;
+        patterns.push(NegativePatternConfig {
+            regex,
+            suppressed,
+            penalty,
+        });
+    }
+    patterns
+}
+
 pub(crate) fn build_model_costs(root: &toml::Value, routing: &HashMap<String, RouteEntry>) -> ModelCosts {
-    let mut costs = crate::intent_classifier::hardcoded_model_costs();
+    let mut costs = HashMap::new();
     
     // Override with values from [model_costs] section in TOML
     if let Some(model_costs_table) = root.get("model_costs").and_then(|v| v.as_table()) {
@@ -783,11 +869,15 @@ pub(crate) fn load_classifiers_config_from_value(root: &toml::Value) -> Classifi
 #[derive(Clone, Debug)]
 pub(crate) struct RegexClassifierConfig {
     pub enabled: bool,
+    pub short_prompt_len: usize,
 }
 
 impl Default for RegexClassifierConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            short_prompt_len: 30,
+        }
     }
 }
 
@@ -831,7 +921,14 @@ pub(crate) fn load_regex_classifier_config_from_value(root: &toml::Value) -> Reg
         .get("enabled")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    RegexClassifierConfig { enabled }
+    let short_prompt_len = regex_section
+        .get("short_prompt_len")
+        .and_then(|v| v.as_integer())
+        .unwrap_or(30) as usize;
+    RegexClassifierConfig {
+        enabled,
+        short_prompt_len,
+    }
 }
 
 /// Configuration for the LLM classifier backend.
@@ -1126,14 +1223,14 @@ api_key_env = ""
     }
 
     #[test]
-    fn build_model_costs_seeds_with_hardcoded_and_applies_overrides() {
+    fn build_model_costs_applies_route_overrides() {
         let mut routing = HashMap::new();
         routing.insert(
             "SYNTAX_FIX".to_string(),
             RouteEntry {
                 model: "claude-3.5-sonnet".to_string(),
                 endpoint: "".to_string(),
-                cost_per_1m_input_tokens: Some(5.00), // Override
+                cost_per_1m_input_tokens: Some(5.00),
                 provider_type: "".to_string(),
                 api_key_env: None,
             },
@@ -1143,7 +1240,7 @@ api_key_env = ""
             RouteEntry {
                 model: "gpt-4o".to_string(),
                 endpoint: "".to_string(),
-                cost_per_1m_input_tokens: None, // Use hardcoded
+                cost_per_1m_input_tokens: None,
                 provider_type: "".to_string(),
                 api_key_env: None,
             },
@@ -1151,7 +1248,7 @@ api_key_env = ""
         routing.insert(
             "CASUAL".to_string(),
             RouteEntry {
-                model: "unknown-model".to_string(), // Not in hardcoded, should be absent
+                model: "unknown-model".to_string(),
                 endpoint: "".to_string(),
                 cost_per_1m_input_tokens: Some(2.50),
                 provider_type: "".to_string(),
@@ -1164,12 +1261,15 @@ api_key_env = ""
             build_model_costs(&empty_root, &routing)
         };
 
-        // Hardcoded defaults
-        assert_eq!(costs.get("claude-3.5-sonnet"), Some(5.00)); // Overridden
-        assert_eq!(costs.get("gpt-4o"), Some(2.50)); // Hardcoded
-        assert_eq!(costs.get("gpt-4o-mini"), Some(0.15));
-        assert_eq!(costs.get("deepseek-chat"), Some(0.14));
-        // Unknown model with override
+        // Route overrides only (no hardcoded seeds anymore)
+        assert_eq!(costs.get("claude-3.5-sonnet"), Some(5.00));
+        // gpt-4o has no route override and no TOML entry → absent
+        assert_eq!(costs.get("gpt-4o"), None);
+        // gpt-4o-mini not in routing → absent
+        assert_eq!(costs.get("gpt-4o-mini"), None);
+        // deepseek-chat not in routing → absent
+        assert_eq!(costs.get("deepseek-chat"), None);
+        // Unknown model with route override
         assert_eq!(costs.get("unknown-model"), Some(2.50));
     }
 

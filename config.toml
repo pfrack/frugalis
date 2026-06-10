@@ -39,6 +39,7 @@ order = ["regex", "llm"]
 
 [regex_classifier]
 enabled = true
+short_prompt_len = 30
 
 # [llm_classifier] — uncomment to enable LLM backend
 # enabled = true
@@ -54,24 +55,97 @@ name = "FILE_READING"
 description = "Reading, viewing, inspecting, searching, or navigating files or code"
 threshold = 3
 priority = 1
+patterns = [
+  { regex = '(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b', weight = 3 },
+  { regex = '(?i)\b(?:show|display|print|cat)\s+(?:me\s+)?(?:the\s+)?(?:content|output)(?:\s+of)?', weight = 3 },
+  { regex = '(?i)\b(?:[a-zA-Z0-9_\-./\\]+\.(?:rs|py|js|ts|go|java|c|cpp|h|to?ml|ya?ml|json|md|sql|sh|html))', weight = 3 },
+  { regex = '(?i)\b(?:line|lines)\s+\d+', weight = 3 },
+  { regex = '''(?i)\b(?:what(?:\s+is|'s)\s+(?:in|inside))\s+(?:the\s+)?(?:file|directory|folder) ''', weight = 2 },
+  { regex = '(?i)\b(?:look|go|navigate)\s+(?:at|through|to|into)\s+(?:the\s+)?(?:file|directory|code|source)', weight = 2 },
+  { regex = '(?i)\b(?:list|ls|dir|tree)\s+(?:files|directories|contents|all|the)', weight = 2 },
+  { regex = '(?i)\b(?:find|search|grep|locate|where\s+is)\s+(?:in|through|within|the)\s+(?:the\s+)?(?:file|code|project|source)', weight = 2 },
+  { regex = '(?i)\b(?:where\s+is|locate\s+the|find\s+the)\s+(?:file|definition|function|class|module|struct|trait|impl)', weight = 2 },
+  { regex = '(?i)\b(?:what\s+does\s+this\s+file|show\s+me\s+the\s+code|view\s+the\s+source|check\s+the\s+file)', weight = 1 },
+  { regex = '(?i)\b(?:see|check|inspect|examine)\s+(?:the\s+)?(?:file|code|content|output|log)', weight = 1 },
+  { regex = '(?i)\b(?:around\s+line|near\s+line|before\s+line|after\s+line)', weight = 1 },
+]
 
 [[categories]]
 name = "SYNTAX_FIX"
 description = "Fixing bugs, errors, typos, compilation issues, or broken code"
 threshold = 3
 priority = 2
+dual_threshold = { alt_score = 4, suppress_if_present = "FILE_READING" }
+patterns = [
+  { regex = '(?i)\b(?:fix|correct|repair|patch)\s+(?:this|the|my|a)\s+(?:bug|error|issue|typo|problem|mistake|warning)', weight = 3 },
+  { regex = '''(?i)\b(?:doesn't\s+compile|won't\s+compile|doesn't\s+build|won't\s+build|compilation\s+error|syntax\s+error|build\s+error) ''', weight = 3 },
+  { regex = '(?i)\b(?:type\s+error|linter?\s+(?:error|warning)|runtime\s+error|segfault|null\s+pointer|borrow\s+check)', weight = 3 },
+  { regex = '''(?i)\b(?:why\s+doesn't\s+this\s+work|what(?:\s+is|'s)\s+wrong\s+with|this\s+(?:is|seems)\s+broken) ''', weight = 2 },
+  { regex = '(?i)\b(?:stack\s+trace|backtrace|panic|exception|traceback|\.unwrap)', weight = 2 },
+  { regex = '(?i)\b(?:missing\s+(?:semicolon|import|parenthesis|brace|bracket|quote|comma|colon|use\s+statement|dependency|argument|parameter))', weight = 2 },
+  { regex = '(?i)\b(?:undefined\s+(?:variable|function|symbol|reference|type|method)|not\s+found\s+in\s+this\s+scope|unresolved\s+reference)', weight = 2 },
+  { regex = '(?i)\b(?:typo|misspell(?:ed|ing)?|copy.?paste\s+error|fat\s+finger)', weight = 2 },
+  { regex = '''(?i)\b(?:doesn't\s+work|is\s+broken|stopped\s+working|broke|isn't\s+working|not\s+working) ''', weight = 1 },
+  { regex = '''(?i)\b(?:here(?:'s|\s+is)\s+(?:the|an|my)\s+error|getting\s+(?:this|an)\s+error|seeing\s+(?:this|an)\s+error) ''', weight = 1 },
+  { regex = '(?i)\b(?:error[:;].{0,40}\b(?:\d+|E\d{4}|0x[0-9a-fA-F]+)\b)', weight = 1 },
+]
 
 [[categories]]
 name = "COMPLEX_REASONING"
 description = "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization"
 threshold = 3
 priority = 3
+patterns = [
+  { regex = '(?i)\b(?:architect|design\s+pattern|system\s+design|trade.?off|refactor|restructure|rearchitect)', weight = 3 },
+  { regex = '(?i)\b(?:how\s+would\s+you\s+(?:design|architect|structure|build|implement|approach|solve))', weight = 3 },
+  { regex = '(?i)\b(?:multi.?step|concurr|distributed|pipeline|scal(?:e|ing|able)|optimiz|bottleneck)', weight = 3 },
+  { regex = '(?i)\b(?:redesign\s+the|rewrite\s+(?:the\s+)?(?:entire|whole)|audit\s+the\s+codebase|rearchitect)', weight = 3 },
+  { regex = '(?i)\b(?:deep\s+dive|analy(?:ze|sis)|evaluat|compare\s+and\s+contrast|trade.?off|pros?\s+and\s+cons?\b)', weight = 2 },
+  { regex = '(?i)\b(?:best\s+(?:practice|approach|way|pattern)|design\s+(?:a|the)\s+(?:system|architecture|api|database|schema|service))', weight = 2 },
+  { regex = '''(?i)\b(?:reason\s+about|explain\s+why|what(?:\s+is|'s)\s+the\s+(?:best|optimal|right|correct)\s+way) ''', weight = 2 },
+  { regex = '(?i)\b(?:multi.?thread|async|event.?driven|microservice|rate\s+limit|load\s+balanc)', weight = 2 },
+  { regex = '(?i)\b(?:integrat(?:e|ion)\s+(?:with|into|between)|migrat(?:e|ion)\s+(?:from|to|strategy)|orchestrat)', weight = 2 },
+  { regex = '(?i)\b(?:performance\s+(?:bottleneck|issue|problem|analysis|tuning|profiling|regression)|memory\s+leak|race\s+condition|deadlock)', weight = 2 },
+  { regex = '(?i)\b(?:can\s+you\s+(?:help\s+me\s+)?(?:design|plan|architect|think\s+(?:through|about)|reason\s+about))', weight = 1 },
+  { regex = '(?i)\b(?:strategy|blueprint|roadmap|plan\s+(?:out|for)|approach\s+to)', weight = 1 },
+  { regex = '(?i)\b(?:security\s+(?:audit|review|analysis)|threat\s+model)', weight = 1 },
+  { regex = '(?i)\b(?:state\s+machine|algorithm\s+(?:design|complexity|analysis))', weight = 1 },
+  { regex = '(?i)\b(?:dependenc(?:y|ies)\s+(?:graph|tree|injection|management)|coupling|cohesion)', weight = 1 },
+  { regex = '(?i)\b(?:resilien(?:t|ce)|fault\s+toleran|circuit\s+breaker|retry\s+strategy)', weight = 1 },
+]
 
 [[categories]]
 name = "CASUAL"
 description = "Simple questions, greetings, general conversation, or short prompts"
 threshold = 1
 priority = 4
+patterns = [
+  { regex = '(?i)^\s*(?:hi|hey|hello|greetings|good\s+morning|good\s+afternoon|good\s+evening|howdy)(?:\s+there)?[\s!.,]*$', weight = 3 },
+  { regex = '(?i)^\s*(?:thanks|thank\s+you|thx|ty|appreciate\s+it|cheers|thanks\s+a\s+lot)[\s!.,]*$', weight = 2 },
+  { regex = '''(?i)^\s*(?:what\s+is|what\s+are|what's|what\s+does|define|definition\s+of)\s+\w+(?:\s+\w+){0,2}\s*\??$ ''', weight = 1 },
+  { regex = '(?i)^\s*(?:how\s+(?:do|can|should)\s+I\s+\w+)(?:\s+\w+){0,4}\s*\??$', weight = 1 },
+  { regex = '(?i)^\s*(?:ok|okay|got\s+it|understood|alright|cool|nice|good|great|sure|yes|no|maybe|idk)[\s!.,]*$', weight = 1 },
+]
+
+[[negative_patterns]]
+regex = '(?i)\b(?:read|show|display|cat|view|open)\s+(?:the|this|my|a)\s+\w*(?:architecture|design|system|pattern|refactor)'
+suppressed = "COMPLEX_REASONING"
+penalty = 2
+
+[[negative_patterns]]
+regex = '(?i)\b(?:fix|correct|repair)\s+(?:the|this|my)\s+(?:compile|syntax|typo|lint|warning|error)'
+suppressed = "COMPLEX_REASONING"
+penalty = 2
+
+[[negative_patterns]]
+regex = '(?i)\b(?:design|architect|refactor|rearchitect|restructure)\s+(?:a|the|an)\s+(?:fix|solution|remedy|patch|workaround)'
+suppressed = "SYNTAX_FIX"
+penalty = 2
+
+[[negative_patterns]]
+regex = '(?i)\b(?:explain|describe|tell\s+me\s+about|what\s+do\s+you\s+think\s+about)\s+(?:the|this|that)\s+(?:file|code|class|module)'
+suppressed = "FILE_READING"
+penalty = 2
 
 [FILE_READING]
 model = "meta/llama-3.1-70b-instruct"

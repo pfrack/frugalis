@@ -1695,7 +1695,7 @@ mod tests {
     async fn test_fetch_savings_estimate_empty() {
         let pc = test_backend();
         let mc = super::super::intent_classifier::ModelCosts::from_costs(
-            super::super::intent_classifier::hardcoded_model_costs(),
+            std::collections::HashMap::new(),
         );
         let model = format!("Z_TST_SAV_EMPTY_{}", uuid::Uuid::new_v4());
         pc.backend.insert_inference(&InferenceRecord {
@@ -1726,7 +1726,7 @@ mod tests {
         let pc = test_backend();
         let model_a = format!("Z_TST_SAV_A_{}", uuid::Uuid::new_v4());
         let model_b = format!("Z_TST_SAV_B_{}", uuid::Uuid::new_v4());
-        let mut costs = super::super::intent_classifier::hardcoded_model_costs();
+        let mut costs = std::collections::HashMap::new();
         costs.insert(model_a.clone(), 0.15);
         costs.insert(model_b.clone(), 3.00);
         let mc = super::super::intent_classifier::ModelCosts::from_costs(costs);
@@ -1775,7 +1775,7 @@ mod tests {
     async fn test_fetch_savings_estimate_unknown_cost_model() {
         let pc = test_backend();
         let mc = super::super::intent_classifier::ModelCosts::from_costs(
-            super::super::intent_classifier::hardcoded_model_costs(),
+            std::collections::HashMap::new(),
         );
         let model = format!("Z_TST_SAV_UNK_{}", uuid::Uuid::new_v4());
 
@@ -1811,7 +1811,7 @@ mod tests {
     async fn test_fetch_savings_estimate_filters_null_category() {
         let pc = test_backend();
         let mc = super::super::intent_classifier::ModelCosts::from_costs(
-            super::super::intent_classifier::hardcoded_model_costs(),
+            std::collections::HashMap::new(),
         );
 
         pc.backend.insert_inference(&InferenceRecord {
@@ -1839,7 +1839,7 @@ mod tests {
     async fn test_fetch_savings_estimate_historical_fallback() {
         let pc = test_backend();
         let model = format!("Z_TST_SAV_FB_{}", uuid::Uuid::new_v4());
-        let mut costs = super::super::intent_classifier::hardcoded_model_costs();
+        let mut costs = std::collections::HashMap::new();
         costs.insert(model.clone(), 0.15);
         let mc = super::super::intent_classifier::ModelCosts::from_costs(costs);
 
