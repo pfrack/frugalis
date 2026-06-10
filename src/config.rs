@@ -341,9 +341,12 @@ pub struct AuthProviderConfig {
     pub value_template: Option<String>,
 }
 
+
+
 /// Parse an integer environment variable with optional min/max validation.
 /// Returns `default` if the variable is unset, empty, invalid, or out of range.
 /// Logs a warning on invalid or out-of-range values.
+#[cfg(test)]
 pub(crate) fn parse_env_int(
     var: &str,
     default: i32,
