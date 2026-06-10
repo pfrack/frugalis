@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::warn;
 
 #[allow(unused_imports)]
@@ -69,6 +69,16 @@ pub(crate) fn load_server_config_from_value(root: &toml::Value) -> ServerConfig 
             .get("port")
             .and_then(|v| v.as_integer())
             .unwrap_or(10000) as u16,
+        log_level: server_section
+            .get("log_level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info")
+            .to_string(),
+        log_format: server_section
+            .get("log_format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("compact")
+            .to_string(),
     }
 }
 
@@ -189,17 +199,23 @@ pub(crate) fn load_auth_providers_from_value(root: &toml::Value) -> Vec<AuthProv
 }
 
 /// Recursively merge overlay TOML values into base, with overlay values taking precedence.
-pub(crate) fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
+/// Keys listed in `override_keys` are completely replaced (not recursively merged).
+pub(crate) fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value, override_keys: &HashSet<&str>) {
     if let (toml::Value::Table(base_table), toml::Value::Table(overlay_table)) = (base, overlay) {
         for (key, overlay_val) in overlay_table.iter() {
-            match (base_table.get_mut(key), overlay_val) {
-                (Some(ref mut base_val @ toml::Value::Table(_)), toml::Value::Table(overlay_nested)) => {
-                    // Recursively merge nested tables
-                    merge_toml_values(base_val, &toml::Value::Table(overlay_nested.clone()));
-                }
-                _ => {
-                    // Overlay value wins for non-table keys or when base doesn't exist
-                    base_table.insert(key.clone(), overlay_val.clone());
+            if override_keys.contains(key.as_str()) {
+                // Complete replacement for override keys
+                base_table.insert(key.clone(), overlay_val.clone());
+            } else {
+                match (base_table.get_mut(key), overlay_val) {
+                    (Some(ref mut base_val @ toml::Value::Table(_)), toml::Value::Table(overlay_nested)) => {
+                        // Recursively merge nested tables
+                        merge_toml_values(base_val, &toml::Value::Table(overlay_nested.clone()), override_keys);
+                    }
+                    _ => {
+                        // Overlay value wins for non-table keys or when base doesn't exist
+                        base_table.insert(key.clone(), overlay_val.clone());
+                    }
                 }
             }
         }
@@ -230,16 +246,57 @@ impl Default for DashboardConfig {
     }
 }
 
+/// CORS configuration loaded from [cors] section.
+#[derive(Clone, Debug)]
+pub struct CorsConfig {
+    pub allowed_origins: Vec<String>,
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self {
+            allowed_origins: vec![],
+        }
+    }
+}
+
+/// Load CORS configuration from a parsed TOML value.
+/// Returns defaults if section is absent.
+pub(crate) fn load_cors_config_from_value(root: &toml::Value) -> CorsConfig {
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => return CorsConfig::default(),
+    };
+    let cors_section = match table.get("cors").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => return CorsConfig::default(),
+    };
+    let allowed_origins = cors_section
+        .get("allowed_origins")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    CorsConfig { allowed_origins }
+}
+
 /// Server configuration.
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub port: u16,
+    pub log_level: String,
+    pub log_format: String,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: 10000,
+            log_level: "info".to_string(),
+            log_format: "compact".to_string(),
         }
     }
 }
@@ -492,7 +549,7 @@ pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
             return hardcoded_routing(&hardcoded_categories());
         }
     };
-    let fallback_entry = routing.remove("FALLBACK").unwrap_or_else(|| RouteEntry {
+    let fallback_entry = routing.remove("DEFAULT").unwrap_or_else(|| RouteEntry {
         model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
         endpoint: String::new(),
         cost_per_1m_input_tokens: None,
@@ -552,7 +609,7 @@ pub(crate) fn routing_from_value(
             },
         );
     }
-    let fallback = routing.remove("FALLBACK").unwrap_or_else(|| RouteEntry {
+    let fallback = routing.remove("DEFAULT").unwrap_or_else(|| RouteEntry {
         model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
         endpoint: String::new(),
         cost_per_1m_input_tokens: None,
@@ -829,7 +886,7 @@ mod tests {
     use crate::intent_classifier::hardcoded_categories;
     use crate::routing::RouteEntry;
     use serial_test::serial;
-    use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
     #[test]
     #[serial]
@@ -987,7 +1044,7 @@ endpoint = "https://file.endpoint"
 provider_type = "openai_compatible"
 api_key_env = "FILE_API_KEY"
 
-[FALLBACK]
+[DEFAULT]
 model = "file-fallback"
 endpoint = ""
 provider_type = ""

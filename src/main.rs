@@ -85,7 +85,27 @@ async fn main() {
             Ok(content) => {
                 match toml::from_str::<toml::Value>(&content) {
                     Ok(overlay) => {
-                        config::merge_toml_values(&mut config_root, &overlay);
+                        let override_keys: std::collections::HashSet<&str> = overlay
+                            .as_table()
+                            .map(|t| {
+                                t.keys()
+                                    .filter(|k| {
+                                        k.chars().all(|c| c.is_uppercase() || c == '_')
+                                            || matches!(
+                                                k.as_str(),
+                                                "classifiers"
+                                                    | "regex_classifier"
+                                                    | "llm_classifier"
+                                                    | "categories"
+                                                    | "auth_provider"
+                                                    | "model_costs"
+                                            )
+                                    })
+                                    .map(|k| k.as_str())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        config::merge_toml_values(&mut config_root, &overlay, &override_keys);
                         info!("Merged config from {}", config_path);
                     }
                     Err(e) => {

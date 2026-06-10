@@ -4,7 +4,7 @@ project: cerebrum
 version: 1
 status: draft
 created: 2026-05-26
-updated: 2026-06-09
+updated: 2026-06-10
 prd_version: 1
 main_goal: speed
 top_blocker: time
@@ -53,7 +53,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-10 | post-review-cleanup | (tech debt + hardening + reliability) Consolidates review-cleanup, review-hardening, and prod-hardening-reliability into a single 12-phase plan: SSE log timing, handler decomposition, cleanup, test safety, embedded migrations, LLM key refresh, auth hardening, streaming/JSON fixes, dead code, graceful shutdown, configurability, and observability | S-09a | — | planned |
 | S-11 | opentelemetry-integration | export application traces, metrics, and logs via OTLP to an observability backend (Grafana Cloud); leverages existing `tracing` crate with zero business-logic changes for traces | S-10 | FR-005 | proposed |
 | S-12 | in-memory-db-fallback | persistence always available: 3-tier backend config (`memory` / `sqlite` / `postgres`) via `DB_BACKEND` env; enables zero-dep dev startup and real persistence in tests | S-13 | FR-005, NFR (testing) | proposed |
-| S-13 | in-memory-config-filesystem | single-source-of-truth config: embed config.toml via `include_str!()`, eliminate all hardcoded fallbacks, add dashboard-driven config reload — 3 phases | S-09a | FR-002, FR-003 | preparing |
+| S-13 | move-all-config-to-file | deploy with zero hardcoded config — everything is in `config.toml`; env vars reduced to API_KEYS + auth creds + DATABASE_URL only | S-09a, S-12 | FR-002, FR-003 | preparing |
 
 ## Streams
 
@@ -66,7 +66,7 @@ Navigation aid — groups items that share a Prerequisites chain. Canonical orde
 | C | Metrics | — | All metrics features (S-04) integrated into dashboard stream (B). |
 | D | Critical Logging | `F-04` → `S-06` | Ensures all critical paths have observability logs and a dedicated UI page. |
 | E | Observability | `S-10` → `S-11` | Production hardening followed by OpenTelemetry integration for distributed tracing, metrics export, and log correlation. |
-| F | Config | `S-09a` → `S-13` → `S-12` | Config boundary formalization (S-09a) → single-source-of-truth TOML config + dashboard reload (S-13) → persistence backend leverages unified TOML (S-12). |
+| F | Config | `S-09a` → `S-13` | Config boundary formalization (S-09a) → unified TOML config for ALL settings: server, HTTP, CORS, logging, routing, categories, patterns, weights, model costs, persistence, classifiers, dashboard (S-13). |
 
 ## Baseline
 
@@ -373,6 +373,26 @@ Foundations below assume these are present and do NOT re-scaffold them.
    - Should a disabled/failed backend emit a warning or be silent? Owner: planning. Block: no (warning at info level is sufficient).
 - **Risk:** Low — this is a config layer atop already-working backends. The main risk is getting the boundary wrong and leaking generic config into backend-specific constructors (or vice versa). Mitigated by placing this slice AFTER both backends exist (S-09), so the boundary is informed by real code rather than speculation. Backward compatible: existing deployments without `LLM_CLASSIFIER_ENABLED` see no change (LLM is `false` by default, regex stays `true`).
 
+### S-13: Move All Config to File
+
+- **Outcome:** Zero hardcoded configuration in Rust — everything lives in `config.toml`. Environment variables reduced to strictly secrets: API keys (`NVIDIA_API_KEY`, `OPENAI_API_KEY`, etc.), auth credentials (`PROXY_API_BEARER_TOKEN`, `DASHBOARD_BASIC_USER`, `DASHBOARD_BASIC_PASSWORD`), and `DATABASE_URL`. Current `config.toml` shipped as embedded default.
+
+  What moves (25 hardcoded values + 19 env var reads eliminated):
+  - **Env vars removed**: `RUST_LOG` → `[server].log_level`, `LOG_FORMAT` → `[server].log_format`, `ALLOWED_ORIGINS` → `[cors]`, `DEFAULT_MODEL`, `NVIDIA_ENDPOINT`, `ROUTING_CONFIG_PATH`
+  - **Hardcoded models**: `DEFAULT_MODEL`/`DEFAULT_MODEL_COMPLEX` constants → `[routing_defaults]`, `hardcoded_model_costs()` → seeded empty
+  - **Hardcoded categories & patterns**: `hardcoded_categories()` → `[[categories]]` (made required), 48 regex patterns + 4 weight arrays + `NEGATIVE_META` → `[[categories]].patterns` + `[[negative]]`
+  - **Classifier internals**: 5 hardcoded category name refs in `build_all_patterns`, `classify_internal`, `fallback_category` refactored to data-driven
+  - **LLM params**: `max_tokens: 20`, `temperature: 0.0`, 60s refresh → `[llm_classifier]` fields
+  - **Infrastructure**: `"0.0.0.0"` → `[server].bind_host`, `take(10_000)`/`take(200)`/`>1000` → `[persistence]`/`[http]` fields
+- **Change ID:** `move-all-config-to-file`
+- **PRD refs:** FR-002 (intent classification), FR-003 (routing)
+- **Prerequisites:** S-09a (classifier-config-boundary merged), S-12 (persistence backend config) — both implemented
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** —
+- **Risk:** Medium — touches every module. Classification logic refactoring (`build_all_patterns`, `classify_internal`) is the riskiest change but existing patterns become the shipped default config, preserving behavior. Extensive test coverage already exists.
+- **Status:** preparing (research complete)
+
 ### S-10: Post-Review Cleanup, Hardening & Production Reliability
 
 - **Outcome:** All code review findings from 2026-06-08 and 2026-06-09 plus production hardening gaps addressed in 12 ordered phases: (1) SSE streaming log timing fix, (2) `completion_handler` decomposition and error deduplication, (3) `QueryError`/`timeout`/`timeout_secs`/`EnvGuard` cleanup, (4) `serial_test` for UB elimination, (5) `sqlx::migrate!()` embedded migrations, (6) LLM API key refresh, (7) auth constant-time comparison hardening, (8) streaming and JSON edge-case fixes, (9) dead code cleanup, (10) graceful shutdown + slow_tests + DB validation, (11) configurable limits and env parsing, (12) Prometheus metrics + health enhancements + docs.
@@ -412,7 +432,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 | S-10 | post-review-cleanup | (tech debt + hardening + reliability) 12-phase consolidated plan: SSE log fix, handler decomposition, cleanup, test safety, migrations, LLM key refresh, auth hardening, streaming/JSON fixes, dead code, graceful shutdown, configurability, observability | S-09a | — | planned |
 | S-11 | opentelemetry-integration | Observability: OTLP export of traces, metrics, and logs to Grafana Cloud (feature-gated) | S-10 | FR-005 | proposed |
 | S-12 | in-memory-db-fallback | Persistence: 3-tier backend config (memory/sqlite/postgres); `[persistence]` section in unified TOML | S-13 | FR-005, NFR | proposed |
-| S-13 | in-memory-config-filesystem | Config: single-source-of-truth TOML, eliminate ~65 hardcoded fallbacks, dashboard reload (3 phases) | S-09a | FR-002, FR-003 | preparing |
+| S-13 | move-all-config-to-file | Config: eliminate all hardcoded values — 25 hardcoded Rust values + 19 env var reads moved to config.toml; env vars reduced to API_KEYS + auth creds + DATABASE_URL only; categories and regex patterns fully configurable | yes | Research complete: `context/changes/move-all-config-to-file/research.md`. Prerequisites: S-09a, S-12 already implemented. |
 
 ## Open Roadmap Questions
 
@@ -470,7 +490,7 @@ The 3-week MVP budget under a 6-week hard deadline makes calendar time the #1 bl
 **Baseline present:** Backend/API, Deploy/infra (partial)
 **Foundations:** 4
 **Slices:** 18 (S-01a through S-01e, S-02, S-03, S-04, S-05, S-06, S-07, S-07a, S-07b, S-08, S-09, S-09a, S-10, S-11, S-12, S-13)
-**Status breakdown:** ready: 3 | proposed: 9 (F-04, S-06, S-07a, S-07b, S-09, S-09a, S-07, S-11, S-12) | planned: 1 (S-10) | preparing: 1 (S-13) | implemented: 9 | descoped: 1 (S-08) | blocked: 0
+**Status breakdown:** ready: 3 | proposed: 8 (F-04, S-06, S-07a, S-07b, S-09, S-09a, S-11, S-12) | planned: 1 (S-10) | preparing: 1 (S-13) | implemented: 9 | descoped: 1 (S-08) | blocked: 0
 **PRD coverage:** 6 must-have FRs covered | 1 nice-to-have FR (implemented)
 **Open Roadmap Q:** 3 (intent classification rules, cheap fallback model, upstream model choices)
 **Parked items:** 0
@@ -483,11 +503,7 @@ The 3-week MVP budget under a 6-week hard deadline makes calendar time the #1 bl
 
 ## Your next move
 
-**► `/10x-plan classify-endpoint` on S-01a: Intent classification endpoint**
+**► `/10x-plan move-all-config-to-file` on S-13: Move All Config to File**
 
-**Why this one first:** It's the first building block in the proxy chain (regex-based classification with fallback). Two blocking unknowns (classification rules, cheap fallback model) must be resolved before planning can proceed, but it's the logical starting point for the north-star sequence.
-
-**Sequential chain:** After S-01a, proceed to S-01b (`reqwest-upstream-routing`), then S-01c (`provider-agnostic-config`), then S-01d (`sse-streaming-proxy`), then S-01e (`proxy-intent-routing`) for end-to-end integration.
-
-**After S-01e lands:** S-02, S-03, S-04 can proceed in parallel. S-05 (dashboard consolidation) follows after those. F-04 (critical logging) and S-06 (logs page) can be planned concurrently to enhance observability.
+**Why this one:** Research complete — 25 hardcoded values + 19 env var reads identified and categorized. Config.toml schema designed. Classification pipeline refactoring plan ready. All prerequisites (S-09a, S-12) already implemented. Ready for implementation planning.
 *** End Updated File ***- **S-09a: With both `RegexClassifier` and `LLMClassifier` backends operational, the config boundary between generic and classifier-specific settings is formalized. Per-backend enable/disable and ordering flags control chain construction at startup.** — Archived 2026-06-09 → `context/archive/2026-06-07-classifier-config-boundary/`. Lesson: —.
