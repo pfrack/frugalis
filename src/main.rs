@@ -126,6 +126,8 @@ async fn main() {
     // Load global classifiers config
     let classifiers_config = config::load_classifiers_config_from_value(&config_root);
 
+    let negative_patterns = config::load_negative_patterns_from_value(&config_root);
+
     let http_config = config::load_http_config_from_value(&config_root);
     let max_upstream_body_bytes = http_config.max_upstream_body_bytes;
     let keepalive_interval_secs = http_config.keepalive_interval_secs;
@@ -142,12 +144,12 @@ async fn main() {
         .unwrap_or(false);
     let auth_providers = Arc::new(config::load_auth_providers_from_value(&config_root));
      let (classifier, routing, model_costs, baseline_model) = {
-             let categories_res = config::load_categories_from_value(&config_root);
-             let categories_ok = categories_res.is_ok();
-             let mut categories = match categories_res {
-                 Ok(c) => c,
-                 Err(_) => intent_classifier::hardcoded_categories(),
-             };
+              let categories_res = config::load_categories_from_value(&config_root);
+              let categories_ok = categories_res.is_ok();
+              let mut categories = match categories_res {
+                  Ok(c) => c,
+                  Err(_) => vec![],
+              };
 
              let (mut routing_map, mut fallback_entry) = match config::routing_from_value(&config_root) {
                  Ok((map, fallback)) => (map, fallback),
@@ -166,13 +168,13 @@ async fn main() {
                          missing.push(cat.name.clone());
                      }
                  }
-                 if !missing.is_empty() {
-                     warn!("Categories {:?} missing routing entries; falling back to hardcoded categories and routing", missing);
-                     categories = intent_classifier::hardcoded_categories();
-                     let (new_map, new_fallback) = config::hardcoded_routing(&categories);
-                     routing_map = new_map;
-                     fallback_entry = new_fallback;
-                 }
+                  if !missing.is_empty() {
+                      warn!("Categories {:?} missing routing entries; falling back to empty categories and hardcoded routing", missing);
+                      categories = vec![];
+                      let (new_map, new_fallback) = config::hardcoded_routing(&categories);
+                      routing_map = new_map;
+                      fallback_entry = new_fallback;
+                  }
              }
 
              let model_costs = config::build_model_costs(&config_root, &routing_map);
@@ -191,13 +193,14 @@ async fn main() {
                  for name in &classifiers_config.order {
                      match name.as_str() {
                          "regex" => {
-                             if regex_config.enabled {
-                                 match intent_classifier::RegexClassifier::from_env(
-                                     routing_map.clone(),
-                                     fallback_entry.clone(),
-                                     intent_classifier::SHORT_PROMPT_LEN,
-                                     categories.clone(),
-                                 ) {
+                              if regex_config.enabled {
+                                  match intent_classifier::RegexClassifier::from_env(
+                                      routing_map.clone(),
+                                      fallback_entry.clone(),
+                                      regex_config.short_prompt_len,
+                                      categories.clone(),
+                                      &negative_patterns,
+                                  ) {
                                      Ok(c) => {
                                          info!("Regex classifier initialized");
                                          backends.push(Arc::new(c));
@@ -873,6 +876,69 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
 }
 
 #[cfg(test)]
+fn test_categories() -> Vec<intent_classifier::CategoryConfig> {
+    vec![
+        intent_classifier::CategoryConfig {
+            name: "FILE_READING".to_string(),
+            description: String::new(),
+            threshold: 3,
+            priority: 1,
+            patterns: vec![
+                intent_classifier::PatternEntry {
+                    regex: r"(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b".to_string(),
+                    weight: 3,
+                },
+            ],
+            dual_threshold: None,
+        },
+        intent_classifier::CategoryConfig {
+            name: "SYNTAX_FIX".to_string(),
+            description: String::new(),
+            threshold: 3,
+            priority: 2,
+            patterns: vec![
+                intent_classifier::PatternEntry {
+                    regex: r"(?i)\b(?:fix|correct|repair|patch)\s+(?:this|the|my|a)\s+(?:bug|error|issue|typo|problem|mistake|warning)".to_string(),
+                    weight: 3,
+                },
+            ],
+            dual_threshold: None,
+        },
+        intent_classifier::CategoryConfig {
+            name: "COMPLEX_REASONING".to_string(),
+            description: String::new(),
+            threshold: 3,
+            priority: 3,
+            patterns: vec![
+                intent_classifier::PatternEntry {
+                    regex: r"(?i)\b(?:architect|design\s+pattern|system\s+design|trade.?off|refactor|restructure|rearchitect)".to_string(),
+                    weight: 3,
+                },
+            ],
+            dual_threshold: None,
+        },
+        intent_classifier::CategoryConfig {
+            name: "CASUAL".to_string(),
+            description: String::new(),
+            threshold: 1,
+            priority: 4,
+            patterns: vec![
+                intent_classifier::PatternEntry {
+                    regex: r"(?i)^\s*(?:hi|hey|hello|greetings|good\s+morning|good\s+afternoon|good\s+evening|howdy)(?:\s+there)?[\s!.,]*$".to_string(),
+                    weight: 3,
+                },
+            ],
+            dual_threshold: None,
+        },
+    ]
+}
+
+#[cfg(test)]
+fn test_negative_patterns() -> Vec<intent_classifier::NegativePatternConfig> {
+    vec![]
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::{
@@ -957,7 +1023,7 @@ mod tests {
     fn test_app_with_classifier() -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
-        let cats = intent_classifier::hardcoded_categories();
+        let cats = test_categories();
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
             "user",
@@ -992,7 +1058,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
         let app_state = make_test_app_state(
             regex_classifier,
             None,
@@ -1120,7 +1186,7 @@ mod tests {
     ) -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
-        let cats = intent_classifier::hardcoded_categories();
+        let cats = test_categories();
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
             "user",
@@ -1155,7 +1221,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
         let app_state = make_test_app_state(
             regex_classifier,
             None,
@@ -1744,7 +1810,7 @@ mod tests {
     pub(crate) fn test_app_with_http_client(env_var_name: &str, max_upstream_body_bytes: usize) -> (Router, httpmock::MockServer) {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
-        let cats = intent_classifier::hardcoded_categories();
+        let cats = test_categories();
         let server = httpmock::MockServer::start();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
@@ -1785,7 +1851,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
@@ -1805,7 +1871,7 @@ mod tests {
     ) -> (Router, httpmock::MockServer) {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
-        let cats = intent_classifier::hardcoded_categories();
+        let cats = test_categories();
         let server = httpmock::MockServer::start();
         let client = http_client.unwrap_or_else(|| {
             reqwest::Client::builder()
@@ -1848,7 +1914,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
         let classifier_chain =
             intent_classifier::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
         let classifier_arc = Some(Arc::new(classifier_chain));
@@ -1888,7 +1954,7 @@ mod tests {
     fn test_app_with_dead_endpoint(env_var_name: &str) -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
-        let cats = intent_classifier::hardcoded_categories();
+        let cats = test_categories();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(1))
             .build()
@@ -1927,7 +1993,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
@@ -2647,7 +2713,7 @@ mod slow_tests {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap();
-        let cats = intent_classifier::hardcoded_categories();
+        let cats = test_categories();
         let mut routing = std::collections::HashMap::new();
         routing.insert(
             cats[1].name.clone(),
@@ -2667,7 +2733,7 @@ mod slow_tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
         let model_costs = intent_classifier::ModelCosts::empty();
         let baseline_model = String::new();
         let classifier_chain =

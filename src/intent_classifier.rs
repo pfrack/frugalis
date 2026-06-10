@@ -59,43 +59,6 @@ pub(crate) struct CategoryConfig {
     pub dual_threshold: Option<DualThreshold>,
 }
 
-pub(crate) fn hardcoded_categories() -> Vec<CategoryConfig> {
-    vec![
-        CategoryConfig {
-            name: "FILE_READING".to_string(),
-            description: "Reading, viewing, inspecting, searching, or navigating files or code".to_string(),
-            threshold: 3,
-            priority: 1,
-            patterns: vec![],
-            dual_threshold: None,
-        },
-        CategoryConfig {
-            name: "SYNTAX_FIX".to_string(),
-            description: "Fixing bugs, errors, typos, compilation issues, or broken code".to_string(),
-            threshold: 3,
-            priority: 2,
-            patterns: vec![],
-            dual_threshold: None,
-        },
-        CategoryConfig {
-            name: "COMPLEX_REASONING".to_string(),
-            description: "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization".to_string(),
-            threshold: 3,
-            priority: 3,
-            patterns: vec![],
-            dual_threshold: None,
-        },
-        CategoryConfig {
-            name: "CASUAL".to_string(),
-            description: "Simple questions, greetings, general conversation, or short prompts".to_string(),
-            threshold: 1,
-            priority: 4,
-            patterns: vec![],
-            dual_threshold: None,
-        },
-    ]
-}
-
 #[derive(Clone)]
 pub struct ClassificationResult {
     pub category: String,
@@ -143,6 +106,7 @@ pub struct RegexClassifier {
     pub fallback_entry: RouteEntry,
     pub short_prompt_len: usize,
     pub categories: Vec<CategoryConfig>,
+    pub negative_patterns: Vec<NegativePatternConfig>,
 }
 
 // Backward compatibility alias until Phase 3 updates consumers
@@ -395,11 +359,10 @@ pub fn build_llm_classifier_prompt(categories: &[CategoryConfig]) -> String {
     }
 
     prompt.push_str("\nReturn ONLY the category name, nothing else. Examples:\n");
-    // 4 few-shot examples, one per category
-    prompt.push_str("- \"read the file src/main.rs\" -> FILE_READING\n");
-    prompt.push_str("- \"fix this compile error\" -> SYNTAX_FIX\n");
-    prompt.push_str("- \"design a distributed system\" -> COMPLEX_REASONING\n");
-    prompt.push_str("- \"hello how are you\" -> CASUAL\n");
+    for cat in categories {
+        let example_hint = cat.description.split(',').next().unwrap_or(&cat.description);
+        prompt.push_str(&format!("- \"{}\" -> {}\n", example_hint.trim(), cat.name));
+    }
 
     prompt
 }
@@ -411,113 +374,7 @@ pub struct PatternMeta {
     pub weight: u8,
 }
 
-struct NegativeMeta {
-    suppressed: &'static str,
-    penalty: u8,
-}
 
-// ── Defaults ──
-
-// ── Pattern Counts ──
-
-const NEG_COUNT: usize = 4;
-
-// ── Weight Arrays ──
-
-const FR_WEIGHTS: &[u8] = &[3, 3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1];
-const CR_WEIGHTS: &[u8] = &[3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1];
-const SF_WEIGHTS: &[u8] = &[3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1];
-const CA_WEIGHTS: &[u8] = &[3, 2, 1, 1, 1];
-
-// ── Classification Thresholds ──
-
-pub const SHORT_PROMPT_LEN: usize = 30;
-
-// ── Pattern Constants ──
-
-const FILE_READING: &[&str] = &[
-    r"(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b",
-    r"(?i)\b(?:show|display|print|cat)\s+(?:me\s+)?(?:the\s+)?(?:content|output)(?:\s+of)?",
-    r"(?i)\b(?:[a-zA-Z0-9_\-./\\]+\.(?:rs|py|js|ts|go|java|c|cpp|h|to?ml|ya?ml|json|md|sql|sh|html))",
-    r"(?i)\b(?:line|lines)\s+\d+",
-    r"(?i)\b(?:what(?:\s+is|'s)\s+(?:in|inside))\s+(?:the\s+)?(?:file|directory|folder)",
-    r"(?i)\b(?:look|go|navigate)\s+(?:at|through|to|into)\s+(?:the\s+)?(?:file|directory|code|source)",
-    r"(?i)\b(?:list|ls|dir|tree)\s+(?:files|directories|contents|all|the)",
-    r"(?i)\b(?:find|search|grep|locate|where\s+is)\s+(?:in|through|within|the)\s+(?:the\s+)?(?:file|code|project|source)",
-    r"(?i)\b(?:where\s+is|locate\s+the|find\s+the)\s+(?:file|definition|function|class|module|struct|trait|impl)",
-    r"(?i)\b(?:what\s+does\s+this\s+file|show\s+me\s+the\s+code|view\s+the\s+source|check\s+the\s+file)",
-    r"(?i)\b(?:see|check|inspect|examine)\s+(?:the\s+)?(?:file|code|content|output|log)",
-    r"(?i)\b(?:around\s+line|near\s+line|before\s+line|after\s+line)",
-];
-
-const COMPLEX_REASONING: &[&str] = &[
-    r"(?i)\b(?:architect|design\s+pattern|system\s+design|trade.?off|refactor|restructure|rearchitect)",
-    r"(?i)\b(?:how\s+would\s+you\s+(?:design|architect|structure|build|implement|approach|solve))",
-    r"(?i)\b(?:multi.?step|concurr|distributed|pipeline|scal(?:e|ing|able)|optimiz|bottleneck)",
-    r"(?i)\b(?:redesign\s+the|rewrite\s+(?:the\s+)?(?:entire|whole)|audit\s+the\s+codebase|rearchitect)",
-    r"(?i)\b(?:deep\s+dive|analy(?:ze|sis)|evaluat|compare\s+and\s+contrast|trade.?off|pros?\s+and\s+cons?\b)",
-    r"(?i)\b(?:best\s+(?:practice|approach|way|pattern)|design\s+(?:a|the)\s+(?:system|architecture|api|database|schema|service))",
-    r"(?i)\b(?:reason\s+about|explain\s+why|what(?:\s+is|'s)\s+the\s+(?:best|optimal|right|correct)\s+way)",
-    r"(?i)\b(?:multi.?thread|async|event.?driven|microservice|rate\s+limit|load\s+balanc)",
-    r"(?i)\b(?:integrat(?:e|ion)\s+(?:with|into|between)|migrat(?:e|ion)\s+(?:from|to|strategy)|orchestrat)",
-    r"(?i)\b(?:performance\s+(?:bottleneck|issue|problem|analysis|tuning|profiling|regression)|memory\s+leak|race\s+condition|deadlock)",
-    r"(?i)\b(?:can\s+you\s+(?:help\s+me\s+)?(?:design|plan|architect|think\s+(?:through|about)|reason\s+about))",
-    r"(?i)\b(?:strategy|blueprint|roadmap|plan\s+(?:out|for)|approach\s+to)",
-    r"(?i)\b(?:security\s+(?:audit|review|analysis)|threat\s+model)",
-    r"(?i)\b(?:state\s+machine|algorithm\s+(?:design|complexity|analysis))",
-    r"(?i)\b(?:dependenc(?:y|ies)\s+(?:graph|tree|injection|management)|coupling|cohesion)",
-    r"(?i)\b(?:resilien(?:t|ce)|fault\s+toleran|circuit\s+breaker|retry\s+strategy)",
-];
-
-const SYNTAX_FIX: &[&str] = &[
-    r"(?i)\b(?:fix|correct|repair|patch)\s+(?:this|the|my|a)\s+(?:bug|error|issue|typo|problem|mistake|warning)",
-    r"(?i)\b(?:doesn't\s+compile|won't\s+compile|doesn't\s+build|won't\s+build|compilation\s+error|syntax\s+error|build\s+error)",
-    r"(?i)\b(?:type\s+error|linter?\s+(?:error|warning)|runtime\s+error|segfault|null\s+pointer|borrow\s+check)",
-    r"(?i)\b(?:why\s+doesn't\s+this\s+work|what(?:\s+is|'s)\s+wrong\s+with|this\s+(?:is|seems)\s+broken)",
-    r"(?i)\b(?:stack\s+trace|backtrace|panic|exception|traceback|\.unwrap)",
-    r"(?i)\b(?:missing\s+(?:semicolon|import|parenthesis|brace|bracket|quote|comma|colon|use\s+statement|dependency|argument|parameter))",
-    r"(?i)\b(?:undefined\s+(?:variable|function|symbol|reference|type|method)|not\s+found\s+in\s+this\s+scope|unresolved\s+reference)",
-    r"(?i)\b(?:typo|misspell(?:ed|ing)?|copy.?paste\s+error|fat\s+finger)",
-    r"(?i)\b(?:doesn't\s+work|is\s+broken|stopped\s+working|broke|isn't\s+working|not\s+working)",
-    r"(?i)\b(?:here(?:'s|\s+is)\s+(?:the|an|my)\s+error|getting\s+(?:this|an)\s+error|seeing\s+(?:this|an)\s+error)",
-    r"(?i)\b(?:error[:;].{0,40}\b(?:\d+|E\d{4}|0x[0-9a-fA-F]+)\b)",
-];
-
-const CASUAL: &[&str] = &[
-    r"(?i)^\s*(?:hi|hey|hello|greetings|good\s+morning|good\s+afternoon|good\s+evening|howdy)(?:\s+there)?[\s!.,]*$",
-    r"(?i)^\s*(?:thanks|thank\s+you|thx|ty|appreciate\s+it|cheers|thanks\s+a\s+lot)[\s!.,]*$",
-    r"(?i)^\s*(?:what\s+is|what\s+are|what's|what\s+does|define|definition\s+of)\s+\w+(?:\s+\w+){0,2}\s*\??$",
-    r"(?i)^\s*(?:how\s+(?:do|can|should)\s+I\s+\w+)(?:\s+\w+){0,4}\s*\??$",
-    r"(?i)^\s*(?:ok|okay|got\s+it|understood|alright|cool|nice|good|great|sure|yes|no|maybe|idk)[\s!.,]*$",
-];
-
-const NEGATIVE: &[&str] = &[
-    r"(?i)\b(?:read|show|display|cat|view|open)\s+(?:the|this|my|a)\s+\w*(?:architecture|design|system|pattern|refactor)",
-    r"(?i)\b(?:fix|correct|repair)\s+(?:the|this|my)\s+(?:compile|syntax|typo|lint|warning|error)",
-    r"(?i)\b(?:design|architect|refactor|rearchitect|restructure)\s+(?:a|the|an)\s+(?:fix|solution|remedy|patch|workaround)",
-    r"(?i)\b(?:explain|describe|tell\s+me\s+about|what\s+do\s+you\s+think\s+about)\s+(?:the|this|that)\s+(?:file|code|class|module)",
-];
-
-// ── Negative suppression metadata (parallel to NEGATIVE patterns) ──
-
-const NEGATIVE_META: &[NegativeMeta] = &[
-    NegativeMeta {
-        suppressed: "COMPLEX_REASONING",
-        penalty: 2,
-    },
-    NegativeMeta {
-        suppressed: "COMPLEX_REASONING",
-        penalty: 2,
-    },
-    NegativeMeta {
-        suppressed: "SYNTAX_FIX",
-        penalty: 2,
-    },
-    NegativeMeta {
-        suppressed: "FILE_READING",
-        penalty: 2,
-    },
-];
 
 // ── Auth Header Lookup ──
 
@@ -560,65 +417,32 @@ fn sanitize(text: &str) -> String {
 
 fn build_all_patterns(
     categories: &[CategoryConfig],
-) -> (Vec<&'static str>, Vec<PatternMeta>, Range<usize>) {
+    negative_patterns: &[NegativePatternConfig],
+) -> (Vec<String>, Vec<PatternMeta>, Range<usize>) {
     let mut patterns = Vec::new();
     let mut metadata = Vec::new();
 
     for config in categories {
-        match config.name.as_str() {
-            "FILE_READING" => {
-                for (i, p) in FILE_READING.iter().enumerate() {
-                    patterns.push(*p);
-                    metadata.push(PatternMeta {
-                        category: "FILE_READING".to_string(),
-                        weight: FR_WEIGHTS[i],
-                    });
-                }
-            }
-            "COMPLEX_REASONING" => {
-                for (i, p) in COMPLEX_REASONING.iter().enumerate() {
-                    patterns.push(*p);
-                    metadata.push(PatternMeta {
-                        category: "COMPLEX_REASONING".to_string(),
-                        weight: CR_WEIGHTS[i],
-                    });
-                }
-            }
-            "SYNTAX_FIX" => {
-                for (i, p) in SYNTAX_FIX.iter().enumerate() {
-                    patterns.push(*p);
-                    metadata.push(PatternMeta {
-                        category: "SYNTAX_FIX".to_string(),
-                        weight: SF_WEIGHTS[i],
-                    });
-                }
-            }
-            "CASUAL" => {
-                for (i, p) in CASUAL.iter().enumerate() {
-                    patterns.push(*p);
-                    metadata.push(PatternMeta {
-                        category: "CASUAL".to_string(),
-                        weight: CA_WEIGHTS[i],
-                    });
-                }
-            }
-            unknown => {
-                tracing::warn!(category = %unknown, "CategoryConfig name has no pattern array");
-            }
+        for entry in &config.patterns {
+            patterns.push(entry.regex.clone());
+            metadata.push(PatternMeta {
+                category: config.name.clone(),
+                weight: entry.weight,
+            });
         }
     }
 
     let positive_count = metadata.len();
     let negative_start = positive_count;
 
-    for p in NEGATIVE.iter() {
-        patterns.push(*p);
+    for neg in negative_patterns {
+        patterns.push(neg.regex.clone());
         metadata.push(PatternMeta {
             category: "NEG".to_string(),
             weight: 0,
         });
     }
-    let negative_idx = negative_start..(negative_start + NEG_COUNT);
+    let negative_idx = negative_start..(negative_start + negative_patterns.len());
 
     (patterns, metadata, negative_idx)
 }
@@ -628,17 +452,17 @@ fn fallback_category(categories: &[CategoryConfig]) -> &str {
         .iter()
         .max_by_key(|c| c.priority)
         .map(|c| c.name.as_str())
-        .unwrap_or("CASUAL")
+        .unwrap_or("unknown")
 }
 
 // ── Implementations ──
 
 impl ClassificationResult {
-    /// Creates a CASUAL fallback result with Fallback tier.
+    /// Creates a fallback result with Fallback tier.
     /// Used when no classifier chain is configured (graceful degradation).
     pub fn fallback() -> Self {
         ClassificationResult {
-            category: "CASUAL".to_string(),
+            category: "unknown".to_string(),
             model: DEFAULT_MODEL.to_string(),
             endpoint: String::new(),
             tier: ClassificationTier::Fallback,
@@ -657,11 +481,13 @@ impl RegexClassifier {
         fallback_entry: RouteEntry,
         short_prompt_len: usize,
         categories: Vec<CategoryConfig>,
+        negative_patterns: &[NegativePatternConfig],
     ) -> Result<Self, String> {
-        let (patterns, metadata, negative_idx) = build_all_patterns(&categories);
+        let (patterns, metadata, negative_idx) = build_all_patterns(&categories, negative_patterns);
         let set = RegexSet::new(&patterns).map_err(|e| format!("regex compilation failed: {e}"))?;
 
         Ok(IntentClassifier {
+            negative_patterns: negative_patterns.to_vec(),
             set,
             metadata,
             negative_idx,
@@ -678,10 +504,12 @@ impl RegexClassifier {
         fallback_entry: RouteEntry,
         short_prompt_len: usize,
         categories: Vec<CategoryConfig>,
+        negative_patterns: &[NegativePatternConfig],
     ) -> Self {
-        let (patterns, metadata, negative_idx) = build_all_patterns(&categories);
+        let (patterns, metadata, negative_idx) = build_all_patterns(&categories, negative_patterns);
         let set = RegexSet::new(&patterns).expect("built-in patterns should always compile");
         IntentClassifier {
+            negative_patterns: negative_patterns.to_vec(),
             set,
             metadata,
             negative_idx,
@@ -712,9 +540,9 @@ impl RegexClassifier {
         for &i in &matches {
             if self.negative_idx.contains(&i) {
                 let neg_idx = i - self.negative_idx.start;
-                if neg_idx < NEGATIVE_META.len() {
-                    let neg = &NEGATIVE_META[neg_idx];
-                    if let Some(score) = scores.get_mut(neg.suppressed) {
+                if neg_idx < self.negative_patterns.len() {
+                    let neg = &self.negative_patterns[neg_idx];
+                    if let Some(score) = scores.get_mut(neg.suppressed.as_str()) {
                         *score = score.saturating_sub(neg.penalty as u32);
                     }
                 }
@@ -737,14 +565,13 @@ impl RegexClassifier {
             })
             .collect();
 
-        // SF dual-threshold special case (SYNTAX_FIX only)
-        let sf_score = *scores.get("SYNTAX_FIX").unwrap_or(&0);
-        let fr_score = *scores.get("FILE_READING").unwrap_or(&0);
-        let sf_met = sf_score >= 4 || (sf_score >= 3 && fr_score == 0);
-
-        // Update the met flag for SYNTAX_FIX
-        if let Some(entry) = met.iter_mut().find(|(c, _)| c.name == "SYNTAX_FIX") {
-            entry.1 = sf_met;
+        // Apply dual_threshold overrides from config
+        for (config, met_flag) in met.iter_mut() {
+            if let Some(dt) = &config.dual_threshold {
+                let score = *scores.get(config.name.as_str()).unwrap_or(&0);
+                let suppress_score = *scores.get(dt.suppress_if_present.as_str()).unwrap_or(&0);
+                *met_flag = score >= dt.alt_score || (score >= config.threshold && suppress_score == 0);
+            }
         }
 
         let met_count = met.iter().filter(|(_, m)| *m).count();
@@ -768,7 +595,7 @@ impl RegexClassifier {
     }
 
     fn route_match(&self, category: &str) -> ClassificationResult {
-        if category != "CASUAL" && !self.routing.contains_key(category) {
+        if !self.routing.contains_key(category) {
             tracing::warn!(%category, "route_match: category not in routing table — falling back");
         }
         let route = self.routing.get(category).unwrap_or(&self.fallback_entry);
@@ -799,8 +626,76 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    fn test_categories() -> Vec<CategoryConfig> {
+        vec![
+            CategoryConfig {
+                name: "FILE_READING".to_string(),
+                description: "Reading, viewing, inspecting, searching, or navigating files or code".to_string(),
+                threshold: 3,
+                priority: 1,
+                patterns: vec![
+                    PatternEntry {
+                        regex: r"(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b".to_string(),
+                        weight: 3,
+                    },
+                ],
+                dual_threshold: None,
+            },
+            CategoryConfig {
+                name: "SYNTAX_FIX".to_string(),
+                description: "Fixing bugs, errors, typos, compilation issues, or broken code".to_string(),
+                threshold: 3,
+                priority: 2,
+                patterns: vec![
+                    PatternEntry {
+                        regex: r"(?i)\b(?:fix|correct|repair|patch)\s+(?:this|the|my|a)\s+(?:bug|error|issue|typo|problem|mistake|warning)".to_string(),
+                        weight: 3,
+                    },
+                ],
+                dual_threshold: None,
+            },
+            CategoryConfig {
+                name: "COMPLEX_REASONING".to_string(),
+                description: "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization".to_string(),
+                threshold: 3,
+                priority: 3,
+                patterns: vec![
+                    PatternEntry {
+                        regex: r"(?i)\b(?:architect|design\s+pattern|system\s+design|trade.?off|refactor|restructure|rearchitect)".to_string(),
+                        weight: 3,
+                    },
+                ],
+                dual_threshold: None,
+            },
+            CategoryConfig {
+                name: "CASUAL".to_string(),
+                description: "Simple questions, greetings, general conversation, or short prompts".to_string(),
+                threshold: 1,
+                priority: 4,
+                patterns: vec![
+                    PatternEntry {
+                        regex: r"(?i)^\s*(?:hi|hey|hello|greetings|good\s+morning|good\s+afternoon|good\s+evening|howdy)(?:\s+there)?[\s!.,]*$".to_string(),
+                        weight: 3,
+                    },
+                ],
+                dual_threshold: None,
+            },
+        ]
+    }
+
+    fn test_negative_patterns() -> Vec<NegativePatternConfig> {
+        vec![
+            NegativePatternConfig {
+                regex: r"(?i)\b(?:read|show|display|cat|view|open)\s+(?:the|this|my|a)\s+\w*(?:architecture|design|system|pattern|refactor)".to_string(),
+                suppressed: "COMPLEX_REASONING".to_string(),
+                penalty: 2,
+            },
+        ]
+    }
+
     fn test_classifier() -> RegexClassifier {
-        let cats = hardcoded_categories();
+        let cats = test_categories();
+        let neg = test_negative_patterns();
         let mut routing = HashMap::new();
         routing.insert(
             cats[0].name.clone(),
@@ -849,7 +744,7 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        RegexClassifier::from_values(routing, fallback, 30, cats)
+        RegexClassifier::from_values(routing, fallback, 30, cats, &neg)
     }
 
     #[tokio::test]
@@ -908,16 +803,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hardcoded_categories_match_test_routing_keys() {
+    async fn test_routing_keys_match_categories() {
         let classifier = test_classifier();
-        let cats = hardcoded_categories();
+        let cats = test_categories();
         let routing_keys: std::collections::HashSet<&str> =
             classifier.routing.keys().map(|s| s.as_str()).collect();
         let cat_names: std::collections::HashSet<&str> =
             cats.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             routing_keys, cat_names,
-            "test_classifier routing keys must match hardcoded_categories names"
+            "test_classifier routing keys must match category names"
         );
     }
 
@@ -1016,7 +911,7 @@ mod tests {
         let chain = ClassifierChain::new(vec![]);
         let result = chain.classify("prompt").await;
         assert_eq!(result.tier, ClassificationTier::Fallback);
-        assert_eq!(result.category, "CASUAL");
+        assert_eq!(result.category, "unknown");
     }
 
     #[tokio::test]
@@ -1134,7 +1029,7 @@ mod tests {
             timeout_secs: 3,
         };
 
-        let cats = hardcoded_categories();
+        let cats = test_categories();
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
 
@@ -1167,7 +1062,7 @@ mod tests {
             timeout_secs: 3,
         };
 
-        let cats = hardcoded_categories();
+        let cats = test_categories();
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
 
@@ -1175,7 +1070,7 @@ mod tests {
         let result = llm.classify("test").await;
 
         assert_eq!(result.tier, ClassificationTier::Fallback);
-        assert_eq!(result.category, "CASUAL");
+        assert_eq!(result.category, "unknown");
     }
 
     #[tokio::test]
@@ -1190,7 +1085,7 @@ mod tests {
             timeout_secs: 1,
         };
 
-        let cats = hardcoded_categories();
+        let cats = test_categories();
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
 
@@ -1198,7 +1093,7 @@ mod tests {
         let result = llm.classify("test").await;
 
         assert_eq!(result.tier, ClassificationTier::Fallback);
-        assert_eq!(result.category, "CASUAL");
+        assert_eq!(result.category, "unknown");
     }
 
     #[tokio::test]
@@ -1229,7 +1124,7 @@ mod tests {
             timeout_secs: 3,
         };
 
-        let cats = hardcoded_categories();
+        let cats = test_categories();
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
 
@@ -1237,12 +1132,12 @@ mod tests {
         let result = llm.classify("test").await;
 
         assert_eq!(result.tier, ClassificationTier::Fallback);
-        assert_eq!(result.category, "CASUAL");
+        assert_eq!(result.category, "unknown");
     }
 
     #[tokio::test]
     async fn build_llm_classifier_prompt_has_categories() {
-        let cats = hardcoded_categories();
+        let cats = test_categories();
         let prompt = build_llm_classifier_prompt(&cats);
 
         assert!(prompt.contains("FILE_READING"));

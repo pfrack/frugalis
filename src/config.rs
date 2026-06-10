@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
 
 use crate::intent_classifier::{
-    hardcoded_categories, CategoryConfig, DualThreshold, NegativePatternConfig, PatternEntry,
+    CategoryConfig, DualThreshold, NegativePatternConfig, PatternEntry,
 };
 use crate::routing::*;
 
@@ -554,7 +554,7 @@ pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
         ROUTING_CONFIG_LEGACY.to_string()
     } else {
         tracing::warn!("No config.toml or routing.toml found; using hardcoded routing defaults");
-        return hardcoded_routing(&hardcoded_categories());
+        return hardcoded_routing(&[]);
     };
 
     let mut routing = match load_routing_from_file(&path) {
@@ -564,7 +564,7 @@ pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
         }
         Err(e) => {
             tracing::warn!("{e}; using hardcoded routing defaults");
-            return hardcoded_routing(&hardcoded_categories());
+            return hardcoded_routing(&[]);
         }
     };
     let fallback_entry = routing.remove("DEFAULT").unwrap_or_else(|| RouteEntry {
@@ -1043,9 +1043,45 @@ pub(crate) fn load_llm_classifier_config_from_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intent_classifier::hardcoded_categories;
     use crate::routing::RouteEntry;
     use serial_test::serial;
+
+    fn test_hardcoded_categories() -> Vec<CategoryConfig> {
+        vec![
+            CategoryConfig {
+                name: "FILE_READING".to_string(),
+                description: String::new(),
+                threshold: 3,
+                priority: 1,
+                patterns: vec![],
+                dual_threshold: None,
+            },
+            CategoryConfig {
+                name: "SYNTAX_FIX".to_string(),
+                description: String::new(),
+                threshold: 3,
+                priority: 2,
+                patterns: vec![],
+                dual_threshold: None,
+            },
+            CategoryConfig {
+                name: "COMPLEX_REASONING".to_string(),
+                description: String::new(),
+                threshold: 3,
+                priority: 3,
+                patterns: vec![],
+                dual_threshold: None,
+            },
+            CategoryConfig {
+                name: "CASUAL".to_string(),
+                description: String::new(),
+                threshold: 1,
+                priority: 4,
+                patterns: vec![],
+                dual_threshold: None,
+            },
+        ]
+    }
 
     #[test]
     fn load_routing_from_file_success() {
@@ -1131,7 +1167,7 @@ api_key_env = ""
     #[test]
     #[serial]
     fn hardcoded_routing_produces_expected_defaults() {
-        let cats = hardcoded_categories();
+        let cats = test_hardcoded_categories();
         let (routing, fallback) = hardcoded_routing(&cats);
 
         assert_eq!(routing.len(), cats.len());
@@ -1157,7 +1193,7 @@ api_key_env = ""
 
     #[test]
     fn hardcoded_routing_uses_hardcoded_endpoint() {
-        let (_, fallback) = hardcoded_routing(&hardcoded_categories());
+        let (_, fallback) = hardcoded_routing(&test_hardcoded_categories());
         assert_eq!(
             fallback.endpoint,
             "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -1195,17 +1231,16 @@ api_key_env = ""
 
         std::env::remove_var("CONFIG_PATH");
 
-        // 2. When file is missing, fall back to hardcoded defaults
+        // 2. When file is missing, fall back to hardcoded defaults (empty categories)
         std::env::set_var("CONFIG_PATH", "/nonexistent/config.toml");
         let (routing, fallback) = load_routing();
 
-        assert_eq!(routing.len(), 4);
-        assert!(routing.contains_key("SYNTAX_FIX"));
+        assert_eq!(routing.len(), 0);
         assert_eq!(fallback.model, DEFAULT_MODEL);
 
         std::env::remove_var("CONFIG_PATH");
 
-        // 3. When file exists but TOML is invalid, fall back to hardcoded defaults
+        // 3. When file exists but TOML is invalid, fall back to hardcoded defaults (empty categories)
         use std::io::Write;
         let file_path_invalid = temp_dir.join("invalid_config.toml");
         let mut file = std::fs::File::create(&file_path_invalid).expect("create temp file");
@@ -1215,8 +1250,7 @@ api_key_env = ""
         std::env::set_var("CONFIG_PATH", file_path_invalid.to_str().unwrap());
         let (routing, fallback) = load_routing();
 
-        assert_eq!(routing.len(), 4);
-        assert!(routing.contains_key("SYNTAX_FIX"));
+        assert_eq!(routing.len(), 0);
         assert_eq!(fallback.model, DEFAULT_MODEL);
 
         std::env::remove_var("CONFIG_PATH");

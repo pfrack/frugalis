@@ -823,8 +823,8 @@ Phase 4–6: Minor — `PatternMeta.category` changes from `&'static str` to `St
 
 #### Automated
 
-- [x] 4.1 `cargo build` compiles with new struct definitions and extended loaders
-- [x] 4.2 `cargo test` — existing config tests pass
+- [x] 4.1 `cargo build` compiles with new struct definitions and extended loaders — bf4fc16
+- [x] 4.2 `cargo test` — existing config tests pass — bf4fc16
 
 #### Manual
 
@@ -835,11 +835,11 @@ Phase 4–6: Minor — `PatternMeta.category` changes from `&'static str` to `St
 
 #### Automated
 
-- [ ] 5.1 `cargo build --release` compiles without errors
-- [ ] 5.2 `cargo test` — all tests pass
-- [ ] 5.3 `cargo test auth` — auth tests pass
-- [ ] 5.4 `cargo test routes_auth` — route auth tests pass
-- [ ] 5.5 Zero hardcoded category name strings in engine code
+- [x] 5.1 `cargo build --release` compiles without errors
+- [x] 5.2 `cargo test` — all tests pass
+- [x] 5.3 `cargo test auth` — auth tests pass
+- [x] 5.4 `cargo test routes_auth` — route auth tests pass
+- [x] 5.5 Zero hardcoded category name strings in engine code
 
 #### Manual
 
