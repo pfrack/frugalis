@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use tracing::warn;
+use tracing::{debug, warn};
 
-#[allow(unused_imports)]
 use crate::intent_classifier::{hardcoded_categories, CategoryConfig};
 use crate::routing::*;
 
@@ -20,7 +19,10 @@ pub(crate) fn load_dashboard_config_from_value(root: &toml::Value) -> DashboardC
     };
     let dashboard_section = match table.get("dashboard").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None => return DashboardConfig::default(),
+        None => {
+            debug!("[dashboard] section not found; using defaults");
+            return DashboardConfig::default();
+        }
     };
     DashboardConfig {
         default_hours: dashboard_section
@@ -59,7 +61,10 @@ pub(crate) fn load_server_config_from_value(root: &toml::Value) -> ServerConfig 
     };
     let server_section = match table.get("server").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None => return ServerConfig::default(),
+        None => {
+            debug!("[server] section not found; using defaults");
+            return ServerConfig::default();
+        }
     };
     ServerConfig {
         port: server_section
@@ -88,7 +93,10 @@ pub(crate) fn load_http_config_from_value(root: &toml::Value) -> HttpConfig {
     };
     let http_section = match table.get("http").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None => return HttpConfig::default(),
+        None => {
+            debug!("[http] section not found; using defaults");
+            return HttpConfig::default();
+        }
     };
     HttpConfig {
         max_upstream_body_bytes: http_section
@@ -127,7 +135,10 @@ pub(crate) fn load_database_config_from_value(root: &toml::Value) -> DatabaseCon
     };
     let db_section = match table.get("database").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None => return DatabaseConfig::default(),
+        None => {
+            debug!("[database] section not found; using defaults");
+            return DatabaseConfig::default();
+        }
     };
     DatabaseConfig {
         connection_retries: db_section
@@ -166,7 +177,10 @@ pub(crate) fn load_auth_providers_from_value(root: &toml::Value) -> Vec<AuthProv
     };
     let providers_array = match table.get("auth_provider").and_then(|v| v.as_array()) {
         Some(arr) => arr,
-        None => return vec![],
+        None => {
+            debug!("[auth_provider] section not found; no auth providers configured");
+            return vec![];
+        }
     };
 
     let mut providers = Vec::new();
@@ -266,7 +280,10 @@ pub(crate) fn load_cors_config_from_value(root: &toml::Value) -> CorsConfig {
     };
     let cors_section = match table.get("cors").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None => return CorsConfig::default(),
+        None => {
+            debug!("[cors] section not found; using defaults (empty allowed_origins)");
+            return CorsConfig::default();
+        }
     };
     let allowed_origins = cors_section
         .get("allowed_origins")
@@ -371,7 +388,10 @@ pub(crate) fn load_persistence_config_from_value(root: &toml::Value) -> Persiste
     };
     let persistence_section = match table.get("persistence").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None => return PersistenceSettings::default(),
+        None => {
+            debug!("[persistence] section not found; using defaults (memory backend)");
+            return PersistenceSettings::default();
+        }
     };
     PersistenceSettings {
         backend: persistence_section
@@ -638,22 +658,36 @@ pub(crate) fn load_categories_from_value(
     };
 
     let mut categories = Vec::new();
+    let mut errors = Vec::new();
+
     for (i, cat) in cats_array.iter().enumerate() {
-        let t = cat
-            .as_table()
-            .ok_or_else(|| format!("categories[{i}] must be a table"))?;
-        let name = t
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| format!("categories[{i}]: missing 'name'"))?
-            .to_string();
+        let t = match cat.as_table() {
+            Some(t) => t,
+            None => {
+                errors.push(format!("categories[{}] is not a table", i));
+                continue;
+            }
+        };
+        let name = match t.get("name").and_then(|v| v.as_str()) {
+            Some(n) => n.to_string(),
+            None => {
+                errors.push(format!("categories[{}]: missing 'name'", i));
+                continue;
+            }
+        };
         let description = t
             .get("description")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let threshold = t.get("threshold").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
-        let priority = t.get("priority").and_then(|v| v.as_integer()).unwrap_or(99) as u8;
+        let threshold = t
+            .get("threshold")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(1) as u32;
+        let priority = t
+            .get("priority")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(99) as u8;
 
         categories.push(CategoryConfig {
             name,
@@ -663,9 +697,14 @@ pub(crate) fn load_categories_from_value(
         });
     }
 
-    if categories.is_empty() {
-        return Err("[[categories]] is empty".to_string());
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
     }
+
+    if categories.is_empty() {
+        return Err("No categories defined".to_string());
+    }
+
     Ok(categories)
 }
 
@@ -783,7 +822,10 @@ pub(crate) fn load_regex_classifier_config_from_value(root: &toml::Value) -> Reg
     };
     let regex_section = match table.get("regex_classifier") {
         Some(toml::Value::Table(t)) => t,
-        _ => return RegexClassifierConfig::default(),
+        _ => {
+            debug!("[regex_classifier] section not found or not a table; using defaults (enabled)");
+            return RegexClassifierConfig::default();
+        }
     };
     let enabled = regex_section
         .get("enabled")
@@ -829,8 +871,24 @@ pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConf
 pub(crate) fn load_llm_classifier_config_from_value(
     root: &toml::Value,
 ) -> Option<LlmClassifierConfig> {
-    let table = root.as_table()?;
-    let llm_section = table.get("llm_classifier")?.as_table()?;
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => {
+            debug!("config root is not a table for llm_classifier config; llm classifier will be disabled");
+            return None;
+        }
+    };
+    let llm_section = match table.get("llm_classifier") {
+        Some(toml::Value::Table(t)) => t,
+        Some(_) => {
+            debug!("[llm_classifier] section is not a table; llm classifier will be disabled");
+            return None;
+        }
+        None => {
+            debug!("[llm_classifier] section not found; llm classifier will be disabled");
+            return None;
+        }
+    };
 
     if !llm_section
         .get("enabled")
