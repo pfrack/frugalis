@@ -617,7 +617,7 @@ impl ClassificationResult {
     pub fn fallback() -> Self {
         ClassificationResult {
             category: "CASUAL".to_string(),
-            model: crate::config::env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
+            model: DEFAULT_MODEL.to_string(),
             endpoint: String::new(),
             tier: ClassificationTier::Fallback,
             provider_type: String::new(),

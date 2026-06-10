@@ -14,7 +14,7 @@ use axum::{
 };
 use tokio_stream::{Stream, StreamExt};
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod auth;
@@ -43,43 +43,22 @@ pub struct AppState {
     streaming_channel_capacity: usize,
     dashboard_config: config::DashboardConfig,
     auth_providers: Arc<Vec<config::AuthProviderConfig>>,
+    allowed_origins: Arc<std::sync::RwLock<Vec<String>>>,
 }
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing subscriber before any other code.
-    let log_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    let fmt_layer = match std::env::var("LOG_FORMAT").as_deref() {
-        Ok("json") => fmt::layer().json().with_filter(log_filter).boxed(),
-        _ => fmt::layer().compact().with_filter(log_filter).boxed(),
-    };
-
-    tracing_subscriber::registry().with(fmt_layer).init();
-
-    // Ensure any panic is logged, not silent.
-    panic::set_hook(Box::new(|info| {
-        eprintln!("Panic in Cerebrum: {info}");
-    }));
-
-    let auth_config = auth::AuthConfig::from_env().unwrap_or_else(|err| {
-        panic!("Auth configuration error: {err}");
-    });
-    let auth_config = Arc::new(auth_config);
-
+    // Parse config before tracing init to get server settings
     let config_path_option = std::env::var("CONFIG_PATH").ok();
-
-    // Embed config.toml as default
     const DEFAULT_CONFIG_TOML: &str = include_str!("../config.toml");
     let mut config_root = match toml::from_str::<toml::Value>(DEFAULT_CONFIG_TOML) {
         Ok(root) => root,
         Err(e) => {
-            error!("Embedded config.toml is invalid: {e}; using hardcoded defaults");
+            eprintln!("Embedded config.toml is invalid: {e}; using hardcoded defaults");
             toml::Value::Table(Default::default())
         }
     };
 
-    // Merge CONFIG_PATH overlay if provided
     if let Some(config_path) = config_path_option {
         match std::fs::read_to_string(&config_path) {
             Ok(content) => {
@@ -106,18 +85,40 @@ async fn main() {
                             })
                             .unwrap_or_default();
                         config::merge_toml_values(&mut config_root, &overlay, &override_keys);
-                        info!("Merged config from {}", config_path);
                     }
                     Err(e) => {
-                        warn!("failed to parse config file at {}: {}; using embedded defaults", config_path, e);
+                        eprintln!("failed to parse config file at {}: {}; using embedded defaults", config_path, e);
                     }
                 }
             }
             Err(e) => {
-                warn!("failed to read config file at {}: {}; using embedded defaults", config_path, e);
+                eprintln!("failed to read config file at {}: {}; using embedded defaults", config_path, e);
             }
         }
     }
+
+    let server_config = config::load_server_config_from_value(&config_root);
+
+    // Initialize tracing using server_config with RUST_LOG override
+    let log_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&server_config.log_level));
+
+    let fmt_layer = match server_config.log_format.as_str() {
+        "json" => fmt::layer().json().with_filter(log_filter).boxed(),
+        _ => fmt::layer().compact().with_filter(log_filter).boxed(),
+    };
+
+    tracing_subscriber::registry().with(fmt_layer).init();
+
+    // Ensure any panic is logged, not silent.
+    panic::set_hook(Box::new(|info| {
+        eprintln!("Panic in Cerebrum: {info}");
+    }));
+
+    let auth_config = auth::AuthConfig::from_env().unwrap_or_else(|err| {
+        panic!("Auth configuration error: {err}");
+    });
+    let auth_config = Arc::new(auth_config);
 
     let regex_config = config::load_regex_classifier_config_from_value(&config_root);
 
@@ -279,6 +280,9 @@ async fn main() {
         }
     };
 
+    let cors_config = config::load_cors_config_from_value(&config_root);
+    let allowed_origins = Arc::new(std::sync::RwLock::new(cors_config.allowed_origins));
+
     let app_state = Arc::new(AppState {
         persistence: persistence_state,
         classifier,
@@ -293,13 +297,10 @@ async fn main() {
         streaming_channel_capacity: http_config.streaming_channel_capacity,
         dashboard_config: config::load_dashboard_config_from_value(&config_root),
         auth_providers,
+        allowed_origins,
     });
 
-    let server_config = config::load_server_config_from_value(&config_root);
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(server_config.port);
+    let port = server_config.port;
 
     let app = build_app(auth_config, app_state);
     let bind_addr = format!("0.0.0.0:{port}");
@@ -819,12 +820,13 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
 
     let dashboard_routes = dashboard::routes(auth_config);
 
-    // Build CORS layer from ALLOWED_ORIGINS env (comma-separated). If empty, no CORS headers (secure default).
-    let allowed_origin_headers: Vec<HeaderValue> = std::env::var("ALLOWED_ORIGINS")
-        .unwrap_or_default()
-        .split(',')
-        .filter(|s| !s.trim().is_empty())
-        .filter_map(|s| header::HeaderValue::from_str(s.trim()).ok())
+    // Build CORS layer from [cors].allowed_origins in config.toml. If empty, no CORS headers (secure default).
+    let allowed_origin_headers: Vec<HeaderValue> = app_state
+        .allowed_origins
+        .read()
+        .unwrap()
+        .iter()
+        .filter_map(|s| header::HeaderValue::from_str(s).ok())
         .collect();
 
     let cors_layer = if allowed_origin_headers.is_empty() {
@@ -903,6 +905,7 @@ mod tests {
             streaming_channel_capacity: 32,
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
+            allowed_origins: Arc::new(std::sync::RwLock::new(vec![])),
         })
     }
 
@@ -928,6 +931,7 @@ mod tests {
             streaming_channel_capacity: 32,
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
+            allowed_origins: Arc::new(std::sync::RwLock::new(vec![])),
         });
         build_app(auth_config, app_state)
     }
@@ -1874,6 +1878,7 @@ mod tests {
             streaming_channel_capacity: 32,
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
+            allowed_origins: Arc::new(std::sync::RwLock::new(vec![])),
         });
         let app = build_app(auth_config, app_state);
         (app, server)
@@ -2708,6 +2713,7 @@ mod slow_tests {
             streaming_channel_capacity: 32,
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
+            allowed_origins: Arc::new(std::sync::RwLock::new(vec![])),
         });
         let app = build_app(auth_config, app_state);
 

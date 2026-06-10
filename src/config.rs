@@ -442,7 +442,7 @@ pub(crate) fn parse_env_int(
 pub(crate) fn hardcoded_routing(
     categories: &[CategoryConfig],
 ) -> (HashMap<String, RouteEntry>, RouteEntry) {
-    let endpoint = env_or_default("NVIDIA_ENDPOINT", "https://integrate.api.nvidia.com/v1/chat/completions");
+    let endpoint = "https://integrate.api.nvidia.com/v1/chat/completions";
     let mut routing = HashMap::new();
 
     for cat in categories {
@@ -450,7 +450,7 @@ pub(crate) fn hardcoded_routing(
             cat.name.clone(),
             RouteEntry {
                 model: DEFAULT_MODEL.to_string(),
-                endpoint: endpoint.clone(),
+                endpoint: endpoint.to_string(),
                 cost_per_1m_input_tokens: None,
                 provider_type: "nvidia_nim".to_string(),
                 api_key_env: Some("NVIDIA_API_KEY".to_string()),
@@ -459,8 +459,8 @@ pub(crate) fn hardcoded_routing(
     }
 
     let fallback = RouteEntry {
-        model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
-        endpoint,
+        model: DEFAULT_MODEL.to_string(),
+        endpoint: endpoint.to_string(),
         cost_per_1m_input_tokens: None,
         provider_type: "nvidia_nim".to_string(),
         api_key_env: Some("NVIDIA_API_KEY".to_string()),
@@ -567,6 +567,15 @@ pub(crate) fn routing_from_value(
     let table = root
         .as_table()
         .ok_or_else(|| "Root must be a table".to_string())?;
+
+    // Pre-extract the DEFAULT entry's model for missing-field fallbacks
+    let default_model = table
+        .get("DEFAULT")
+        .and_then(|v| v.get("model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(DEFAULT_MODEL)
+        .to_string();
+
     let mut routing = HashMap::new();
     for (key, value) in table {
         if key == "fallback" || key == "categories" {
@@ -575,8 +584,8 @@ pub(crate) fn routing_from_value(
         let model = if let Some(m) = value.get("model").and_then(|v| v.as_str()) {
             m.to_string()
         } else {
-            warn!(category = %key, "routing section missing 'model' for category; using DEFAULT_MODEL");
-            env_or_default("DEFAULT_MODEL", DEFAULT_MODEL)
+            warn!(category = %key, "routing section missing 'model' for category; using DEFAULT model");
+            default_model.clone()
         };
         let endpoint = value
             .get("endpoint")
@@ -610,7 +619,7 @@ pub(crate) fn routing_from_value(
         );
     }
     let fallback = routing.remove("DEFAULT").unwrap_or_else(|| RouteEntry {
-        model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
+        model: default_model.clone(),
         endpoint: String::new(),
         cost_per_1m_input_tokens: None,
         provider_type: String::new(),
@@ -1012,24 +1021,11 @@ api_key_env = ""
     }
 
     #[test]
-    #[serial]
-    fn hardcoded_routing_respects_nvidia_endpoint_env() {
-        struct EnvGuard;
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                std::env::remove_var("NVIDIA_ENDPOINT");
-            }
-        }
-
-        let _guard = EnvGuard;
-        std::env::set_var(
-            "NVIDIA_ENDPOINT",
-            "https://custom.endpoint.example.com/v1/chat/completions",
-        );
+    fn hardcoded_routing_uses_hardcoded_endpoint() {
         let (_, fallback) = hardcoded_routing(&hardcoded_categories());
         assert_eq!(
             fallback.endpoint,
-            "https://custom.endpoint.example.com/v1/chat/completions"
+            "https://integrate.api.nvidia.com/v1/chat/completions"
         );
     }
 

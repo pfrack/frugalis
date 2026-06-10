@@ -332,22 +332,22 @@ None — this is a configuration refactor, no runtime performance impact.
 
 #### Automated
 
-- [x] 1.1 `cargo build` compiles with new struct definitions
-- [x] 1.2 `cargo test` — existing config tests pass
+- [x] 1.1 `cargo build` compiles with new struct definitions — 3e0a558
+- [x] 1.2 `cargo test` — existing config tests pass — 3e0a558
 
 #### Manual
 
-- [ ] 1.3 `config.toml` `[FALLBACK]` renamed to `[DEFAULT]`
-- [ ] 1.4 `merge_toml_values` supports per-key override mode for routing entries
+- [x] 1.3 `config.toml` `[FALLBACK]` renamed to `[DEFAULT]`
+- [x] 1.4 `merge_toml_values` supports per-key override mode for routing entries
 
 ### Phase 2: Wire Up config.toml in main.rs
 
 #### Automated
 
-- [ ] 2.1 `cargo build --release` compiles without errors
-- [ ] 2.2 `cargo test` — all tests pass
-- [ ] 2.3 `cargo test auth` — auth tests pass
-- [ ] 2.4 `cargo test routes_auth` — route auth tests pass
+- [x] 2.1 `cargo build --release` compiles without errors
+- [x] 2.2 `cargo test` — all tests pass
+- [x] 2.3 `cargo test auth` — auth tests pass
+- [x] 2.4 `cargo test routes_auth` — route auth tests pass
 
 #### Manual
 
