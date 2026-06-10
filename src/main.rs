@@ -147,24 +147,26 @@ async fn main() {
 
             for name in &classifiers_config.order {
                 match name.as_str() {
-                    "regex" => {
-                        if regex_config.enabled {
-                            match intent_classifier::RegexClassifier::from_env(
-                                routing_map.clone(),
-                                fallback_entry.clone(),
-                                intent_classifier::SHORT_PROMPT_LEN,
-                                categories.clone(),
-                            ) {
-                                Ok(c) => {
-                                    info!("Regex classifier initialized");
-                                    backends.push(Arc::new(c));
-                                }
-                                Err(e) => {
-                                    warn!("RegexClassifier disabled: {e}");
-                                }
-                            }
-                        }
-                    }
+                     "regex" => {
+                         if regex_config.enabled {
+                             match intent_classifier::RegexClassifier::from_env(
+                                 routing_map.clone(),
+                                 fallback_entry.clone(),
+                                 intent_classifier::SHORT_PROMPT_LEN,
+                                 categories.clone(),
+                             ) {
+                                 Ok(c) => {
+                                     info!("Regex classifier initialized");
+                                     backends.push(Arc::new(c));
+                                 }
+                                 Err(e) => {
+                                     warn!("RegexClassifier disabled: {e}");
+                                 }
+                             }
+                         } else {
+                             info!("Regex classifier disabled");
+                         }
+                     }
                     "llm" => {
                         if let Some(llm_config) = config::load_llm_classifier_config_from_value(&config_root) {
                             let llm = intent_classifier::LLMClassifier::new(
@@ -203,14 +205,57 @@ async fn main() {
     };
 
     let db_config = config::load_database_config_from_value(&config_root);
-    let persistence_state = match persistence::PersistenceConfig::from_env(&db_config).await {
-        Ok(s) => {
-            info!("Database connected successfully");
-            Some(s)
-        }
-        Err(e) => {
-            warn!("persistence disabled: {e}");
-            None
+    let persistence_settings = config::load_persistence_config_from_value(&config_root);
+    let semaphore_limit = db_config.log_concurrency_limit as usize;
+
+    let persistence_state = {
+        let db_url = std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty());
+
+        // Priority 1: DATABASE_URL env var forces Postgres.
+        if let Some(_url) = db_url {
+            let backend = persistence::PostgresBackend::from_env(&db_config).await;
+            match backend {
+                Ok(b) => {
+                    info!("Persistence backend: postgres (via DATABASE_URL)");
+                    Some(persistence::PersistenceConfig {
+                        backend: Arc::new(persistence::DbBackend::Postgres(b)),
+                        task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
+                    })
+                }
+                Err(e) => {
+                    panic!("{e}");
+                }
+            }
+        } else {
+            // Priority 2: Read backend from config.
+            match persistence_settings.backend.as_str() {
+                "postgres" => {
+                    warn!("[persistence] backend = \"postgres\" but DATABASE_URL is not set; falling through to memory");
+                    let backend = persistence::MemoryBackend::new();
+                    info!("Persistence backend: memory (per config fallback)");
+                    Some(persistence::PersistenceConfig {
+                        backend: Arc::new(persistence::DbBackend::Memory(backend)),
+                        task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
+                    })
+                }
+                "sqlite" => {
+                    let backend = persistence::SqliteBackend::from_path(&persistence_settings.sqlite_path).await;
+                    info!("Persistence backend: sqlite (path={})", persistence_settings.sqlite_path);
+                    Some(persistence::PersistenceConfig {
+                        backend: Arc::new(persistence::DbBackend::Sqlite(backend)),
+                        task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
+                    })
+                }
+                _ => {
+                    // Default: memory.
+                    let backend = persistence::MemoryBackend::new();
+                    info!("Persistence backend: memory");
+                    Some(persistence::PersistenceConfig {
+                        backend: Arc::new(persistence::DbBackend::Memory(backend)),
+                        task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
+                    })
+                }
+            }
         }
     };
 
@@ -280,9 +325,10 @@ fn log_classification(
             duration_ms: Some(duration_ms),
             prompt_snippet: snippet,
             prompt_char_count,
+            created_at: chrono::Utc::now(),
         };
         persistence::log_inference(
-            persistence.pool.clone(),
+            persistence.backend.clone(),
             persistence.task_semaphore.clone(),
             record,
         );
@@ -1306,6 +1352,8 @@ mod tests {
             }
         };
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
+        let backend = persistence::PostgresBackend { pool: (*pool).clone() };
+        let db_backend = Arc::new(persistence::DbBackend::Postgres(backend));
 
         let request_id = uuid::Uuid::new_v4();
         let record = persistence::InferenceRecord {
@@ -1316,8 +1364,9 @@ mod tests {
             duration_ms: Some(10),
             prompt_snippet: "integration test snippet".to_string(),
             prompt_char_count: Some(25),
+            created_at: chrono::Utc::now(),
         };
-        let handle = persistence::log_inference(pool.clone(), semaphore, record);
+        let handle = persistence::log_inference(db_backend, semaphore, record);
         handle.await.expect("logging task should complete");
 
         // Read back using non-macro query (no offline cache required).
@@ -1786,9 +1835,11 @@ mod tests {
             Some(1),
             None,
         );
+        let pool_owned = pool;
+        let pg_backend = persistence::PostgresBackend { pool: (*pool_owned).clone() };
         let app_state = Arc::new(AppState {
             persistence: Some(persistence::PersistenceConfig {
-                pool,
+                backend: Arc::new(persistence::DbBackend::Postgres(pg_backend)),
                 task_semaphore: semaphore,
             }),
             classifier: classifier_arc,

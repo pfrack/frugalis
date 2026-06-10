@@ -1,17 +1,950 @@
 use std::sync::Arc;
 use std::time::{SystemTime, Duration};
 
+use async_trait::async_trait;
 use crate::config::DatabaseConfig;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::PgPool;
 use sqlx::Row;
+use sqlx::SqlitePool;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+/// Shared trait that all persistence backends must implement.
+/// Backends are Send + Sync so they can be wrapped in Arc and shared across tasks.
+#[async_trait]
+pub trait PersistenceBackend: Send + Sync {
+    async fn insert_inference(&self, record: &InferenceRecord) -> Result<(), String>;
+    async fn fetch_inferences(
+        &self,
+        offset: u32,
+        limit: u32,
+        filter_category: Option<&str>,
+        filter_model: Option<&str>,
+    ) -> Result<(Vec<InferenceLog>, i64), QueryError>;
+    async fn fetch_latency_summary(&self, hours: u32) -> Result<LatencySummary, QueryError>;
+    async fn fetch_savings_estimate(
+        &self,
+        hours: u32,
+        model_costs: &dyn CostProvider,
+        baseline_model: &str,
+    ) -> Result<SavingsEstimate, QueryError>;
+}
+
+/// In-memory persistence backend backed by `Arc<RwLock<Vec<InferenceRecord>>>`.
+/// All queries operate over Rust iterators. p99 is computed in Rust.
+pub struct MemoryBackend {
+    pub records: Arc<std::sync::RwLock<Vec<InferenceRecord>>>,
+}
+
+impl MemoryBackend {
+    pub fn new() -> Self {
+        MemoryBackend {
+            records: Arc::new(std::sync::RwLock::new(Vec::new())),
+        }
+    }
+}
+
+/// SQLite persistence backend backed by `sqlx::SqlitePool`.
+/// File-backed (`./cerebrum.db`) or in-memory via shared-cache URI.
+/// Schema is created via `CREATE TABLE IF NOT EXISTS` on construction.
+pub struct SqliteBackend {
+    pub pool: SqlitePool,
+}
+
+impl SqliteBackend {
+    /// Create a new SQLite backend from a file path.
+    /// For `:memory:`, uses a shared-cache in-memory URI.
+    pub async fn from_path(path: &str) -> Self {
+        let uri = if path == ":memory:" {
+            "sqlite:file:cerebrum?mode=memory&cache=shared".to_string()
+        } else {
+            format!("sqlite:{path}?mode=rwc")
+        };
+        let backend = Self::from_uri(&uri).await;
+        backend
+    }
+
+    /// Create a new SQLite backend from an arbitrary URI.
+    /// Initializes the schema synchronously on construction (panics on failure).
+    pub async fn from_uri(uri: &str) -> Self {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(uri)
+            .await
+            .expect("failed to create SQLite pool");
+        let backend = Self { pool };
+        backend.init_schema().await;
+        backend
+    }
+
+    async fn init_schema(&self) {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS inferences (\
+             request_id TEXT PRIMARY KEY, \
+             status TEXT NOT NULL, \
+             category TEXT, \
+             upstream_model TEXT, \
+             duration_ms INTEGER, \
+             prompt_snippet TEXT NOT NULL, \
+             prompt_char_count INTEGER, \
+             created_at TEXT NOT NULL DEFAULT (datetime('now')))",
+        )
+        .execute(&self.pool)
+        .await
+        .expect("failed to initialize SQLite schema");
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_inferences_created_at \
+             ON inferences(created_at)",
+        )
+        .execute(&self.pool)
+        .await
+        .expect("failed to create SQLite index");
+    }
+}
+
+/// Postgres persistence backend backed by `sqlx::PgPool`.
+/// All existing PG-specific SQL, retry logic, and migration flow are preserved unchanged.
+pub struct PostgresBackend {
+    pub pool: PgPool,
+}
+
+impl PostgresBackend {
+    /// Create a new Postgres backend from env vars.
+    /// Reads `DATABASE_URL`, creates pool, runs health check with retries, applies migrations.
+    pub async fn from_env(db_config: &DatabaseConfig) -> Result<Self, String> {
+        let url = std::env::var("DATABASE_URL")
+            .map_err(|_| "DATABASE_URL environment variable is required".to_string())?;
+
+        use sqlx::postgres::PgConnectOptions;
+        use std::str::FromStr;
+
+        let options = PgConnectOptions::from_str(&url)
+            .map_err(|e| format!("DB connection string parse error: {e}"))?;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(db_config.max_connections)
+            .acquire_timeout(std::time::Duration::from_secs(db_config.acquire_timeout_secs))
+            .idle_timeout(std::time::Duration::from_secs(db_config.idle_timeout_secs))
+            .connect_lazy_with(options);
+
+        let base_delay = Duration::from_millis(db_config.retry_base_ms);
+
+        let mut last_err = None;
+
+        for attempt in 0..db_config.connection_retries {
+            match sqlx::query("SELECT 1").fetch_one(&pool).await {
+                Ok(_) => break,
+                Err(e) => {
+                    if attempt < db_config.connection_retries - 1 {
+                        warn!("DB health check failed (attempt {}): {}. Retrying...", attempt + 1, &e);
+                        let backoff = base_delay * (1u32 << attempt);
+                        let now_nanos = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos();
+                        let jitter_nanos = now_nanos % base_delay.as_nanos();
+                        let jitter = Duration::from_nanos(jitter_nanos as u64);
+                        let delay = backoff + jitter;
+                        tokio::time::sleep(delay).await;
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        if let Some(e) = last_err {
+            panic!("Database health check failed after {} retries: {}", db_config.connection_retries, e);
+        }
+
+        if let Err(e) = sqlx::migrate!().run(&pool).await {
+            panic!("Migrations failed: {e}");
+        }
+        info!("Migrations applied successfully");
+
+        Ok(Self { pool })
+    }
+}
+
+/// Dispatch enum wrapping the three backend variants.
+pub enum DbBackend {
+    Memory(MemoryBackend),
+    Sqlite(SqliteBackend),
+    Postgres(PostgresBackend),
+}
+
+/// Compute the 99th percentile from a sorted slice of durations.
+/// Returns the value at the 99th percentile index. Returns `None` for empty input.
+fn percentile_99(durations: &[i32]) -> Option<i32> {
+    if durations.is_empty() {
+        return None;
+    }
+    let mut sorted = durations.to_vec();
+    sorted.sort_unstable();
+    let idx = (0.99 * sorted.len() as f64).ceil() as usize - 1;
+    Some(sorted[idx])
+}
+
+#[async_trait]
+impl PersistenceBackend for MemoryBackend {
+    async fn insert_inference(&self, record: &InferenceRecord) -> Result<(), String> {
+        self.records.write().map_err(|e| e.to_string())?.push(record.clone());
+        Ok(())
+    }
+
+    async fn fetch_inferences(
+        &self,
+        offset: u32,
+        limit: u32,
+        filter_category: Option<&str>,
+        filter_model: Option<&str>,
+    ) -> Result<(Vec<InferenceLog>, i64), QueryError> {
+        let records = self.records.read().map_err(|e| QueryError(e.to_string()))?;
+        let mut filtered: Vec<&InferenceRecord> = records.iter().collect();
+
+        if let Some(cat) = filter_category {
+            filtered.retain(|r| r.category.as_deref() == Some(cat));
+        }
+        if let Some(model) = filter_model {
+            filtered.retain(|r| r.upstream_model.as_deref() == Some(model));
+        }
+
+        // Sort by created_at DESC (newest first).
+        filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        let total = filtered.len() as i64;
+
+        let offset = offset as usize;
+        let limit = limit as usize;
+        let page: Vec<&InferenceRecord> = filtered
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect();
+
+        let records: Vec<InferenceLog> = page
+            .iter()
+            .map(|r| InferenceLog {
+                timestamp: r.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                prompt_snippet: r.prompt_snippet.clone(),
+                category: r.category.clone(),
+                upstream_model: r.upstream_model.clone(),
+                duration_ms: r.duration_ms,
+            })
+            .collect();
+
+        Ok((records, total))
+    }
+
+    async fn fetch_latency_summary(&self, hours: u32) -> Result<LatencySummary, QueryError> {
+        let records = self.records.read().map_err(|e| QueryError(e.to_string()))?;
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
+
+        let window: Vec<&InferenceRecord> = records.iter().filter(|r| r.created_at >= cutoff).collect();
+
+        let mut grouped: std::collections::HashMap<Option<String>, Vec<i32>> =
+            std::collections::HashMap::new();
+        for r in &window {
+            let durations = grouped.entry(r.category.clone()).or_default();
+            if let Some(d) = r.duration_ms {
+                durations.push(d);
+            }
+        }
+
+        let mut rows = Vec::new();
+        let mut unclassified_count: i64 = 0;
+
+        for (category, durations) in grouped {
+            let request_count = durations.len() as i64;
+            let avg = if durations.is_empty() {
+                None
+            } else {
+                let sum: i32 = durations.iter().sum();
+                Some((sum as f64 / request_count as f64).round() as i32)
+            };
+            let p99 = percentile_99(&durations);
+
+            match category {
+                Some(cat) => rows.push(LatencySummaryRow {
+                    category: cat,
+                    request_count,
+                    avg_duration_ms: avg,
+                    p99_duration_ms: p99,
+                }),
+                None => {
+                    unclassified_count = request_count;
+                }
+            }
+        }
+
+        let total_classified_count: i64 = rows.iter().map(|r| r.request_count).sum();
+
+        Ok(LatencySummary {
+            rows,
+            unclassified_count,
+            total_classified_count,
+        })
+    }
+
+    async fn fetch_savings_estimate(
+        &self,
+        hours: u32,
+        model_costs: &dyn CostProvider,
+        baseline_model: &str,
+    ) -> Result<SavingsEstimate, QueryError> {
+        let records = self.records.read().map_err(|e| QueryError(e.to_string()))?;
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
+
+        // Filter by time window, non-null category, non-null model.
+        let window: Vec<&InferenceRecord> = records
+            .iter()
+            .filter(|r| {
+                r.created_at >= cutoff
+                    && r.category.is_some()
+                    && r.upstream_model.is_some()
+            })
+            .collect();
+
+        // Group by upstream_model.
+        let mut grouped: std::collections::HashMap<&str, Vec<&InferenceRecord>> =
+            std::collections::HashMap::new();
+        for r in &window {
+            let model = r.upstream_model.as_deref().unwrap();
+            grouped.entry(model).or_default().push(r);
+        }
+
+        let mut total_actual_cost: f64 = 0.0;
+        let mut total_chars_all: i64 = 0;
+        let mut classified_count: i64 = 0;
+        let mut unknown_cost_count: i64 = 0;
+        let mut has_historical_fallback = false;
+
+        for (model, model_records) in &grouped {
+            let count = model_records.len() as i64;
+            let mut total_chars: i64 = 0;
+            let mut total_fallback_chars: i64 = 0;
+            let mut fallback_count: i64 = 0;
+
+            for r in model_records {
+                if let Some(chars) = r.prompt_char_count {
+                    total_chars += chars as i64;
+                } else {
+                    total_fallback_chars += r.prompt_snippet.len() as i64;
+                    fallback_count += 1;
+                }
+            }
+
+            if fallback_count > 0 {
+                has_historical_fallback = true;
+            }
+
+            classified_count += count;
+
+            let effective_chars = if total_chars > 0 {
+                total_chars
+            } else {
+                total_fallback_chars
+            };
+            total_chars_all += effective_chars;
+
+            if let Some(cost) = model_costs.get_cost(model) {
+                total_actual_cost += prompt_chars_to_cost(effective_chars as i32, cost);
+            } else {
+                unknown_cost_count += count;
+            }
+        }
+
+        let baseline_cost = model_costs
+            .get_cost(baseline_model)
+            .map(|cost_per_1m| {
+                let tokens = total_chars_all as f64 / 4.0;
+                tokens * cost_per_1m / 1_000_000.0
+            })
+            .unwrap_or(0.0);
+
+        let baseline_cost_rounded = (baseline_cost * 10_000.0).round() / 10_000.0;
+        let savings_usd = baseline_cost_rounded - total_actual_cost;
+        let baseline_model_unknown = model_costs.get_cost(baseline_model).is_none();
+
+        let formatted_savings_usd = if savings_usd > 0.0 {
+            format!("{:.4}", savings_usd)
+        } else {
+            String::new()
+        };
+
+        Ok(SavingsEstimate {
+            savings_usd,
+            formatted_savings_usd,
+            baseline_model: baseline_model.to_string(),
+            classified_count,
+            unknown_cost_count,
+            has_historical_fallback,
+            baseline_model_unknown,
+        })
+    }
+}
+
+#[async_trait]
+impl PersistenceBackend for DbBackend {
+    async fn insert_inference(&self, record: &InferenceRecord) -> Result<(), String> {
+        match self {
+            DbBackend::Memory(b) => b.insert_inference(record).await,
+            DbBackend::Sqlite(b) => b.insert_inference(record).await,
+            DbBackend::Postgres(b) => b.insert_inference(record).await,
+        }
+    }
+
+    async fn fetch_inferences(
+        &self,
+        offset: u32,
+        limit: u32,
+        filter_category: Option<&str>,
+        filter_model: Option<&str>,
+    ) -> Result<(Vec<InferenceLog>, i64), QueryError> {
+        match self {
+            DbBackend::Memory(b) => b.fetch_inferences(offset, limit, filter_category, filter_model).await,
+            DbBackend::Sqlite(b) => b.fetch_inferences(offset, limit, filter_category, filter_model).await,
+            DbBackend::Postgres(b) => b.fetch_inferences(offset, limit, filter_category, filter_model).await,
+        }
+    }
+
+    async fn fetch_latency_summary(&self, hours: u32) -> Result<LatencySummary, QueryError> {
+        match self {
+            DbBackend::Memory(b) => b.fetch_latency_summary(hours).await,
+            DbBackend::Sqlite(b) => b.fetch_latency_summary(hours).await,
+            DbBackend::Postgres(b) => b.fetch_latency_summary(hours).await,
+        }
+    }
+
+    async fn fetch_savings_estimate(
+        &self,
+        hours: u32,
+        model_costs: &dyn CostProvider,
+        baseline_model: &str,
+    ) -> Result<SavingsEstimate, QueryError> {
+        match self {
+            DbBackend::Memory(b) => b.fetch_savings_estimate(hours, model_costs, baseline_model).await,
+            DbBackend::Sqlite(b) => b.fetch_savings_estimate(hours, model_costs, baseline_model).await,
+            DbBackend::Postgres(b) => b.fetch_savings_estimate(hours, model_costs, baseline_model).await,
+        }
+    }
+}
+
+#[async_trait]
+impl PersistenceBackend for SqliteBackend {
+    async fn insert_inference(&self, record: &InferenceRecord) -> Result<(), String> {
+        retry_once(|| insert_once_sqlite(&self.pool, record))
+            .await
+            .map_err(|e| {
+                error!("SQLite insert failed: {e}");
+                e.to_string()
+            })
+    }
+
+    async fn fetch_inferences(
+        &self,
+        offset: u32,
+        limit: u32,
+        filter_category: Option<&str>,
+        filter_model: Option<&str>,
+    ) -> Result<(Vec<InferenceLog>, i64), QueryError> {
+        let mut where_clause = String::new();
+        let mut has_where = false;
+
+        if filter_category.is_some() {
+            where_clause.push_str("category = ? ");
+            has_where = true;
+        }
+        if filter_model.is_some() {
+            if has_where {
+                where_clause.push_str("AND ");
+            }
+            where_clause.push_str("upstream_model = ? ");
+            has_where = true;
+        }
+        let where_clause = if has_where {
+            format!(" WHERE {}", where_clause.trim_end())
+        } else {
+            String::new()
+        };
+
+        let count_sql = format!("SELECT COUNT(*) FROM inferences{}", where_clause);
+        let data_sql = format!(
+            "SELECT created_at, prompt_snippet, category, upstream_model, duration_ms \
+             FROM inferences{} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            where_clause,
+        );
+
+        // Execute count query.
+        let mut count_query = sqlx::query(&count_sql);
+        if let Some(cat) = filter_category {
+            count_query = count_query.bind(cat);
+        }
+        if let Some(model) = filter_model {
+            count_query = count_query.bind(model);
+        }
+        let total_count: i64 = count_query
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| QueryError(e.to_string()))?
+            .try_get(0)
+            .map_err(|e| QueryError(e.to_string()))?;
+
+        // Execute data query.
+        let mut data_query = sqlx::query(&data_sql);
+        if let Some(cat) = filter_category {
+            data_query = data_query.bind(cat);
+        }
+        if let Some(model) = filter_model {
+            data_query = data_query.bind(model);
+        }
+        let rows = data_query
+            .bind(limit as i64)
+            .bind(offset as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| QueryError(e.to_string()))?;
+
+        let records: Vec<InferenceLog> = rows
+            .iter()
+            .map(|row| {
+                let created_at: String = row.try_get("created_at")?;
+                let timestamp = created_at;
+                let prompt_snippet: String = row.try_get("prompt_snippet")?;
+                let category: Option<String> = row.try_get("category")?;
+                let upstream_model: Option<String> = row.try_get("upstream_model")?;
+                let duration_ms: Option<i32> = row.try_get("duration_ms")?;
+                Ok(InferenceLog {
+                    timestamp,
+                    prompt_snippet,
+                    category,
+                    upstream_model,
+                    duration_ms,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .map_err(|e| QueryError(e.to_string()))?;
+
+        Ok((records, total_count))
+    }
+
+    async fn fetch_latency_summary(&self, hours: u32) -> Result<LatencySummary, QueryError> {
+        // Fetch grouped aggregation for non-null categories.
+        let rows = sqlx::query(
+            "SELECT category, \
+             COUNT(*) AS count, \
+             ROUND(AVG(duration_ms)) AS avg_duration_ms \
+             FROM inferences \
+             WHERE created_at >= datetime('now', '-' || CAST(? AS TEXT) || ' hours') \
+             AND category IS NOT NULL \
+             GROUP BY category \
+             ORDER BY count DESC",
+        )
+        .bind(hours as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| QueryError(e.to_string()))?;
+
+        let mut summary_rows = Vec::new();
+
+        for row in &rows {
+            let category: Option<String> = row.try_get("category").unwrap_or(None);
+            let request_count: i64 = row.try_get("count").unwrap_or(0);
+            let avg_duration_ms: Option<i32> = row.try_get("avg_duration_ms").unwrap_or(None);
+
+            if let Some(cat) = category {
+                summary_rows.push(LatencySummaryRow {
+                    category: cat,
+                    request_count,
+                    avg_duration_ms,
+                    p99_duration_ms: None,
+                });
+            }
+        }
+
+        // Compute p99 per category by fetching sorted durations in Rust.
+        let duration_rows = sqlx::query(
+            "SELECT category, duration_ms FROM inferences \
+             WHERE created_at >= datetime('now', '-' || CAST(? AS TEXT) || ' hours') \
+             AND category IS NOT NULL AND duration_ms IS NOT NULL \
+             ORDER BY category, duration_ms ASC",
+        )
+        .bind(hours as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| QueryError(e.to_string()))?;
+
+        let mut p99_groups: std::collections::HashMap<String, Vec<i32>> =
+            std::collections::HashMap::new();
+        for row in &duration_rows {
+            let cat: String = row.try_get("category").unwrap_or_default();
+            let dur: i32 = row.try_get("duration_ms").unwrap_or(0);
+            p99_groups.entry(cat).or_default().push(dur);
+        }
+
+        for row in &mut summary_rows {
+            if let Some(durations) = p99_groups.remove(&row.category) {
+                row.p99_duration_ms = percentile_99(&durations);
+            }
+        }
+
+        // Count unclassified (NULL category) records.
+        let unclassified: i64 = sqlx::query(
+            "SELECT COUNT(*) FROM inferences \
+             WHERE created_at >= datetime('now', '-' || CAST(? AS TEXT) || ' hours') \
+             AND category IS NULL",
+        )
+        .bind(hours as i64)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| QueryError(e.to_string()))?
+        .try_get(0)
+        .map_err(|e| QueryError(e.to_string()))?;
+
+        let total_classified_count: i64 = summary_rows.iter().map(|r| r.request_count).sum();
+
+        Ok(LatencySummary {
+            rows: summary_rows,
+            unclassified_count: unclassified,
+            total_classified_count,
+        })
+    }
+
+    async fn fetch_savings_estimate(
+        &self,
+        hours: u32,
+        model_costs: &dyn CostProvider,
+        baseline_model: &str,
+    ) -> Result<SavingsEstimate, QueryError> {
+        let rows = sqlx::query(
+            "SELECT \
+             upstream_model, \
+             COUNT(*) AS count, \
+             COALESCE(SUM(prompt_char_count), 0) AS total_chars, \
+             COALESCE(SUM(LENGTH(prompt_snippet)), 0) AS total_fallback_chars, \
+             COALESCE(SUM(CASE WHEN prompt_char_count IS NULL THEN 1 ELSE 0 END), 0) \
+             AS fallback_count \
+             FROM inferences \
+             WHERE created_at >= datetime('now', '-' || CAST(? AS TEXT) || ' hours') \
+             AND category IS NOT NULL \
+             AND upstream_model IS NOT NULL \
+             GROUP BY upstream_model",
+        )
+        .bind(hours as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| QueryError(e.to_string()))?;
+
+        let mut total_actual_cost: f64 = 0.0;
+        let mut total_chars_all: i64 = 0;
+        let mut classified_count: i64 = 0;
+        let mut unknown_cost_count: i64 = 0;
+        let mut has_historical_fallback = false;
+
+        for row in &rows {
+            let model: String = row.try_get("upstream_model").unwrap_or_default();
+            let count: i64 = row.try_get("count").unwrap_or(0);
+            let total_chars: i64 = row.try_get("total_chars").unwrap_or(0);
+            let total_fallback_chars: i64 = row.try_get("total_fallback_chars").unwrap_or(0);
+            let fallback_count: i64 = row.try_get("fallback_count").unwrap_or(0);
+
+            if fallback_count > 0 {
+                has_historical_fallback = true;
+            }
+
+            classified_count += count;
+
+            let effective_chars = if total_chars > 0 {
+                total_chars
+            } else {
+                total_fallback_chars
+            };
+            total_chars_all += effective_chars;
+
+            if let Some(cost) = model_costs.get_cost(&model) {
+                total_actual_cost += prompt_chars_to_cost(effective_chars as i32, cost);
+            } else {
+                unknown_cost_count += count;
+            }
+        }
+
+        let baseline_cost = model_costs
+            .get_cost(baseline_model)
+            .map(|cost_per_1m| {
+                let tokens = total_chars_all as f64 / 4.0;
+                tokens * cost_per_1m / 1_000_000.0
+            })
+            .unwrap_or(0.0);
+
+        let baseline_cost_rounded = (baseline_cost * 10_000.0).round() / 10_000.0;
+        let savings_usd = baseline_cost_rounded - total_actual_cost;
+        let baseline_model_unknown = model_costs.get_cost(baseline_model).is_none();
+
+        let formatted_savings_usd = if savings_usd > 0.0 {
+            format!("{:.4}", savings_usd)
+        } else {
+            String::new()
+        };
+
+        Ok(SavingsEstimate {
+            savings_usd,
+            formatted_savings_usd,
+            baseline_model: baseline_model.to_string(),
+            classified_count,
+            unknown_cost_count,
+            has_historical_fallback,
+            baseline_model_unknown,
+        })
+    }
+}
+
+#[async_trait]
+impl PersistenceBackend for PostgresBackend {
+    async fn insert_inference(&self, record: &InferenceRecord) -> Result<(), String> {
+        retry_once(|| insert_once(&self.pool, record))
+            .await
+            .map_err(|e| {
+                error!("Postgres insert failed: {e}");
+                e.to_string()
+            })
+    }
+
+    async fn fetch_inferences(
+        &self,
+        offset: u32,
+        limit: u32,
+        filter_category: Option<&str>,
+        filter_model: Option<&str>,
+    ) -> Result<(Vec<InferenceLog>, i64), QueryError> {
+        let mut bind_count = 1;
+        let mut where_clause = String::new();
+
+        if filter_category.is_some() {
+            where_clause.push_str(&format!("category = ${} ", bind_count));
+            bind_count += 1;
+        }
+        if filter_model.is_some() {
+            if !where_clause.is_empty() {
+                where_clause.push_str("AND ");
+            }
+            where_clause.push_str(&format!("upstream_model = ${} ", bind_count));
+            bind_count += 1;
+        }
+        let where_clause = if where_clause.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", where_clause.trim_end())
+        };
+
+        let limit_ph = format!("${}", bind_count);
+        bind_count += 1;
+        let offset_ph = format!("${}", bind_count);
+
+        let data_sql = format!(
+            "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
+             FROM inferences{} ORDER BY created_at DESC LIMIT {} OFFSET {}",
+            where_clause, limit_ph, offset_ph,
+        );
+        let count_sql = format!("SELECT COUNT(*) FROM inferences{}", where_clause);
+
+        let mut count_query = sqlx::query(&count_sql);
+        if let Some(cat) = filter_category {
+            count_query = count_query.bind(cat);
+        }
+        if let Some(model) = filter_model {
+            count_query = count_query.bind(model);
+        }
+        let total_count: i64 = count_query
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| QueryError(e.to_string()))?
+            .try_get(0)
+            .map_err(|e| QueryError(e.to_string()))?;
+
+        let mut data_query = sqlx::query(&data_sql);
+        if let Some(cat) = filter_category {
+            data_query = data_query.bind(cat);
+        }
+        if let Some(model) = filter_model {
+            data_query = data_query.bind(model);
+        }
+        let rows = data_query
+            .bind(limit as i64)
+            .bind(offset as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| QueryError(e.to_string()))?;
+
+        let records: Vec<InferenceLog> = rows
+            .iter()
+            .map(|row| {
+                let created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at")?;
+                let timestamp = created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+                let prompt_snippet: String = row.try_get("prompt_snippet")?;
+                let category: Option<String> = row.try_get("category")?;
+                let upstream_model: Option<String> = row.try_get("upstream_model")?;
+                let duration_ms: Option<i32> = row.try_get("duration_ms")?;
+                Ok(InferenceLog {
+                    timestamp,
+                    prompt_snippet,
+                    category,
+                    upstream_model,
+                    duration_ms,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .map_err(|e| QueryError(e.to_string()))?;
+
+        Ok((records, total_count))
+    }
+
+    async fn fetch_latency_summary(&self, hours: u32) -> Result<LatencySummary, QueryError> {
+        let rows = sqlx::query(
+            "SELECT category, \
+             COUNT(*)::BIGINT AS count, \
+             ROUND(AVG(duration_ms))::INTEGER AS avg_duration_ms, \
+             ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY duration_ms))::INTEGER \
+             AS p99_duration_ms \
+             FROM inferences \
+             WHERE created_at >= NOW() - interval '1 hour' * $1 \
+             GROUP BY category \
+             ORDER BY count DESC",
+        )
+        .bind(hours as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| QueryError(e.to_string()))?;
+
+        let mut summary_rows = Vec::<LatencySummaryRow>::new();
+        let mut unclassified_count: i64 = 0;
+
+        for row in &rows {
+            let category: Option<String> = row.try_get("category").unwrap_or(None);
+            let request_count: i64 = row.try_get("count").unwrap_or(0);
+
+            match category {
+                Some(cat) => {
+                    let avg_duration_ms: Option<i32> =
+                        row.try_get("avg_duration_ms").unwrap_or(None);
+                    let p99_duration_ms: Option<i32> =
+                        row.try_get("p99_duration_ms").unwrap_or(None);
+                    summary_rows.push(LatencySummaryRow {
+                        category: cat,
+                        request_count,
+                        avg_duration_ms,
+                        p99_duration_ms,
+                    });
+                }
+                None => {
+                    unclassified_count = request_count;
+                }
+            }
+        }
+
+        let total_classified_count: i64 = summary_rows.iter().map(|r| r.request_count).sum();
+
+        Ok(LatencySummary {
+            rows: summary_rows,
+            unclassified_count,
+            total_classified_count,
+        })
+    }
+
+    async fn fetch_savings_estimate(
+        &self,
+        hours: u32,
+        model_costs: &dyn CostProvider,
+        baseline_model: &str,
+    ) -> Result<SavingsEstimate, QueryError> {
+        let rows = sqlx::query(
+            "SELECT \
+             upstream_model, \
+             COUNT(*)::BIGINT AS count, \
+             COALESCE(SUM(prompt_char_count), 0)::BIGINT AS total_chars, \
+             COALESCE(SUM(LENGTH(prompt_snippet)), 0)::BIGINT AS total_fallback_chars, \
+             COALESCE(SUM(CASE WHEN prompt_char_count IS NULL THEN 1 ELSE 0 END), 0)::BIGINT \
+             AS fallback_count \
+             FROM inferences \
+             WHERE created_at >= NOW() - interval '1 hour' * $1 \
+             AND category IS NOT NULL \
+             AND upstream_model IS NOT NULL \
+             GROUP BY upstream_model",
+        )
+        .bind(hours as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| QueryError(e.to_string()))?;
+
+        let mut total_actual_cost: f64 = 0.0;
+        let mut total_chars_all: i64 = 0;
+        let mut classified_count: i64 = 0;
+        let mut unknown_cost_count: i64 = 0;
+        let mut has_historical_fallback = false;
+
+        for row in &rows {
+            let model: String = row.try_get("upstream_model").unwrap_or_default();
+            let count: i64 = row.try_get("count").unwrap_or(0);
+            let total_chars: i64 = row.try_get("total_chars").unwrap_or(0);
+            let total_fallback_chars: i64 = row.try_get("total_fallback_chars").unwrap_or(0);
+            let fallback_count: i64 = row.try_get("fallback_count").unwrap_or(0);
+
+            if fallback_count > 0 {
+                has_historical_fallback = true;
+            }
+
+            classified_count += count;
+
+            let effective_chars = if total_chars > 0 {
+                total_chars
+            } else {
+                total_fallback_chars
+            };
+            total_chars_all += effective_chars;
+
+            if let Some(cost) = model_costs.get_cost(&model) {
+                total_actual_cost += prompt_chars_to_cost(effective_chars as i32, cost);
+            } else {
+                unknown_cost_count += count;
+            }
+        }
+
+        let baseline_cost = model_costs
+            .get_cost(baseline_model)
+            .map(|cost_per_1m| {
+                let tokens = total_chars_all as f64 / 4.0;
+                tokens * cost_per_1m / 1_000_000.0
+            })
+            .unwrap_or(0.0);
+
+        let baseline_cost_rounded = (baseline_cost * 10_000.0).round() / 10_000.0;
+        let savings_usd = baseline_cost_rounded - total_actual_cost;
+        let baseline_model_unknown = model_costs.get_cost(baseline_model).is_none();
+
+        let formatted_savings_usd = if savings_usd > 0.0 {
+            format!("{:.4}", savings_usd)
+        } else {
+            String::new()
+        };
+
+        Ok(SavingsEstimate {
+            savings_usd,
+            formatted_savings_usd,
+            baseline_model: baseline_model.to_string(),
+            classified_count,
+            unknown_cost_count,
+            has_historical_fallback,
+            baseline_model_unknown,
+        })
+    }
+}
+
 /// Trait for looking up model costs by name.
 /// Allows persistence to query costs without depending on the classification module directly.
-pub trait CostProvider {
+/// Must be Send + Sync so it can be passed as `&dyn CostProvider` across async task boundaries.
+pub trait CostProvider: Send + Sync {
     fn get_cost(&self, model: &str) -> Option<f64>;
 }
 
@@ -65,15 +998,17 @@ pub struct LatencySummary {
 }
 
 /// Shared persistence configuration injected into the app router.
+/// Wraps an `Arc<DbBackend>` and a semaphore for bounding concurrent logging tasks.
 #[derive(Clone)]
 pub struct PersistenceConfig {
-    pub pool: Arc<PgPool>,
+    pub backend: Arc<DbBackend>,
     /// Bounds the number of concurrent background logging tasks to prevent
     /// unbounded memory growth under high throughput.
     pub task_semaphore: Arc<Semaphore>,
 }
 
 /// Finalized inference metadata payload ready for background persistence.
+#[derive(Clone)]
 pub struct InferenceRecord {
     pub request_id: Uuid,
     pub status: String,
@@ -82,322 +1017,7 @@ pub struct InferenceRecord {
     pub duration_ms: Option<i32>,
     pub prompt_snippet: String,
     pub prompt_char_count: Option<i32>,
-}
-
-use sqlx::postgres::PgConnectOptions;
-use std::str::FromStr;
-
-impl PersistenceConfig {
-    pub async fn from_env(db_config: &DatabaseConfig) -> Result<Self, String> {
-        let url = std::env::var("DATABASE_URL")
-            .map_err(|_| "DATABASE_URL environment variable is required".to_string())?;
-
-        let options = PgConnectOptions::from_str(&url)
-            .map_err(|e| format!("DB connection string parse error: {e}"))?;
-
-        let pool = PgPoolOptions::new()
-            .max_connections(db_config.max_connections)
-            .acquire_timeout(std::time::Duration::from_secs(db_config.acquire_timeout_secs))
-            .idle_timeout(std::time::Duration::from_secs(db_config.idle_timeout_secs))
-            .connect_lazy_with(options);
-
-        let base_delay = Duration::from_millis(db_config.retry_base_ms);
-
-        // Validate DB connectivity with retries (exponential backoff with jitter)
-        let mut last_err = None;
-
-        for attempt in 0..db_config.connection_retries {
-            match sqlx::query("SELECT 1").fetch_one(&pool).await {
-                Ok(_) => {
-                    // success, break out
-                    break;
-                }
-                Err(e) => {
-                    if attempt < db_config.connection_retries - 1 {
-                        warn!("DB health check failed (attempt {}): {}. Retrying...", attempt + 1, &e);
-                        // Exponential backoff
-                        let backoff = base_delay * (1u32 << attempt);
-                        // Add jitter: random amount between 0 and base_delay
-                        let now_nanos = SystemTime::now()
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap()
-                            .as_nanos();
-                        let jitter_nanos = now_nanos % base_delay.as_nanos();
-                        let jitter = Duration::from_nanos(jitter_nanos as u64);
-                        let delay = backoff + jitter;
-                        tokio::time::sleep(delay).await;
-                    }
-                    last_err = Some(e);
-                }
-            }
-        }
-
-        if let Some(e) = last_err {
-            // DATABASE_URL is set, so we panic
-            panic!("Database health check failed after {} retries: {}", db_config.connection_retries, e);
-        }
-
-        // Run migrations (fatal if fails)
-        if let Err(e) = sqlx::migrate!().run(&pool).await {
-            panic!("Migrations failed: {e}");
-        }
-        info!("Migrations applied successfully");
-
-        Ok(Self {
-            pool: Arc::new(pool),
-            task_semaphore: Arc::new(Semaphore::new(db_config.log_concurrency_limit as usize)),
-        })
-    }
-
-    /// Fetch recent inference records with optional pagination and filtering.
-    ///
-    /// Returns both the matching records (formatted for display) and the total
-    /// count of matching rows (for pagination metadata), avoiding N+1 queries
-    /// by running a separate COUNT query with the same filters.
-    pub async fn fetch_inferences(
-        &self,
-        offset: u32,
-        limit: u32,
-        filter_category: Option<&str>,
-        filter_model: Option<&str>,
-    ) -> Result<(Vec<InferenceLog>, i64), QueryError> {
-        // Build WHERE clause dynamically with auto-incrementing bind count.
-        let mut bind_count = 1;
-        let mut where_clause = String::new();
-
-        if filter_category.is_some() {
-            where_clause.push_str(&format!("category = ${} ", bind_count));
-            bind_count += 1;
-        }
-        if filter_model.is_some() {
-            if !where_clause.is_empty() {
-                where_clause.push_str("AND ");
-            }
-            where_clause.push_str(&format!("upstream_model = ${} ", bind_count));
-            bind_count += 1;
-        }
-        let where_clause = if where_clause.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", where_clause.trim_end())
-        };
-
-        let limit_ph = format!("${}", bind_count);
-        bind_count += 1;
-        let offset_ph = format!("${}", bind_count);
-
-        let data_sql = format!(
-            "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
-             FROM inferences{} ORDER BY created_at DESC LIMIT {} OFFSET {}",
-            where_clause, limit_ph, offset_ph,
-        );
-        let count_sql = format!("SELECT COUNT(*) FROM inferences{}", where_clause);
-
-        // Execute count query.
-        let mut count_query = sqlx::query(&count_sql);
-        if let Some(cat) = filter_category {
-            count_query = count_query.bind(cat);
-        }
-        if let Some(model) = filter_model {
-            count_query = count_query.bind(model);
-        }
-        let total_count: i64 = count_query
-            .fetch_one(self.pool.as_ref())
-            .await
-            .map_err(|e| QueryError(e.to_string()))?
-            .try_get(0)
-            .map_err(|e| QueryError(e.to_string()))?;
-
-        // Execute data query.
-        let mut data_query = sqlx::query(&data_sql);
-        if let Some(cat) = filter_category {
-            data_query = data_query.bind(cat);
-        }
-        if let Some(model) = filter_model {
-            data_query = data_query.bind(model);
-        }
-        let rows = data_query
-            .bind(limit as i64)
-            .bind(offset as i64)
-            .fetch_all(self.pool.as_ref())
-            .await
-            .map_err(|e| QueryError(e.to_string()))?;
-
-        // Map rows to InferenceLog, formatting timestamps and durations.
-        // Propagate any row extraction errors to fail fast on data issues.
-        let records: Vec<InferenceLog> = rows
-            .iter()
-            .map(|row| {
-                let created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at")?;
-                let timestamp = created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string();
-                let prompt_snippet: String = row.try_get("prompt_snippet")?;
-                let category: Option<String> = row.try_get("category")?;
-                let upstream_model: Option<String> = row.try_get("upstream_model")?;
-                let duration_ms: Option<i32> = row.try_get("duration_ms")?;
-                Ok(InferenceLog {
-                    timestamp,
-                    prompt_snippet,
-                    category,
-                    upstream_model,
-                    duration_ms,
-                })
-            })
-            .collect::<Result<Vec<_>, sqlx::Error>>()
-            .map_err(|e| QueryError(e.to_string()))?;
-
-        Ok((records, total_count))
-    }
-
-    /// Fetch a per-category latency summary for the given time window.
-    ///
-    /// Runs a single GROUP BY aggregation over all records in the window.
-    /// Rows with a non-NULL category become the [`LatencySummaryRow`] list;
-    /// the NULL-category row (if any) populates [`LatencySummary::unclassified_count`].
-    pub async fn fetch_latency_summary(&self, hours: u32) -> Result<LatencySummary, QueryError> {
-        let rows = sqlx::query(
-            "SELECT category, \
-             COUNT(*)::BIGINT AS count, \
-             ROUND(AVG(duration_ms))::INTEGER AS avg_duration_ms, \
-             ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY duration_ms))::INTEGER \
-             AS p99_duration_ms \
-             FROM inferences \
-             WHERE created_at >= NOW() - interval '1 hour' * $1 \
-             GROUP BY category \
-             ORDER BY count DESC",
-        )
-        .bind(hours as i64)
-        .fetch_all(self.pool.as_ref())
-        .await
-        .map_err(|e| QueryError(e.to_string()))?;
-
-        let mut summary_rows = Vec::<LatencySummaryRow>::new();
-        let mut unclassified_count: i64 = 0;
-
-        for row in &rows {
-            let category: Option<String> = row.try_get("category").unwrap_or(None);
-            let request_count: i64 = row.try_get("count").unwrap_or(0);
-
-            match category {
-                Some(cat) => {
-                    let avg_duration_ms: Option<i32> =
-                        row.try_get("avg_duration_ms").unwrap_or(None);
-                    let p99_duration_ms: Option<i32> =
-                        row.try_get("p99_duration_ms").unwrap_or(None);
-                    summary_rows.push(LatencySummaryRow {
-                        category: cat,
-                        request_count,
-                        avg_duration_ms,
-                        p99_duration_ms,
-                    });
-                }
-                None => {
-                    unclassified_count = request_count;
-                }
-            }
-        }
-
-        let total_classified_count: i64 = summary_rows.iter().map(|r| r.request_count).sum();
-
-        Ok(LatencySummary {
-            rows: summary_rows,
-            unclassified_count,
-            total_classified_count,
-        })
-    }
-
-    /// Fetch a cost-savings estimate for the given time window.
-    ///
-    /// Groups inference records by model, computes actual vs. baseline cost,
-    /// and returns a [`SavingsEstimate`]. Records with NULL category or NULL
-    /// model are excluded. Records with an unknown model cost are counted in
-    /// `unknown_cost_count` and excluded from the savings total.
-    pub async fn fetch_savings_estimate(
-        &self,
-        hours: u32,
-        model_costs: &impl CostProvider,
-        baseline_model: &str,
-    ) -> Result<SavingsEstimate, QueryError> {
-        let rows = sqlx::query(
-            "SELECT \
-             upstream_model, \
-             COUNT(*)::BIGINT AS count, \
-             COALESCE(SUM(prompt_char_count), 0)::BIGINT AS total_chars, \
-             COALESCE(SUM(LENGTH(prompt_snippet)), 0)::BIGINT AS total_fallback_chars, \
-             COALESCE(SUM(CASE WHEN prompt_char_count IS NULL THEN 1 ELSE 0 END), 0)::BIGINT \
-             AS fallback_count \
-             FROM inferences \
-             WHERE created_at >= NOW() - interval '1 hour' * $1 \
-             AND category IS NOT NULL \
-             AND upstream_model IS NOT NULL \
-             GROUP BY upstream_model",
-        )
-        .bind(hours as i64)
-        .fetch_all(self.pool.as_ref())
-        .await
-        .map_err(|e| QueryError(e.to_string()))?;
-
-        let mut total_actual_cost: f64 = 0.0;
-        let mut total_chars_all: i64 = 0;
-        let mut classified_count: i64 = 0;
-        let mut unknown_cost_count: i64 = 0;
-        let mut has_historical_fallback = false;
-
-        for row in &rows {
-            let model: String = row.try_get("upstream_model").unwrap_or_default();
-            let count: i64 = row.try_get("count").unwrap_or(0);
-            let total_chars: i64 = row.try_get("total_chars").unwrap_or(0);
-            let total_fallback_chars: i64 = row.try_get("total_fallback_chars").unwrap_or(0);
-            let fallback_count: i64 = row.try_get("fallback_count").unwrap_or(0);
-
-            if fallback_count > 0 {
-                has_historical_fallback = true;
-            }
-
-            classified_count += count;
-
-            // Use actual prompt_char_count when available, fall back to snippet length.
-            let effective_chars = if total_chars > 0 {
-                total_chars
-            } else {
-                total_fallback_chars
-            };
-            total_chars_all += effective_chars;
-
-            if let Some(cost) = model_costs.get_cost(&model) {
-                total_actual_cost += prompt_chars_to_cost(effective_chars as i32, cost);
-            } else {
-                unknown_cost_count += count;
-            }
-        }
-
-        let baseline_cost = model_costs
-            .get_cost(baseline_model)
-            .map(|cost_per_1m| {
-                let tokens = total_chars_all as f64 / 4.0;
-                tokens * cost_per_1m / 1_000_000.0
-            })
-            .unwrap_or(0.0);
-
-        let baseline_cost_rounded = (baseline_cost * 10_000.0).round() / 10_000.0;
-        let savings_usd = baseline_cost_rounded - total_actual_cost;
-        let baseline_model_unknown = model_costs.get_cost(baseline_model).is_none();
-
-        let formatted_savings_usd = if savings_usd > 0.0 {
-            format!("{:.4}", savings_usd)
-        } else {
-            String::new()
-        };
-
-        Ok(SavingsEstimate {
-            savings_usd,
-            formatted_savings_usd,
-            baseline_model: baseline_model.to_string(),
-            classified_count,
-            unknown_cost_count,
-            has_historical_fallback,
-            baseline_model_unknown,
-        })
-    }
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Extract the full last user message from an OpenAI-compatible request body.
@@ -459,22 +1079,19 @@ pub fn prompt_chars_to_cost(char_count: i32, cost_per_1m_input_tokens: f64) -> f
 
 /// Enqueue an inference record for async persistence.
 ///
-/// Spawns a detached background task that attempts one insert and, on failure,
-/// retries exactly once. Final failure is logged with the `request_id` and
-/// failure class. The caller returns immediately; DB latency is never on the
-/// synchronous response path.
+/// Spawns a detached background task that inserts the record via the backend.
+/// Final failure is logged with the `request_id`. The caller returns immediately;
+/// DB latency is never on the synchronous response path.
 ///
 /// Uses a semaphore to bound concurrent tasks; if the limit is reached, the
-/// task waits briefly before executing. This prevents unbounded memory growth
+/// task waits before executing. This prevents unbounded memory growth
 /// under sustained high throughput.
 pub fn log_inference(
-    pool: Arc<PgPool>,
+    backend: Arc<DbBackend>,
     semaphore: Arc<Semaphore>,
     record: InferenceRecord,
 ) -> tokio::task::JoinHandle<()> {
     let semaphore = semaphore.clone();
-    // Intentional fire-and-forget: JoinHandle is dropped — tokio's default
-    // panic handler prints any panic in the spawned task to stderr.
     tokio::spawn(async move {
         let request_id = record.request_id;
         let _permit = match semaphore.acquire().await {
@@ -484,19 +1101,9 @@ pub fn log_inference(
                 return;
             }
         };
-        if let Err(class) = write_with_retry(&pool, &record).await {
+        if let Err(class) = backend.insert_inference(&record).await {
             error!("final insert failure request_id={request_id} class={class}");
         }
-    })
-}
-
-async fn write_with_retry(pool: &PgPool, record: &InferenceRecord) -> Result<(), String> {
-    retry_once(|| insert_once(pool, record)).await.map_err(|e| {
-        error!(
-            "insert failed for request_id={} after retries: {:?}",
-            record.request_id, e
-        );
-        e.to_string()
     })
 }
 
@@ -524,6 +1131,24 @@ async fn insert_once(pool: &PgPool, record: &InferenceRecord) -> Result<(), sqlx
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(record.request_id)
+    .bind(&record.status)
+    .bind(&record.category)
+    .bind(&record.upstream_model)
+    .bind(record.duration_ms)
+    .bind(&record.prompt_snippet)
+    .bind(record.prompt_char_count)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+async fn insert_once_sqlite(pool: &SqlitePool, record: &InferenceRecord) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO inferences \
+         (request_id, status, category, upstream_model, duration_ms, prompt_snippet, prompt_char_count) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )
+    .bind(record.request_id.to_string())
     .bind(&record.status)
     .bind(&record.category)
     .bind(&record.upstream_model)
@@ -749,34 +1374,51 @@ mod tests {
         assert_eq!(result.unwrap(), "recovered");
     }
 
-    // ── fetch_inferences ─────────────────────────────────────────────────────
+    // ── Test helpers ────────────────────────────────────────────────────────
 
+    /// Wrapper around the module-level test_pool for PG-specific tests.
+    /// Returns None if no PG database is available.
     async fn test_pool() -> Option<Arc<PgPool>> {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         super::test_pool().await
     }
 
-    fn make_persistence(pool: Arc<PgPool>) -> PersistenceConfig {
+    /// Create a persistence config backed by in-memory storage.
+    /// Always succeeds, no DATABASE_URL required.
+    fn test_backend() -> PersistenceConfig {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         PersistenceConfig {
-            pool,
+            backend: Arc::new(DbBackend::Memory(MemoryBackend::new())),
+            task_semaphore: Arc::new(Semaphore::new(100)),
+        }
+    }
+
+    /// Try to create a PG-backed persistence config for PG-specific tests.
+    async fn test_pg_backend() -> Option<PersistenceConfig> {
+        let pool = super::test_pool().await?;
+        let pool_owned = (*pool).clone();
+        Some(PersistenceConfig {
+            backend: Arc::new(DbBackend::Postgres(PostgresBackend { pool: pool_owned })),
+            task_semaphore: Arc::new(Semaphore::new(100)),
+        })
+    }
+
+    /// Create a SQLite in-memory backend for SQLite-specific tests.
+    /// Each invocation uses a unique shared-cache URI for isolation.
+    async fn test_sqlite_backend() -> PersistenceConfig {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let uri = format!("sqlite:file:test_{}?mode=memory&cache=shared", uuid::Uuid::new_v4());
+        let backend = SqliteBackend::from_uri(&uri).await;
+        PersistenceConfig {
+            backend: Arc::new(DbBackend::Sqlite(backend)),
             task_semaphore: Arc::new(Semaphore::new(100)),
         }
     }
 
     #[tokio::test]
     async fn test_fetch_inferences_empty_list() {
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP test_fetch_inferences_empty_list: DATABASE_URL not set");
-                return;
-            }
-        };
-        // Clean slate for this test using a unique category prefix unlikely to collide.
-        let pc = make_persistence(pool);
-        // Fetch with a filter that will match nothing.
-        let result = pc
+        let pc = test_backend();
+        let result = pc.backend
             .fetch_inferences(0, 20, Some("NONEXISTENT_CATEGORY_XYZ"), None)
             .await;
         let (records, count) = result.expect("fetch should succeed");
@@ -786,41 +1428,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_inferences_with_records() {
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP test_fetch_inferences_with_records: DATABASE_URL not set");
-                return;
-            }
-        };
-        let pc = make_persistence(pool.clone());
-        // Insert a test record.
+        let pc = test_backend();
         let request_id = uuid::Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, category, upstream_model, duration_ms, prompt_snippet) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
-        )
-        .bind(request_id)
-        .bind("ok")
-        .bind("TEST_CAT_FETCH")
-        .bind("test-model")
-        .bind(42i32)
-        .bind("test snippet")
-        .execute(pool.as_ref())
-        .await
-        .expect("insert should succeed");
+        let record = InferenceRecord {
+            request_id,
+            status: "ok".to_string(),
+            category: Some("TEST_CAT_FETCH".to_string()),
+            upstream_model: Some("test-model".to_string()),
+            duration_ms: Some(42),
+            prompt_snippet: "test snippet".to_string(),
+            prompt_char_count: None,
+            created_at: chrono::Utc::now(),
+        };
+        pc.backend.insert_inference(&record).await.expect("insert should succeed");
 
-        let (records, count) = pc
+        let (records, count) = pc.backend
             .fetch_inferences(0, 20, Some("TEST_CAT_FETCH"), None)
             .await
             .expect("fetch should succeed");
-
-        // Cleanup.
-        sqlx::query("DELETE FROM inferences WHERE request_id = $1")
-            .bind(request_id)
-            .execute(pool.as_ref())
-            .await
-            .ok();
 
         assert!(count >= 1, "expected at least one record");
         let found = records.iter().any(|r| r.prompt_snippet == "test snippet");
@@ -829,48 +1454,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_inferences_filter_by_category() {
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP test_fetch_inferences_filter_by_category: DATABASE_URL not set");
-                return;
-            }
+        let pc = test_backend();
+        let record_a = InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some("CAT_ALPHA".to_string()),
+            upstream_model: None,
+            duration_ms: None,
+            prompt_snippet: "alpha snippet".to_string(),
+            prompt_char_count: None,
+            created_at: chrono::Utc::now(),
         };
-        let pc = make_persistence(pool.clone());
-        let id_a = uuid::Uuid::new_v4();
-        let id_b = uuid::Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, category, prompt_snippet) VALUES ($1,$2,$3,$4)",
-        )
-        .bind(id_a)
-        .bind("ok")
-        .bind("CAT_ALPHA")
-        .bind("alpha snippet")
-        .execute(pool.as_ref())
-        .await
-        .ok();
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, category, prompt_snippet) VALUES ($1,$2,$3,$4)",
-        )
-        .bind(id_b)
-        .bind("ok")
-        .bind("CAT_BETA")
-        .bind("beta snippet")
-        .execute(pool.as_ref())
-        .await
-        .ok();
+        let record_b = InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some("CAT_BETA".to_string()),
+            upstream_model: None,
+            duration_ms: None,
+            prompt_snippet: "beta snippet".to_string(),
+            prompt_char_count: None,
+            created_at: chrono::Utc::now(),
+        };
+        pc.backend.insert_inference(&record_a).await.expect("insert alpha");
+        pc.backend.insert_inference(&record_b).await.expect("insert beta");
 
-        let (records, _) = pc
+        let (records, _) = pc.backend
             .fetch_inferences(0, 100, Some("CAT_ALPHA"), None)
             .await
             .expect("fetch should succeed");
-
-        // Cleanup.
-        sqlx::query("DELETE FROM inferences WHERE request_id = ANY($1)")
-            .bind(vec![id_a, id_b])
-            .execute(pool.as_ref())
-            .await
-            .ok();
 
         let has_alpha = records.iter().any(|r| r.prompt_snippet == "alpha snippet");
         let has_beta = records.iter().any(|r| r.prompt_snippet == "beta snippet");
@@ -883,40 +1494,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_inferences_returns_total_count() {
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP test_fetch_inferences_returns_total_count: DATABASE_URL not set");
-                return;
-            }
-        };
-        let pc = make_persistence(pool.clone());
+        let pc = test_backend();
         let ids: Vec<uuid::Uuid> = (0..3).map(|_| uuid::Uuid::new_v4()).collect();
         for id in &ids {
-            sqlx::query(
-                "INSERT INTO inferences (request_id, status, category, prompt_snippet) VALUES ($1,$2,$3,$4)",
-            )
-            .bind(*id)
-            .bind("ok")
-            .bind("TOTAL_COUNT_TEST")
-            .bind("snippet")
-            .execute(pool.as_ref())
-            .await
-            .ok();
+            let record = InferenceRecord {
+                request_id: *id,
+                status: "ok".to_string(),
+                category: Some("TOTAL_COUNT_TEST".to_string()),
+                upstream_model: None,
+                duration_ms: None,
+                prompt_snippet: "snippet".to_string(),
+                prompt_char_count: None,
+                created_at: chrono::Utc::now(),
+            };
+            pc.backend.insert_inference(&record).await.expect("insert");
         }
 
-        // Fetch only 1 row but total_count should reflect all matching rows.
-        let (records, total_count) = pc
+        let (records, total_count) = pc.backend
             .fetch_inferences(0, 1, Some("TOTAL_COUNT_TEST"), None)
             .await
             .expect("fetch should succeed");
-
-        // Cleanup.
-        sqlx::query("DELETE FROM inferences WHERE request_id = ANY($1)")
-            .bind(ids)
-            .execute(pool.as_ref())
-            .await
-            .ok();
 
         assert_eq!(records.len(), 1, "should return only 1 record (limit=1)");
         assert!(total_count >= 3, "total_count should be at least 3");
@@ -950,39 +1547,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_latency_summary_empty() {
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP test_fetch_latency_summary_empty: DATABASE_URL not set");
-                return;
-            }
-        };
-        let pc = make_persistence(pool.clone());
-        let id = uuid::Uuid::new_v4();
+        let pc = test_backend();
         let cat = format!("Z_TST_LAT_EMPTY_{}", uuid::Uuid::new_v4());
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, category, duration_ms, prompt_snippet) \
-             VALUES ($1,$2,$3,$4,$5)",
-        )
-        .bind(id)
-        .bind("ok")
-        .bind(&cat)
-        .bind(100i32)
-        .bind("single record")
-        .execute(pool.as_ref())
-        .await
-        .expect("insert should succeed");
+        let record = InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some(cat.clone()),
+            upstream_model: None,
+            duration_ms: Some(100),
+            prompt_snippet: "single record".to_string(),
+            prompt_char_count: None,
+            created_at: chrono::Utc::now(),
+        };
+        pc.backend.insert_inference(&record).await.expect("insert should succeed");
 
-        let result = pc
+        let result = pc.backend
             .fetch_latency_summary(24)
             .await
             .expect("fetch should succeed");
-
-        sqlx::query("DELETE FROM inferences WHERE request_id = $1")
-            .bind(id)
-            .execute(pool.as_ref())
-            .await
-            .ok();
 
         let test_rows: Vec<_> = result.rows.iter().filter(|r| r.category == cat).collect();
         assert_eq!(test_rows.len(), 1, "expected exactly one test row");
@@ -996,81 +1578,55 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_latency_summary_with_data() {
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP test_fetch_latency_summary_with_data: DATABASE_URL not set");
-                return;
-            }
-        };
-        let pc = make_persistence(pool.clone());
-        let id_a1 = uuid::Uuid::new_v4();
-        let id_a2 = uuid::Uuid::new_v4();
-        let id_a3 = uuid::Uuid::new_v4();
-        let id_b1 = uuid::Uuid::new_v4();
-        let id_b2 = uuid::Uuid::new_v4();
-        let id_c1 = uuid::Uuid::new_v4();
-        let ids = vec![id_a1, id_a2, id_a3, id_b1, id_b2, id_c1];
+        let pc = test_backend();
         let prefix = format!("Z_TST_LAT_DATA_{}", uuid::Uuid::new_v4());
         let cat_a = format!("{prefix}_A");
         let cat_b = format!("{prefix}_B");
         let cat_c = format!("{prefix}_C");
+        let now = chrono::Utc::now();
 
         // Category A: 3 records with durations 100, 200, 300
-        for (id, dur) in [(id_a1, 100), (id_a2, 200), (id_a3, 300)] {
-            sqlx::query(
-                "INSERT INTO inferences (request_id, status, category, duration_ms, prompt_snippet) \
-                 VALUES ($1,$2,$3,$4,$5)",
-            )
-            .bind(id)
-            .bind("ok")
-            .bind(&cat_a)
-            .bind(dur)
-            .bind("cat a")
-            .execute(pool.as_ref())
-            .await
-            .ok();
+        for dur in [100, 200, 300] {
+            pc.backend.insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some(cat_a.clone()),
+                upstream_model: None,
+                duration_ms: Some(dur),
+                prompt_snippet: "cat a".to_string(),
+                prompt_char_count: None,
+                created_at: now,
+            }).await.expect("insert");
         }
         // Category B: 2 records with durations 50, 150
-        for (id, dur) in [(id_b1, 50), (id_b2, 150)] {
-            sqlx::query(
-                "INSERT INTO inferences (request_id, status, category, duration_ms, prompt_snippet) \
-                 VALUES ($1,$2,$3,$4,$5)",
-            )
-            .bind(id)
-            .bind("ok")
-            .bind(&cat_b)
-            .bind(dur)
-            .bind("cat b")
-            .execute(pool.as_ref())
-            .await
-            .ok();
+        for dur in [50, 150] {
+            pc.backend.insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some(cat_b.clone()),
+                upstream_model: None,
+                duration_ms: Some(dur),
+                prompt_snippet: "cat b".to_string(),
+                prompt_char_count: None,
+                created_at: now,
+            }).await.expect("insert");
         }
         // Category C: 1 record with duration 500
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, category, duration_ms, prompt_snippet) \
-             VALUES ($1,$2,$3,$4,$5)",
-        )
-        .bind(id_c1)
-        .bind("ok")
-        .bind(&cat_c)
-        .bind(500)
-        .bind("cat c")
-        .execute(pool.as_ref())
-        .await
-        .ok();
+        pc.backend.insert_inference(&InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some(cat_c.clone()),
+            upstream_model: None,
+            duration_ms: Some(500),
+            prompt_snippet: "cat c".to_string(),
+            prompt_char_count: None,
+            created_at: now,
+        }).await.expect("insert");
 
-        let result = pc
+        let result = pc.backend
             .fetch_latency_summary(24)
             .await
             .expect("fetch should succeed");
-
-        // Cleanup.
-        sqlx::query("DELETE FROM inferences WHERE request_id = ANY($1)")
-            .bind(ids)
-            .execute(pool.as_ref())
-            .await
-            .ok();
 
         let test_rows: Vec<_> = result
             .rows
@@ -1085,7 +1641,8 @@ mod tests {
             .expect("Cat A should appear");
         assert_eq!(row_a.request_count, 3);
         assert_eq!(row_a.avg_duration_ms, Some(200));
-        assert_eq!(row_a.p99_duration_ms, Some(298));
+        // Rust-side p99 for [100, 200, 300]: idx = (0.99*3).ceil()-1 = 2 → 300
+        assert_eq!(row_a.p99_duration_ms, Some(300));
 
         let row_b = test_rows
             .iter()
@@ -1093,7 +1650,8 @@ mod tests {
             .expect("Cat B should appear");
         assert_eq!(row_b.request_count, 2);
         assert_eq!(row_b.avg_duration_ms, Some(100));
-        assert_eq!(row_b.p99_duration_ms, Some(149));
+        // Rust-side p99 for [50, 150]: idx = (0.99*2).ceil()-1 = 1 → 150
+        assert_eq!(row_b.p99_duration_ms, Some(150));
 
         let row_c = test_rows
             .iter()
@@ -1109,55 +1667,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_latency_summary_unclassified_count() {
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "SKIP test_fetch_latency_summary_unclassified_count: DATABASE_URL not set"
-                );
-                return;
-            }
-        };
-        let pc = make_persistence(pool.clone());
-        let id1 = uuid::Uuid::new_v4();
-        let id2 = uuid::Uuid::new_v4();
-        let ids = vec![id1, id2];
+        let pc = test_backend();
+        let now = chrono::Utc::now();
 
-        // Insert records with NULL category (unclassified).
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, duration_ms, prompt_snippet) \
-             VALUES ($1,$2,$3,$4)",
-        )
-        .bind(id1)
-        .bind("ok")
-        .bind(100i32)
-        .bind("unclassified 1")
-        .execute(pool.as_ref())
-        .await
-        .ok();
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, duration_ms, prompt_snippet) \
-             VALUES ($1,$2,$3,$4)",
-        )
-        .bind(id2)
-        .bind("ok")
-        .bind(200i32)
-        .bind("unclassified 2")
-        .execute(pool.as_ref())
-        .await
-        .ok();
+        for snippet in ["unclassified 1", "unclassified 2"] {
+            pc.backend.insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: None,
+                upstream_model: None,
+                duration_ms: Some(100),
+                prompt_snippet: snippet.to_string(),
+                prompt_char_count: None,
+                created_at: now,
+            }).await.expect("insert");
+        }
 
-        let result = pc
+        let result = pc.backend
             .fetch_latency_summary(24)
             .await
             .expect("fetch should succeed");
-
-        // Cleanup.
-        sqlx::query("DELETE FROM inferences WHERE request_id = ANY($1)")
-            .bind(ids)
-            .execute(pool.as_ref())
-            .await
-            .ok();
 
         assert!(
             result.unclassified_count >= 2,
@@ -1170,43 +1699,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_savings_estimate_empty() {
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP test_fetch_savings_estimate_empty: DATABASE_URL not set");
-                return;
-            }
-        };
-        let pc = make_persistence(pool.clone());
+        let pc = test_backend();
         let mc = super::super::intent_classifier::ModelCosts::from_costs(
             super::super::intent_classifier::hardcoded_model_costs(),
         );
-        let id = uuid::Uuid::new_v4();
         let model = format!("Z_TST_SAV_EMPTY_{}", uuid::Uuid::new_v4());
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, category, upstream_model, prompt_snippet, prompt_char_count) \
-             VALUES ($1,$2,$3,$4,$5,$6)",
-        )
-        .bind(id)
-        .bind("ok")
-        .bind("Z_TST_SAV_EMPTY_CAT")
-        .bind(&model)
-        .bind("empty test")
-        .bind(100i32)
-        .execute(pool.as_ref())
-        .await
-        .expect("insert should succeed");
+        pc.backend.insert_inference(&InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some("Z_TST_SAV_EMPTY_CAT".to_string()),
+            upstream_model: Some(model.clone()),
+            duration_ms: None,
+            prompt_snippet: "empty test".to_string(),
+            prompt_char_count: Some(100),
+            created_at: chrono::Utc::now(),
+        }).await.expect("insert should succeed");
 
-        let result = pc
+        let result = pc.backend
             .fetch_savings_estimate(24, &mc, "claude-3.5-sonnet")
             .await
             .expect("fetch should succeed");
-
-        sqlx::query("DELETE FROM inferences WHERE request_id = $1")
-            .bind(id)
-            .execute(pool.as_ref())
-            .await
-            .expect("delete should succeed");
 
         assert!(
             result.classified_count >= 1,
@@ -1217,15 +1729,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_savings_estimate_with_data() {
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP test_fetch_savings_estimate_with_data: DATABASE_URL not set");
-                return;
-            }
-        };
-        let pc = make_persistence(pool.clone());
-        // Use unique model names to isolate from stale DB data.
+        let pc = test_backend();
         let model_a = format!("Z_TST_SAV_A_{}", uuid::Uuid::new_v4());
         let model_b = format!("Z_TST_SAV_B_{}", uuid::Uuid::new_v4());
         let mut costs = super::super::intent_classifier::hardcoded_model_costs();
@@ -1233,52 +1737,33 @@ mod tests {
         costs.insert(model_b.clone(), 3.00);
         let mc = super::super::intent_classifier::ModelCosts::from_costs(costs);
         let baseline = model_b.clone();
+        let now = chrono::Utc::now();
 
-        let id1 = uuid::Uuid::new_v4();
-        let id2 = uuid::Uuid::new_v4();
-        let ids = vec![id1, id2];
+        pc.backend.insert_inference(&InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some("Z_TST_SAV_CAT1".to_string()),
+            upstream_model: Some(model_a),
+            duration_ms: None,
+            prompt_snippet: "cheap prompt".to_string(),
+            prompt_char_count: Some(1000),
+            created_at: now,
+        }).await.expect("insert 1");
+        pc.backend.insert_inference(&InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some("Z_TST_SAV_CAT2".to_string()),
+            upstream_model: Some(model_b.clone()),
+            duration_ms: None,
+            prompt_snippet: "complex prompt with more content".to_string(),
+            prompt_char_count: Some(2000),
+            created_at: now,
+        }).await.expect("insert 2");
 
-        // Insert a cheap record with 1000 chars
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, category, upstream_model, prompt_snippet, prompt_char_count) \
-             VALUES ($1,$2,$3,$4,$5,$6)",
-        )
-        .bind(id1)
-        .bind("ok")
-        .bind("Z_TST_SAV_CAT1")
-        .bind(&model_a)
-        .bind("cheap prompt")
-        .bind(1000i32)
-        .execute(pool.as_ref())
-        .await
-        .expect("insert 1 should succeed");
-
-        // Insert an expensive record with 2000 chars
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, category, upstream_model, prompt_snippet, prompt_char_count) \
-             VALUES ($1,$2,$3,$4,$5,$6)",
-        )
-        .bind(id2)
-        .bind("ok")
-        .bind("Z_TST_SAV_CAT2")
-        .bind(&model_b)
-        .bind("complex prompt with more content")
-        .bind(2000i32)
-        .execute(pool.as_ref())
-        .await
-        .expect("insert 2 should succeed");
-
-        let result = pc
+        let result = pc.backend
             .fetch_savings_estimate(24, &mc, &baseline)
             .await
             .expect("fetch should succeed");
-
-        // Cleanup.
-        sqlx::query("DELETE FROM inferences WHERE request_id = ANY($1)")
-            .bind(ids)
-            .execute(pool.as_ref())
-            .await
-            .expect("delete should succeed");
 
         assert!(
             result.classified_count >= 2,
@@ -1294,46 +1779,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_savings_estimate_unknown_cost_model() {
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "SKIP test_fetch_savings_estimate_unknown_cost_model: DATABASE_URL not set"
-                );
-                return;
-            }
-        };
-        let pc = make_persistence(pool.clone());
+        let pc = test_backend();
         let mc = super::super::intent_classifier::ModelCosts::from_costs(
             super::super::intent_classifier::hardcoded_model_costs(),
         );
-        let id = uuid::Uuid::new_v4();
         let model = format!("Z_TST_SAV_UNK_{}", uuid::Uuid::new_v4());
 
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, category, upstream_model, prompt_snippet, prompt_char_count) \
-             VALUES ($1,$2,$3,$4,$5,$6)",
-        )
-        .bind(id)
-        .bind("ok")
-        .bind("Z_TST_SAV_UNK_CAT")
-        .bind(&model)
-        .bind("some prompt")
-        .bind(500i32)
-        .execute(pool.as_ref())
-        .await
-        .expect("insert should succeed");
+        pc.backend.insert_inference(&InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some("Z_TST_SAV_UNK_CAT".to_string()),
+            upstream_model: Some(model),
+            duration_ms: None,
+            prompt_snippet: "some prompt".to_string(),
+            prompt_char_count: Some(500),
+            created_at: chrono::Utc::now(),
+        }).await.expect("insert should succeed");
 
-        let result = pc
+        let result = pc.backend
             .fetch_savings_estimate(24, &mc, "claude-3.5-sonnet")
             .await
             .expect("fetch should succeed");
-
-        sqlx::query("DELETE FROM inferences WHERE request_id = $1")
-            .bind(id)
-            .execute(pool.as_ref())
-            .await
-            .expect("delete should succeed");
 
         assert!(
             result.classified_count >= 1,
@@ -1349,93 +1815,55 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_savings_estimate_filters_null_category() {
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "SKIP test_fetch_savings_estimate_filters_null_category: DATABASE_URL not set"
-                );
-                return;
-            }
-        };
-        let pc = make_persistence(pool.clone());
+        let pc = test_backend();
         let mc = super::super::intent_classifier::ModelCosts::from_costs(
             super::super::intent_classifier::hardcoded_model_costs(),
         );
-        let id = uuid::Uuid::new_v4();
 
-        // Insert a record with NULL category — should be excluded from classified_count.
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, upstream_model, prompt_snippet, prompt_char_count) \
-             VALUES ($1,$2,$3,$4,$5)",
-        )
-        .bind(id)
-        .bind("ok")
-        .bind("gpt-4o-mini")
-        .bind("uncategorized")
-        .bind(100i32)
-        .execute(pool.as_ref())
-        .await
-        .expect("insert should succeed");
+        pc.backend.insert_inference(&InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: None,
+            upstream_model: Some("gpt-4o-mini".to_string()),
+            duration_ms: None,
+            prompt_snippet: "uncategorized".to_string(),
+            prompt_char_count: Some(100),
+            created_at: chrono::Utc::now(),
+        }).await.expect("insert should succeed");
 
-        let result = pc
+        let result = pc.backend
             .fetch_savings_estimate(24, &mc, "claude-3.5-sonnet")
             .await
             .expect("fetch should succeed — NULL category must not crash the query");
 
-        sqlx::query("DELETE FROM inferences WHERE request_id = $1")
-            .bind(id)
-            .execute(pool.as_ref())
-            .await
-            .expect("delete should succeed");
-
         // The NULL-category record should not cause a panic; function must handle
-        // the SQL `WHERE category IS NOT NULL` filter correctly.
+        // the filter correctly.
         assert!(result.classified_count >= 0);
     }
 
     #[tokio::test]
     async fn test_fetch_savings_estimate_historical_fallback() {
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "SKIP test_fetch_savings_estimate_historical_fallback: DATABASE_URL not set"
-                );
-                return;
-            }
-        };
-        let pc = make_persistence(pool.clone());
-        let id = uuid::Uuid::new_v4();
+        let pc = test_backend();
         let model = format!("Z_TST_SAV_FB_{}", uuid::Uuid::new_v4());
         let mut costs = super::super::intent_classifier::hardcoded_model_costs();
         costs.insert(model.clone(), 0.15);
         let mc = super::super::intent_classifier::ModelCosts::from_costs(costs);
 
-        // Insert a record with NULL prompt_char_count (historical record).
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, category, upstream_model, prompt_snippet) \
-             VALUES ($1,$2,$3,$4,$5)",
-        )
-        .bind(id)
-        .bind("ok")
-        .bind("Z_TST_SAV_FB_CAT")
-        .bind(&model)
-        .bind("older record with no char count")
-        .execute(pool.as_ref())
-        .await
-        .expect("insert should succeed");
+        pc.backend.insert_inference(&InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some("Z_TST_SAV_FB_CAT".to_string()),
+            upstream_model: Some(model.clone()),
+            duration_ms: None,
+            prompt_snippet: "older record with no char count".to_string(),
+            prompt_char_count: None,
+            created_at: chrono::Utc::now(),
+        }).await.expect("insert should succeed");
 
-        let result = pc
+        let result = pc.backend
             .fetch_savings_estimate(24, &mc, &model)
             .await
             .expect("fetch should succeed");
-
-        sqlx::query("DELETE FROM inferences WHERE request_id = $1")
-            .bind(id)
-            .execute(pool.as_ref())
-            .await
-            .expect("delete should succeed");
 
         assert!(
             result.classified_count >= 1,
@@ -1450,45 +1878,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_latency_summary_time_filter() {
-        let pool = match test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP test_fetch_latency_summary_time_filter: DATABASE_URL not set");
-                return;
-            }
-        };
-        let pc = make_persistence(pool.clone());
-        let id = uuid::Uuid::new_v4();
+        let pc = test_backend();
         let cat = format!("Z_TST_LAT_TIME_{}", uuid::Uuid::new_v4());
-
-        // Insert a record with created_at set to 2 hours ago.
         let two_hours_ago = chrono::Utc::now() - chrono::Duration::hours(2);
-        sqlx::query(
-            "INSERT INTO inferences (request_id, status, category, duration_ms, prompt_snippet, created_at) \
-             VALUES ($1,$2,$3,$4,$5,$6)",
-        )
-        .bind(id)
-        .bind("ok")
-        .bind(&cat)
-        .bind(100i32)
-        .bind("old record")
-        .bind(two_hours_ago)
-        .execute(pool.as_ref())
-        .await
-        .expect("insert should succeed");
+
+        pc.backend.insert_inference(&InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some(cat.clone()),
+            upstream_model: None,
+            duration_ms: Some(100),
+            prompt_snippet: "old record".to_string(),
+            prompt_char_count: None,
+            created_at: two_hours_ago,
+        }).await.expect("insert should succeed");
 
         // Query with hours=1 — should not find the 2-hour-old record.
-        let result = pc
+        let result = pc.backend
             .fetch_latency_summary(1)
             .await
             .expect("fetch should succeed");
-
-        // Cleanup.
-        sqlx::query("DELETE FROM inferences WHERE request_id = $1")
-            .bind(id)
-            .execute(pool.as_ref())
-            .await
-            .ok();
 
         let found = result.rows.iter().any(|r| r.category == cat);
         assert!(
@@ -1528,8 +1937,260 @@ mod tests {
             idle_timeout_secs: 1800,
             log_concurrency_limit: 100,
         };
-        let _ = PersistenceConfig::from_env(&db_config).await;
+        let _ = PostgresBackend::from_env(&db_config).await;
     }
+
+    // ── Memory backend specific tests ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_memory_p99_computation() {
+        let pc = test_backend();
+        let now = chrono::Utc::now();
+        // Insert records with durations 10, 20, 30, 40, 50, 60, 70, 80, 90, 100
+        for i in 1..=10 {
+            pc.backend.insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some("P99_TEST".to_string()),
+                upstream_model: None,
+                duration_ms: Some(i * 10),
+                prompt_snippet: format!("record {}", i),
+                prompt_char_count: None,
+                created_at: now,
+            }).await.expect("insert");
+        }
+
+        let result = pc.backend
+            .fetch_latency_summary(24)
+            .await
+            .expect("fetch should succeed");
+
+        let row = result.rows.iter().find(|r| r.category == "P99_TEST").expect("P99_TEST row");
+        assert_eq!(row.request_count, 10);
+        assert_eq!(row.avg_duration_ms, Some(55));
+        // p99 of [10..100]: idx = ceil(0.99*10)-1 = 9 → 100
+        assert_eq!(row.p99_duration_ms, Some(100));
+    }
+
+    #[tokio::test]
+    async fn test_memory_concurrent_reads() {
+        let pc = test_backend();
+        let now = chrono::Utc::now();
+        // Insert some records.
+        for i in 0..10 {
+            pc.backend.insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some("CONCUR_TEST".to_string()),
+                upstream_model: None,
+                duration_ms: Some(i),
+                prompt_snippet: format!("record {}", i),
+                prompt_char_count: None,
+                created_at: now,
+            }).await.expect("insert");
+        }
+
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let pc = test_backend();
+            // Re-insert records for each concurrent read
+            for i in 0..10 {
+                pc.backend.insert_inference(&InferenceRecord {
+                    request_id: uuid::Uuid::new_v4(),
+                    status: "ok".to_string(),
+                    category: Some("CONCUR_TEST".to_string()),
+                    upstream_model: None,
+                    duration_ms: Some(i),
+                    prompt_snippet: format!("record {}", i),
+                    prompt_char_count: None,
+                    created_at: now,
+                }).await.expect("insert");
+            }
+            handles.push(tokio::spawn(async move {
+                pc.backend.fetch_inferences(0, 100, Some("CONCUR_TEST"), None).await
+            }));
+        }
+
+        for handle in handles {
+            let result = handle.await.expect("task should complete");
+            assert!(result.is_ok(), "concurrent read should succeed");
+            let (records, _) = result.unwrap();
+            assert_eq!(records.len(), 10, "should read all 10 records");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_memory_time_filter() {
+        let pc = test_backend();
+        let now = chrono::Utc::now();
+        let old = now - chrono::Duration::hours(3);
+
+        // Insert a recent record.
+        pc.backend.insert_inference(&InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some("RECENT".to_string()),
+            upstream_model: None,
+            duration_ms: Some(50),
+            prompt_snippet: "recent".to_string(),
+            prompt_char_count: None,
+            created_at: now,
+        }).await.expect("insert");
+        // Insert an old record.
+        pc.backend.insert_inference(&InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some("OLD".to_string()),
+            upstream_model: None,
+            duration_ms: Some(100),
+            prompt_snippet: "old".to_string(),
+            prompt_char_count: None,
+            created_at: old,
+        }).await.expect("insert");
+
+        // 1-hour window should only find the recent record.
+        let result = pc.backend
+            .fetch_latency_summary(1)
+            .await
+            .expect("fetch should succeed");
+
+        assert!(result.rows.iter().any(|r| r.category == "RECENT"), "recent should appear");
+        assert!(!result.rows.iter().any(|r| r.category == "OLD"), "old should be excluded");
+
+        // 4-hour window should find both.
+        let result4 = pc.backend
+            .fetch_latency_summary(4)
+            .await
+            .expect("fetch should succeed");
+
+        assert!(result4.rows.iter().any(|r| r.category == "RECENT"), "recent should appear in 4h");
+        assert!(result4.rows.iter().any(|r| r.category == "OLD"), "old should appear in 4h");
+    }
+
+    // ── SQLite backend specific tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_sqlite_schema_init() {
+        let pc = test_sqlite_backend().await;
+        // Verify the table exists by running a query.
+        let row: Result<sqlx::sqlite::SqliteRow, sqlx::Error> = sqlx::query(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='inferences'"
+        )
+        .fetch_one(match &*pc.backend {
+            DbBackend::Sqlite(b) => &b.pool,
+            _ => panic!("expected SQLite backend"),
+        })
+        .await;
+        assert!(row.is_ok(), "inferences table should exist");
+
+        let idx: Result<sqlx::sqlite::SqliteRow, sqlx::Error> = sqlx::query(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_inferences_created_at'"
+        )
+        .fetch_one(match &*pc.backend {
+            DbBackend::Sqlite(b) => &b.pool,
+            _ => panic!("expected SQLite backend"),
+        })
+        .await;
+        assert!(idx.is_ok(), "idx_inferences_created_at index should exist");
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_insert_and_fetch() {
+        let pc = test_sqlite_backend().await;
+        let request_id = uuid::Uuid::new_v4();
+        let record = InferenceRecord {
+            request_id,
+            status: "ok".to_string(),
+            category: Some("SQLITE_TEST".to_string()),
+            upstream_model: Some("test-model".to_string()),
+            duration_ms: Some(42),
+            prompt_snippet: "sqlite test snippet".to_string(),
+            prompt_char_count: Some(100),
+            created_at: chrono::Utc::now(),
+        };
+        pc.backend.insert_inference(&record).await.expect("insert should succeed");
+
+        let (records, count) = pc.backend
+            .fetch_inferences(0, 10, Some("SQLITE_TEST"), None)
+            .await
+            .expect("fetch should succeed");
+
+        assert_eq!(count, 1, "expected 1 record");
+        assert_eq!(records[0].prompt_snippet, "sqlite test snippet");
+        assert_eq!(records[0].duration_ms, Some(42));
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_isolation() {
+        let id1 = uuid::Uuid::new_v4();
+        let id2 = uuid::Uuid::new_v4();
+        let uri1 = format!("sqlite:file:test_{id1}?mode=memory&cache=shared");
+        let uri2 = format!("sqlite:file:test_{id2}?mode=memory&cache=shared");
+        let backend1 = SqliteBackend::from_uri(&uri1).await;
+        let backend2 = SqliteBackend::from_uri(&uri2).await;
+        let pc1 = PersistenceConfig {
+            backend: Arc::new(DbBackend::Sqlite(backend1)),
+            task_semaphore: Arc::new(Semaphore::new(100)),
+        };
+        let pc2 = PersistenceConfig {
+            backend: Arc::new(DbBackend::Sqlite(backend2)),
+            task_semaphore: Arc::new(Semaphore::new(100)),
+        };
+
+        let record = InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some("ISO_TEST".to_string()),
+            upstream_model: None,
+            duration_ms: Some(10),
+            prompt_snippet: "isolated".to_string(),
+            prompt_char_count: None,
+            created_at: chrono::Utc::now(),
+        };
+        pc1.backend.insert_inference(&record).await.expect("insert");
+
+        // pc2 should have no records.
+        let (records, count) = pc2.backend
+            .fetch_inferences(0, 10, Some("ISO_TEST"), None)
+            .await
+            .expect("fetch should succeed");
+        assert_eq!(count, 0, "pc2 should be empty");
+        assert!(records.is_empty(), "pc2 should have no records");
+    }
+
+    // ── log_inference integration test ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_log_inference_integration() {
+        let pc = test_backend();
+        let record = InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some("LOG_TEST".to_string()),
+            upstream_model: Some("test-model".to_string()),
+            duration_ms: Some(50),
+            prompt_snippet: "log inference test".to_string(),
+            prompt_char_count: Some(25),
+            created_at: chrono::Utc::now(),
+        };
+
+        let handle = log_inference(
+            pc.backend.clone(),
+            pc.task_semaphore.clone(),
+            record,
+        );
+        handle.await.expect("logging task should complete");
+
+        // Read back.
+        let (records, _) = pc.backend
+            .fetch_inferences(0, 10, Some("LOG_TEST"), None)
+            .await
+            .expect("fetch should succeed");
+        assert_eq!(records.len(), 1, "should have logged 1 record");
+        assert_eq!(records[0].prompt_snippet, "log inference test");
+    }
+
+    // ── PG-specific tests (require DATABASE_URL) ────────────────────────────
 
     #[tokio::test]
     async fn test_log_concurrency_limit_parsed_from_env() {
@@ -1566,7 +2227,11 @@ mod tests {
             idle_timeout_secs: 1800,
             log_concurrency_limit: 7,
         };
-        let config = PersistenceConfig::from_env(&db_config).await.expect("PersistenceConfig should succeed");
+        let pg_backend = PostgresBackend::from_env(&db_config).await.expect("PostgresBackend should succeed");
+        let config = PersistenceConfig {
+            backend: Arc::new(DbBackend::Postgres(pg_backend)),
+            task_semaphore: Arc::new(Semaphore::new(7)),
+        };
         assert_eq!(config.task_semaphore.available_permits(), 7);
     }
 }

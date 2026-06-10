@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tower_http::services::ServeDir;
 
 use crate::{auth, persistence, AppState};
+use persistence::PersistenceBackend;
 
 /// Navigation page entry registered in `PAGES`.
 ///
@@ -154,9 +155,9 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         }
     };
 
-    let summary_fut = persistence.fetch_latency_summary(state.dashboard_config.default_hours);
-    let savings_fut = persistence.fetch_savings_estimate(state.dashboard_config.default_hours, &model_costs, &baseline_model);
-    let recent_fut = persistence.fetch_inferences(0, state.dashboard_config.recent_count, None, None);
+    let summary_fut = persistence.backend.fetch_latency_summary(state.dashboard_config.default_hours);
+    let savings_fut = persistence.backend.fetch_savings_estimate(state.dashboard_config.default_hours, &model_costs, &baseline_model);
+    let recent_fut = persistence.backend.fetch_inferences(0, state.dashboard_config.recent_count, None, None);
 
     let (summary_res, savings_res, recent_res) = tokio::join!(summary_fut, savings_fut, recent_fut);
 
@@ -215,6 +216,7 @@ async fn inferences_handler(
     };
 
     match persistence
+        .backend
         .fetch_inferences(
             offset,
             limit,
@@ -274,7 +276,7 @@ async fn latency_handler(
         }
     };
 
-    match persistence.fetch_latency_summary(hours).await {
+    match persistence.backend.fetch_latency_summary(hours).await {
         Ok(s) => LatencyTemplate {
             nav: nav_for("latency"),
             summary: Some(s),
@@ -307,6 +309,7 @@ async fn savings_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     let baseline_model = state.baseline_model.read().await.clone();
 
     match persistence
+        .backend
         .fetch_savings_estimate(state.dashboard_config.default_hours, &model_costs, &baseline_model)
         .await
     {

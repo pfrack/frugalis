@@ -11,6 +11,89 @@ source "$SCRIPT_DIR/lib.sh"
 trap cleanup EXIT
 
 # ============================================================================
+# Global derived values
+# ============================================================================
+BASE_URL="http://$HOST"
+COMPLETION_URL="$BASE_URL/v1/chat/completions"
+
+# ============================================================================
+# Helper: Count inferences via /dashboard/inferences endpoint (dashboard auth)
+# ============================================================================
+count_inferences() {
+    local category="$1"
+    local url="$BASE_URL/dashboard/inferences"
+    if [ -n "$category" ]; then
+        url="$url?category=$(printf '%s' "$category" | jq -sRr @uri)"
+    fi
+    local auth="${DASHBOARD_BASIC_USER:-admin}:${DASHBOARD_BASIC_PASSWORD:-admin}"
+    local resp=$(curl -s -w "\n%{http_code}" -u "$auth" "$url" 2>/dev/null)
+    local code=$(echo "$resp" | tail -n1)
+    if [ "$code" != "200" ]; then
+        echo "0"
+        return
+    fi
+    local body=$(echo "$resp" | sed '$d')
+    local total=$(echo "$body" | grep -o '"total":[0-9]*' | head -1 | cut -d: -f2)
+    echo "${total:-0}"
+}
+
+# ============================================================================
+# Helper: Check dashboard for record count
+# ============================================================================
+check_dashboard() {
+    local expected="$1"
+    local page="$2"
+    local auth="${DASHBOARD_BASIC_USER:-admin}:${DASHBOARD_BASIC_PASSWORD:-admin}"
+    local html=$(curl -s -u "$auth" "$BASE_URL$page")
+    local count=$(echo "$html" | grep -c '<tr>' || true)
+    local data_rows=$((count - 1))
+    if [ "$data_rows" -eq "$expected" ]; then
+        log_pass "Dashboard $page shows $expected records"
+        return 0
+    else
+        log_fail "Dashboard $page: expected $expected rows, got $data_rows"
+        return 1
+    fi
+}
+
+# ============================================================================
+# Helper: Completion request (logs an inference record)
+# ============================================================================
+complete() {
+    local prompt="$1"
+    response=$(curl -s -w "\n%{http_code}" \
+        "$COMPLETION_URL" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}]}" 2>/dev/null) || return 1
+    http_code=$(echo "$response" | tail -n1)
+    body=$(echo "$response" | sed '$d')
+    if [ "$http_code" != "200" ]; then
+        echo "ERROR" >&2
+        return 1
+    fi
+    category=$(echo "$body" | python3 -c "
+import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get('category', 'UNKNOWN'))
+except:
+    print('ERROR')
+" 2>/dev/null || echo "ERROR")
+    model=$(echo "$body" | python3 -c "
+import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get('model', ''))
+except:
+    print('')
+" 2>/dev/null || echo "")
+    printf "(category=%s, model=%s)\n" "$category" "$model" >&2
+    echo "$category"
+}
+
+
+# ============================================================================
 # Test: Hardcoded defaults (no config file)
 # ============================================================================
 test_hardcoded_defaults() {
@@ -780,13 +863,224 @@ EOF
 }
 
 # ============================================================================
+# Test: Memory Backend (default)
+# ============================================================================
+test_memory_backend_default() {
+    section "Test 13: Memory Backend (default)"
+    
+    # Ensure no persistence env/config
+    unset DATABASE_URL
+    unset PERSISTENCE__BACKEND
+    unset PERSISTENCE__SQLITE_PATH
+      # Use minimal config to avoid interference
+      cat > /tmp/cerebrum-config-test.toml << 'EOF'
+classify_db_log = true
+
+[[categories]]
+name = "FILE_READING"
+description = "Reading files"
+threshold = 3
+priority = 1
+model_env_var = "DEFAULT_MODEL_READING"
+
+[[categories]]
+name = "CASUAL"
+description = "Simple questions"
+threshold = 1
+priority = 2
+model_env_var = "DEFAULT_MODEL"
+EOF
+    
+    if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        log_fail "Failed to start server"
+        return 1
+    fi
+    
+      # Classify a few prompts (classify endpoint with classify_db_log=true)
+      classify "please read the file src/main.rs" >/dev/null 2>&1 || true
+      classify "hello" >/dev/null 2>&1 || true
+      classify "fix this bug" >/dev/null 2>&1 || true
+     
+     # Give background tasks time to flush to DB
+     sleep 1
+     
+     # Check total count
+    local total=$(count_inferences "")
+    if [ "$total" -ge 3 ]; then
+        log_pass "Memory backend recorded $total inferences"
+    else
+        log_fail "Memory backend: expected at least 3, got $total"
+    fi
+    
+    # Check dashboard loads
+    local html=$(curl -s -u "${DASHBOARD_BASIC_USER:-admin}:${DASHBOARD_BASIC_PASSWORD:-admin}" "$BASE_URL/dashboard/inferences")
+    if echo "$html" | grep -q "Inference Records"; then
+        log_pass "Dashboard /dashboard/inferences loads"
+    else
+        log_fail "Dashboard /dashboard/inferences missing"
+    fi
+    
+    stop_server
+}
+
+# ============================================================================
+# Test: SQLite Backend and Persistence
+# ============================================================================
+test_sqlite_backend_and_persistence() {
+    section "Test 14: SQLite Backend & Persistence"
+    
+    local db_path="/tmp/cerebrum_test_$$.db"
+    rm -f "$db_path"
+    
+    # Set persistence via env
+    export PERSISTENCE__BACKEND="sqlite"
+    export PERSISTENCE__SQLITE_PATH="$db_path"
+    unset DATABASE_URL
+    
+     # Minimal config
+     cat > /tmp/cerebrum-config-test.toml << 'EOF'
+classify_db_log = true
+
+[[categories]]
+name = "FILE_READING"
+description = "Reading files"
+threshold = 3
+priority = 1
+model_env_var = "DEFAULT_MODEL_READING"
+
+[[categories]]
+name = "CASUAL"
+description = "Simple questions"
+threshold = 1
+priority = 2
+model_env_var = "DEFAULT_MODEL"
+EOF
+    
+    if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        log_fail "Failed to start server"
+        return 1
+    fi
+    
+      # Classify some prompts (classify endpoint with classify_db_log=true)
+      classify "please read the file src/main.rs" >/dev/null 2>&1 || true
+      classify "hello" >/dev/null 2>&1 || true
+      classify "fix this bug" >/dev/null 2>&1 || true
+     
+     # Wait for background logging to flush
+     sleep 1
+     
+     local total1=$(count_inferences "")
+    if [ "$total1" -ge 3 ]; then
+        log_pass "SQLite recorded $total1 inferences (initial)"
+    else
+        log_fail "SQLite: expected at least 3, got $total1"
+    fi
+    
+    if [ -f "$db_path" ]; then
+        log_pass "SQLite database file exists: $db_path"
+    else
+        log_fail "SQLite database file not found"
+    fi
+    
+    stop_server
+    
+    # Restart with same DB path to test persistence
+    if start_server "/tmp/cerebrum-config-test.toml"; then
+        local total2=$(count_inferences "")
+        if [ "$total2" -eq "$total1" ]; then
+            log_pass "SQLite data persisted across restart ($total2 records)"
+        else
+            log_fail "SQLite persistence: expected $total1, got $total2"
+        fi
+        
+        # Verify dashboard shows correct count
+        check_dashboard "$total2" "/dashboard/inferences" || true
+        
+        stop_server
+    fi
+    
+    # Cleanup
+    rm -f "$db_path"
+    unset PERSISTENCE__BACKEND PERSISTENCE__SQLITE_PATH
+}
+
+# ============================================================================
+# Test: Postgres Backend (skip if DATABASE_URL not set)
+# ============================================================================
+test_postgres_backend() {
+    section "Test 15: Postgres Backend (requires DATABASE_URL)"
+    
+    if [ -z "${DATABASE_URL:-}" ]; then
+        log_info "DATABASE_URL not set, skipping Postgres test"
+        return 0
+    fi
+    
+    unset PERSISTENCE__BACKEND
+    unset PERSISTENCE__SQLITE_PATH
+    
+     # Minimal config (no persistence section)
+     cat > /tmp/cerebrum-config-test.toml << 'EOF'
+classify_db_log = true
+
+[[categories]]
+name = "FILE_READING"
+description = "Reading files"
+threshold = 3
+priority = 1
+model_env_var = "DEFAULT_MODEL_READING"
+
+[[categories]]
+name = "CASUAL"
+description = "Simple questions"
+threshold = 1
+priority = 2
+model_env_var = "DEFAULT_MODEL"
+EOF
+    
+    if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        log_fail "Failed to start server"
+        return 1
+    fi
+    
+      # Classify a prompt (classify endpoint with classify_db_log=true)
+      classify "please read the file src/main.rs" >/dev/null 2>&1 || true
+     
+     # Wait for background logging
+     sleep 1
+     
+     local total=$(count_inferences "")
+    if [ "$total" -ge 1 ]; then
+        log_pass "Postgres backend recorded $total inferences"
+    else
+        log_fail "Postgres: expected at least 1, got $total"
+    fi
+    
+    # Check latency & savings pages load
+    local latency_html=$(curl -s -u "${DASHBOARD_BASIC_USER:-admin}:${DASHBOARD_BASIC_PASSWORD:-admin}" "$BASE_URL/dashboard/latency")
+    if echo "$latency_html" | grep -q "Latency Summary"; then
+        log_pass "Latency dashboard loads"
+    else
+        log_fail "Latency dashboard failed"
+    fi
+    
+    local savings_html=$(curl -s -u "${DASHBOARD_BASIC_USER:-admin}:${DASHBOARD_BASIC_PASSWORD:-admin}" "$BASE_URL/dashboard/savings")
+    if echo "$savings_html" | grep -q "Cost Savings"; then
+        log_pass "Savings dashboard loads"
+    else
+        log_fail "Savings dashboard failed"
+    fi
+    
+    stop_server
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 main() {
     echo ""
-    echo "╔══════════════════════════════════════════════════════════════════╗"
-    echo "║  Automated Integration Tests: S-07b & S-09 (Categories + LLM)   ║"
-    echo "╚══════════════════════════════════════════════════════════════════╝"
+    echo "╔════════════════════════════════════════════════════════════════════╗"
+    echo "║  Cerebrum Full Integration Tests (Categories + LLM + Persistence) ║"
+    echo "╚════════════════════════════════════════════════════════════════════╝"
     echo ""
     
     # Check prerequisites
@@ -798,7 +1092,9 @@ main() {
     # Build once
     build_server
     
-    # Run S-07b tests (category config)
+    # -------------------------------------------------------------------------
+    # S-07b & S-09: Category Config & LLM Classifier tests
+    # -------------------------------------------------------------------------
     test_hardcoded_defaults
     test_threshold_override
     test_partial_categories
@@ -806,17 +1102,20 @@ main() {
     test_combined_config
     test_field_integrity
     test_negative_suppression
+    test_llm_classifier_enabled
+    test_llm_classifier_disabled
+    test_ambiguous_prompt
+    test_regex_classifier_disabled
+    test_no_classifier_fallback
     
-    # Run S-09 tests (LLM classifier)
-     test_llm_classifier_enabled
-     test_llm_classifier_disabled
-     test_ambiguous_prompt
-     
-     # Run new tests for regex classifier enable/disable toggle (scope extension)
-     test_regex_classifier_disabled
-     test_no_classifier_fallback
-     
-     # Summary
+    # -------------------------------------------------------------------------
+    # Three-Tier Persistence tests (memory, sqlite, postgres)
+    # -------------------------------------------------------------------------
+     test_memory_backend_default
+     test_sqlite_backend_and_persistence
+     test_postgres_backend
+    
+    # Summary
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     local total=$((PASS + FAIL))
