@@ -835,11 +835,11 @@ Phase 4–6: Minor — `PatternMeta.category` changes from `&'static str` to `St
 
 #### Automated
 
-- [x] 5.1 `cargo build --release` compiles without errors
-- [x] 5.2 `cargo test` — all tests pass
-- [x] 5.3 `cargo test auth` — auth tests pass
-- [x] 5.4 `cargo test routes_auth` — route auth tests pass
-- [x] 5.5 Zero hardcoded category name strings in engine code
+- [x] 5.1 `cargo build --release` compiles without errors — 13c72c2
+- [x] 5.2 `cargo test` — all tests pass — 13c72c2
+- [x] 5.3 `cargo test auth` — auth tests pass — 13c72c2
+- [x] 5.4 `cargo test routes_auth` — route auth tests pass — 13c72c2
+- [x] 5.5 Zero hardcoded category name strings in engine code — 13c72c2
 
 #### Manual
 
@@ -850,15 +850,15 @@ Phase 4–6: Minor — `PatternMeta.category` changes from `&'static str` to `St
 
 #### Automated
 
-- [ ] 6.1 `cargo test` — all tests pass
-- [ ] 6.2 `cargo test auth` — auth tests pass
-- [ ] 6.3 `cargo test routes_auth` — route auth tests pass
-- [ ] 6.4 `cargo build --release` builds cleanly
-- [ ] 6.5 No `hardcoded_categories()` calls anywhere
-- [ ] 6.6 No `SHORT_PROMPT_LEN`, `FR_WEIGHTS`, etc. references
+- [x] 6.1 `cargo test` — all tests pass
+- [x] 6.2 `cargo test auth` — auth tests pass
+- [x] 6.3 `cargo test routes_auth` — route auth tests pass
+- [x] 6.4 `cargo build --release` builds cleanly
+- [x] 6.5 No `hardcoded_categories()` calls anywhere
+- [x] 6.6 No `SHORT_PROMPT_LEN`, `FR_WEIGHTS`, etc. references
 
 #### Manual
 
-- [ ] 6.7 App starts with only secrets as env vars, classifier initializes
+- [x] 6.7 App starts with only secrets as env vars, classifier initializes
 - [ ] 6.8 `/v1/classify` returns correct category for test prompts
 - [ ] 6.9 Custom `CONFIG_PATH` overlay classification verified

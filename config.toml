@@ -50,8 +50,7 @@ short_prompt_len = 30
 # prompt_template_path = "path/to/prompt.txt"
 # timeout_secs = 3
 
-[[categories]]
-name = "FILE_READING"
+[categories.FILE_READING]
 description = "Reading, viewing, inspecting, searching, or navigating files or code"
 threshold = 3
 priority = 1
@@ -70,8 +69,7 @@ patterns = [
   { regex = '(?i)\b(?:around\s+line|near\s+line|before\s+line|after\s+line)', weight = 1 },
 ]
 
-[[categories]]
-name = "SYNTAX_FIX"
+[categories.SYNTAX_FIX]
 description = "Fixing bugs, errors, typos, compilation issues, or broken code"
 threshold = 3
 priority = 2
@@ -90,8 +88,7 @@ patterns = [
   { regex = '(?i)\b(?:error[:;].{0,40}\b(?:\d+|E\d{4}|0x[0-9a-fA-F]+)\b)', weight = 1 },
 ]
 
-[[categories]]
-name = "COMPLEX_REASONING"
+[categories.COMPLEX_REASONING]
 description = "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization"
 threshold = 3
 priority = 3
@@ -114,8 +111,7 @@ patterns = [
   { regex = '(?i)\b(?:resilien(?:t|ce)|fault\s+toleran|circuit\s+breaker|retry\s+strategy)', weight = 1 },
 ]
 
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple questions, greetings, general conversation, or short prompts"
 threshold = 1
 priority = 4
@@ -147,31 +143,31 @@ regex = '(?i)\b(?:explain|describe|tell\s+me\s+about|what\s+do\s+you\s+think\s+a
 suppressed = "FILE_READING"
 penalty = 2
 
-[FILE_READING]
+[routing.FILE_READING]
 model = "meta/llama-3.1-70b-instruct"
 endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
-[SYNTAX_FIX]
+[routing.SYNTAX_FIX]
 model = "meta/llama-3.1-8b-instruct"
 endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
-[COMPLEX_REASONING]
+[routing.COMPLEX_REASONING]
 model = "meta/llama-3.3-70b-instruct"
 endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
-[CASUAL]
+[routing.CASUAL]
 model = "meta/llama-3.1-8b-instruct"
 endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
-[DEFAULT]
+[routing.DEFAULT]
 model = "meta/llama-3.1-8b-instruct"
 endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 provider_type = "nvidia_nim"

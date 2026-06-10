@@ -70,16 +70,17 @@ async fn main() {
                             .map(|t| {
                                 t.keys()
                                     .filter(|k| {
-                                        k.chars().all(|c| c.is_uppercase() || c == '_')
-                                            || matches!(
-                                                k.as_str(),
-                                                "classifiers"
-                                                    | "regex_classifier"
-                                                    | "llm_classifier"
-                                                    | "categories"
-                                                    | "auth_provider"
-                                                    | "model_costs"
-                                            )
+                                        matches!(
+                                            k.as_str(),
+                                            "classifiers"
+                                                | "regex_classifier"
+                                                | "llm_classifier"
+                                                | "categories"
+                                                | "auth_provider"
+                                                | "model_costs"
+                                                | "routing"
+                                                | "negative_patterns"
+                                        )
                                     })
                                     .map(|k| k.as_str())
                                     .collect()

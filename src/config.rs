@@ -496,11 +496,12 @@ pub(crate) fn load_routing_from_file(path: &str) -> Result<HashMap<String, Route
     let table = root
         .as_table()
         .ok_or_else(|| format!("Root must be a table in {}", path))?;
+    let routing_table = match table.get("routing") {
+        Some(toml::Value::Table(t)) => t,
+        _ => return Err("File must contain a [routing] section".to_string()),
+    };
     let mut routing = HashMap::new();
-    for (key, value) in table {
-        if key == "fallback" || key == "categories" {
-            continue;
-        }
+    for (key, value) in routing_table {
         let model = if let Some(m) = value.get("model").and_then(|v| v.as_str()) {
             m.to_string()
         } else {
@@ -578,7 +579,8 @@ pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
 }
 
 /// Build routing map and fallback entry from a parsed TOML value.
-/// Returns (routing map, fallback entry). If the root is not a table, returns error.
+/// Reads from the `[routing]` section. Returns (routing map, fallback entry).
+/// Returns an error only if the `[routing]` section exists but is not a table.
 pub(crate) fn routing_from_value(
     root: &toml::Value,
 ) -> Result<(HashMap<String, RouteEntry>, RouteEntry), String> {
@@ -586,8 +588,24 @@ pub(crate) fn routing_from_value(
         .as_table()
         .ok_or_else(|| "Root must be a table".to_string())?;
 
+    let routing_table = match table.get("routing") {
+        Some(toml::Value::Table(t)) => t,
+        Some(_) => return Err("'routing' config section must be a table".to_string()),
+        None => {
+            debug!("[routing] section not found; no routing entries configured");
+            let fallback = RouteEntry {
+                model: DEFAULT_MODEL.to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            };
+            return Ok((HashMap::new(), fallback));
+        }
+    };
+
     // Pre-extract the DEFAULT entry's model for missing-field fallbacks
-    let default_model = table
+    let default_model = routing_table
         .get("DEFAULT")
         .and_then(|v| v.get("model"))
         .and_then(|v| v.as_str())
@@ -595,10 +613,7 @@ pub(crate) fn routing_from_value(
         .to_string();
 
     let mut routing = HashMap::new();
-    for (key, value) in table {
-        if key == "fallback" || key == "categories" {
-            continue;
-        }
+    for (key, value) in routing_table {
         let model = if let Some(m) = value.get("model").and_then(|v| v.as_str()) {
             m.to_string()
         } else {
@@ -647,6 +662,7 @@ pub(crate) fn routing_from_value(
 }
 
 /// Load categories from a parsed toml::Value.
+/// Reads from the `[categories]` table where each key is the category name.
 pub(crate) fn load_categories_from_value(
     root: &toml::Value,
 ) -> Result<Vec<CategoryConfig>, String> {
@@ -654,26 +670,19 @@ pub(crate) fn load_categories_from_value(
         .as_table()
         .ok_or_else(|| "Root must be a table".to_string())?;
 
-    let cats_array = match table.get("categories") {
-        Some(toml::Value::Array(arr)) => arr,
-        _ => return Err("No [[categories]] section found".to_string()),
+    let cats_table = match table.get("categories") {
+        Some(toml::Value::Table(t)) => t,
+        _ => return Err("No [categories] section found".to_string()),
     };
 
     let mut categories = Vec::new();
     let mut errors = Vec::new();
 
-    for (i, cat) in cats_array.iter().enumerate() {
-        let t = match cat.as_table() {
+    for (name, cat_value) in cats_table {
+        let t = match cat_value.as_table() {
             Some(t) => t,
             None => {
-                errors.push(format!("categories[{}] is not a table", i));
-                continue;
-            }
-        };
-        let name = match t.get("name").and_then(|v| v.as_str()) {
-            Some(n) => n.to_string(),
-            None => {
-                errors.push(format!("categories[{}]: missing 'name'", i));
+                errors.push(format!("categories['{name}'] is not a table"));
                 continue;
             }
         };
@@ -727,7 +736,7 @@ pub(crate) fn load_categories_from_value(
         });
 
         categories.push(CategoryConfig {
-            name,
+            name: name.clone(),
             description,
             threshold,
             priority,
@@ -1087,20 +1096,20 @@ mod tests {
     fn load_routing_from_file_success() {
         // Create temporary TOML content
         let toml_content = r#"
-[SYNTAX_FIX]
+[routing.SYNTAX_FIX]
 model = "test-sf-model"
 endpoint = "https://test.endpoint"
 provider_type = "openai_compatible"
 api_key_env = "TEST_API_KEY"
 cost_per_1m_input_tokens = 1.23
 
-[COMPLEX_REASONING]
+[routing.COMPLEX_REASONING]
 model = "test-cr-model"
 endpoint = "https://test.cr"
 provider_type = "openai_compatible"
 api_key_env = "TEST_API_KEY_CR"
 
-[fallback]
+[routing.DEFAULT]
 model = "test-fallback"
 endpoint = ""
 provider_type = ""
@@ -1114,7 +1123,7 @@ api_key_env = ""
         assert!(result.is_ok(), "load_routing_from_file should succeed");
         let routing = result.unwrap();
 
-        assert_eq!(routing.len(), 2);
+        assert_eq!(routing.len(), 3);
         assert_eq!(routing.get("SYNTAX_FIX").unwrap().model, "test-sf-model");
         assert_eq!(
             routing.get("SYNTAX_FIX").unwrap().endpoint,
@@ -1205,13 +1214,13 @@ api_key_env = ""
     fn load_routing_behavior() {
         // 1. When CONFIG_PATH points to a valid file, load_routing returns parsed routing and fallback
         let toml_content = r#"
-[SYNTAX_FIX]
+[routing.SYNTAX_FIX]
 model = "file-sf-model"
 endpoint = "https://file.endpoint"
 provider_type = "openai_compatible"
 api_key_env = "FILE_API_KEY"
 
-[DEFAULT]
+[routing.DEFAULT]
 model = "file-fallback"
 endpoint = ""
 provider_type = ""
@@ -1311,8 +1320,7 @@ api_key_env = ""
     fn load_regex_classifier_config_default_enabled() {
         // Section absent → default enabled
         let toml_content = r#"
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple"
 threshold = 1
 priority = 1
@@ -1331,8 +1339,7 @@ priority = 1
 [regex_classifier]
 enabled = false
 
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple"
 threshold = 1
 priority = 1
@@ -1362,8 +1369,7 @@ api_key_env = "MY_API_KEY"
 provider_type = "openai_compatible"
 timeout_secs = 5
 
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple"
 threshold = 1
 priority = 1
@@ -1385,8 +1391,7 @@ priority = 1
     #[test]
     fn load_llm_classifier_config_missing() {
         let toml_content = r#"
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple"
 threshold = 1
 priority = 1
@@ -1406,8 +1411,7 @@ priority = 1
 enabled = false
 model = "gpt-4o-mini"
 
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple"
 threshold = 1
 priority = 1
@@ -1426,8 +1430,7 @@ priority = 1
 [llm_classifier]
 enabled = true
 
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple"
 threshold = 1
 priority = 1
@@ -1448,8 +1451,7 @@ priority = 1
     fn load_classifiers_config_defaults_when_missing() {
         // Section absent → default values
         let toml_content = r#"
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple"
 threshold = 1
 priority = 1
@@ -1467,8 +1469,7 @@ priority = 1
 enabled = false
 order = ["llm", "regex"]
 
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple"
 threshold = 1
 priority = 1
@@ -1486,8 +1487,7 @@ priority = 1
 enabled = true
 order = ["llm"]
 
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple"
 threshold = 1
 priority = 1

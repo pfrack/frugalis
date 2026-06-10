@@ -1146,4 +1146,176 @@ mod tests {
         assert!(prompt.contains("CASUAL"));
         assert!(prompt.contains("Examples:"));
     }
+
+    // ── Engine-generality tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_engine_works_with_custom_categories() {
+        let cats = vec![
+            CategoryConfig {
+                name: "DATABASE".to_string(),
+                description: "Database queries, schema migrations, SQL optimization".to_string(),
+                threshold: 2,
+                priority: 1,
+                patterns: vec![PatternEntry {
+                    regex: r"(?i)\b(?:select|insert|update|delete|create\s+table|alter|drop)\b".to_string(),
+                    weight: 2,
+                }],
+                dual_threshold: None,
+            },
+            CategoryConfig {
+                name: "DEPLOYMENT".to_string(),
+                description: "Deploy, CI/CD, Docker, Kubernetes".to_string(),
+                threshold: 2,
+                priority: 2,
+                patterns: vec![PatternEntry {
+                    regex: r"(?i)\b(?:deploy|docker|kubernetes|ci/cd|pipeline)\b".to_string(),
+                    weight: 2,
+                }],
+                dual_threshold: None,
+            },
+        ];
+        let neg = vec![];
+        let mut routing = HashMap::new();
+        routing.insert(
+            "DATABASE".to_string(),
+            RouteEntry {
+                model: "db-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
+        routing.insert(
+            "DEPLOYMENT".to_string(),
+            RouteEntry {
+                model: "dep-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
+        let fallback = RouteEntry {
+            model: "fb-model".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
+        let result = c.classify("SELECT * FROM users").await;
+        assert_eq!(result.category, "DATABASE");
+        assert_eq!(result.tier, ClassificationTier::Regex);
+    }
+
+    #[tokio::test]
+    async fn test_engine_works_with_custom_dual_threshold() {
+        let cats = vec![
+            CategoryConfig {
+                name: "ALPHA".to_string(),
+                description: "Alpha category".to_string(),
+                threshold: 3,
+                priority: 1,
+                patterns: vec![PatternEntry {
+                    regex: r"(?i)\balpha\b".to_string(),
+                    weight: 3,
+                }],
+                dual_threshold: Some(DualThreshold {
+                    alt_score: 2,
+                    suppress_if_present: "BETA".to_string(),
+                }),
+            },
+            CategoryConfig {
+                name: "BETA".to_string(),
+                description: "Beta category".to_string(),
+                threshold: 1,
+                priority: 2,
+                patterns: vec![PatternEntry {
+                    regex: r"(?i)\bbeta\b".to_string(),
+                    weight: 1,
+                }],
+                dual_threshold: None,
+            },
+        ];
+        let neg = vec![];
+        let mut routing = HashMap::new();
+        routing.insert("ALPHA".to_string(), RouteEntry {
+            model: "a".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None,
+        });
+        routing.insert("BETA".to_string(), RouteEntry {
+            model: "b".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None,
+        });
+        let fallback = RouteEntry {
+            model: "fb".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None,
+        };
+        let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
+        // "alpha beta" gives ALPHA score=3 (meets threshold=3), BETA score=1 (meets threshold=1)
+        // Dual threshold: ALPHA alt_score=2, suppress_if_present=BETA
+        // ALPHA: score=3 >= alt_score=2 → met
+        // BETA: score=1 >= threshold=1 → met
+        // With both met, fallback to lowest priority (BETA)
+        let result = c.classify("alpha beta").await;
+        assert_eq!(result.category, "BETA");
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+    }
+
+    #[tokio::test]
+    async fn test_engine_works_with_no_categories() {
+        let cats = vec![];
+        let neg = vec![];
+        let routing = HashMap::new();
+        let fallback = RouteEntry {
+            model: "fb".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None,
+        };
+        let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
+        let result = c.classify("anything").await;
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+    }
+
+    #[tokio::test]
+    async fn test_engine_works_with_custom_negative_patterns() {
+        let cats = vec![
+            CategoryConfig {
+                name: "CODING".to_string(),
+                description: "Coding questions".to_string(),
+                threshold: 2,
+                priority: 1,
+                patterns: vec![PatternEntry {
+                    regex: r"(?i)\b(?:code|program|function)\b".to_string(),
+                    weight: 2,
+                }],
+                dual_threshold: None,
+            },
+            CategoryConfig {
+                name: "GENERAL".to_string(),
+                description: "General questions".to_string(),
+                threshold: 1,
+                priority: 2,
+                patterns: vec![],
+                dual_threshold: None,
+            },
+        ];
+        let neg = vec![
+            NegativePatternConfig {
+                regex: r"(?i)\bcode\b".to_string(),
+                suppressed: "CODING".to_string(),
+                penalty: 3,
+            },
+        ];
+        let mut routing = HashMap::new();
+        routing.insert("CODING".to_string(), RouteEntry {
+            model: "c".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None,
+        });
+        let fallback = RouteEntry {
+            model: "fb".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None,
+        };
+        let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
+        // "code" matches CODING pattern (score=2), but negative pattern penalizes CODING by 3 → score=0
+        // CODING threshold=2 not met → fallback to GENERAL
+        let result = c.classify("write some code").await;
+        assert_eq!(result.category, "GENERAL");
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+    }
 }
