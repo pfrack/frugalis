@@ -12,9 +12,10 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use tokio::sync::RwLock;
 use tokio_stream::{Stream, StreamExt};
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod auth;
@@ -43,15 +44,68 @@ pub struct AppState {
     streaming_channel_capacity: usize,
     dashboard_config: config::DashboardConfig,
     auth_providers: Arc<Vec<config::AuthProviderConfig>>,
+    allowed_origins: Arc<RwLock<Vec<String>>>,
 }
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing subscriber before any other code.
-    let log_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Parse config before tracing init to get server settings
+    let config_path_option = std::env::var("CONFIG_PATH").ok();
+    const DEFAULT_CONFIG_TOML: &str = include_str!("../config.toml");
+    let mut config_root = match toml::from_str::<toml::Value>(DEFAULT_CONFIG_TOML) {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("Embedded config.toml is invalid: {e}; using hardcoded defaults");
+            toml::Value::Table(Default::default())
+        }
+    };
 
-    let fmt_layer = match std::env::var("LOG_FORMAT").as_deref() {
-        Ok("json") => fmt::layer().json().with_filter(log_filter).boxed(),
+    if let Some(config_path) = config_path_option {
+        match std::fs::read_to_string(&config_path) {
+            Ok(content) => {
+                match toml::from_str::<toml::Value>(&content) {
+                    Ok(overlay) => {
+                        let override_keys: std::collections::HashSet<&str> = overlay
+                            .as_table()
+                            .map(|t| {
+                                t.keys()
+                                    .filter(|k| {
+                                        k.chars().all(|c| c.is_uppercase() || c == '_')
+                                            || matches!(
+                                                k.as_str(),
+                                                "classifiers"
+                                                    | "regex_classifier"
+                                                    | "llm_classifier"
+                                                    | "categories"
+                                                    | "auth_provider"
+                                                    | "model_costs"
+                                            )
+                                    })
+                                    .map(|k| k.as_str())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        config::merge_toml_values(&mut config_root, &overlay, &override_keys);
+                    }
+                    Err(e) => {
+                        eprintln!("failed to parse config file at {}: {}; using embedded defaults", config_path, e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("failed to read config file at {}: {}; using embedded defaults", config_path, e);
+            }
+        }
+    }
+
+    let server_config = config::load_server_config_from_value(&config_root);
+
+    // Initialize tracing using server_config with RUST_LOG override
+    let log_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&server_config.log_level));
+
+    let fmt_layer = match server_config.log_format.as_str() {
+        "json" => fmt::layer().json().with_filter(log_filter).boxed(),
         _ => fmt::layer().compact().with_filter(log_filter).boxed(),
     };
 
@@ -66,38 +120,6 @@ async fn main() {
         panic!("Auth configuration error: {err}");
     });
     let auth_config = Arc::new(auth_config);
-
-    let config_path_option = std::env::var("CONFIG_PATH").ok();
-
-    // Embed config.toml as default
-    const DEFAULT_CONFIG_TOML: &str = include_str!("../config.toml");
-    let mut config_root = match toml::from_str::<toml::Value>(DEFAULT_CONFIG_TOML) {
-        Ok(root) => root,
-        Err(e) => {
-            error!("Embedded config.toml is invalid: {e}; using hardcoded defaults");
-            toml::Value::Table(Default::default())
-        }
-    };
-
-    // Merge CONFIG_PATH overlay if provided
-    if let Some(config_path) = config_path_option {
-        match std::fs::read_to_string(&config_path) {
-            Ok(content) => {
-                match toml::from_str::<toml::Value>(&content) {
-                    Ok(overlay) => {
-                        config::merge_toml_values(&mut config_root, &overlay);
-                        info!("Merged config from {}", config_path);
-                    }
-                    Err(e) => {
-                        warn!("failed to parse config file at {}: {}; using embedded defaults", config_path, e);
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("failed to read config file at {}: {}; using embedded defaults", config_path, e);
-            }
-        }
-    }
 
     let regex_config = config::load_regex_classifier_config_from_value(&config_root);
 
@@ -120,88 +142,109 @@ async fn main() {
         .unwrap_or(false);
     let auth_providers = Arc::new(config::load_auth_providers_from_value(&config_root));
      let (classifier, routing, model_costs, baseline_model) = {
-        let categories = config::load_categories_from_value(&config_root)
-            .unwrap_or_else(|_| intent_classifier::hardcoded_categories());
-        let (routing_map, fallback_entry) = match config::routing_from_value(&config_root) {
-            Ok((map, fallback)) => (map, fallback),
-            Err(e) => {
-                warn!(
-                    "routing config parsing failed: {}; using hardcoded routing defaults",
-                    e
-                );
-                config::hardcoded_routing(&categories)
-            }
-        };
-        let model_costs = config::build_model_costs(&config_root, &routing_map);
-        let baseline_model = config_root
-            .get("baseline_model")
-            .and_then(|v| v.as_str())
-            .unwrap_or(intent_classifier::DEFAULT_MODEL_COMPLEX)
-            .to_string();
-        if !classifiers_config.enabled {
-            info!("All classifiers disabled via config");
-            (None, HashMap::new(), model_costs, baseline_model)
-        } else {
-            let mut backends: Vec<Arc<dyn intent_classifier::IntentClassify + Send + Sync>> =
-                Vec::new();
+             let categories_res = config::load_categories_from_value(&config_root);
+             let categories_ok = categories_res.is_ok();
+             let mut categories = match categories_res {
+                 Ok(c) => c,
+                 Err(_) => intent_classifier::hardcoded_categories(),
+             };
 
-            for name in &classifiers_config.order {
-                match name.as_str() {
-                     "regex" => {
-                         if regex_config.enabled {
-                             match intent_classifier::RegexClassifier::from_env(
-                                 routing_map.clone(),
-                                 fallback_entry.clone(),
-                                 intent_classifier::SHORT_PROMPT_LEN,
-                                 categories.clone(),
-                             ) {
-                                 Ok(c) => {
-                                     info!("Regex classifier initialized");
-                                     backends.push(Arc::new(c));
+             let (mut routing_map, mut fallback_entry) = match config::routing_from_value(&config_root) {
+                 Ok((map, fallback)) => (map, fallback),
+                 Err(e) => {
+                     warn!("routing config parsing failed: {}; using hardcoded routing defaults", e);
+                     config::hardcoded_routing(&categories)
+                 }
+             };
+
+             // Validate that all custom categories have corresponding routing entries.
+             // If any category missing, fall back to hardcoded categories and matching routing.
+             if categories_ok {
+                 let mut missing = Vec::new();
+                 for cat in &categories {
+                     if !routing_map.contains_key(&cat.name.to_uppercase()) {
+                         missing.push(cat.name.clone());
+                     }
+                 }
+                 if !missing.is_empty() {
+                     warn!("Categories {:?} missing routing entries; falling back to hardcoded categories and routing", missing);
+                     categories = intent_classifier::hardcoded_categories();
+                     let (new_map, new_fallback) = config::hardcoded_routing(&categories);
+                     routing_map = new_map;
+                     fallback_entry = new_fallback;
+                 }
+             }
+
+             let model_costs = config::build_model_costs(&config_root, &routing_map);
+             let baseline_model = config_root
+                 .get("baseline_model")
+                 .and_then(|v| v.as_str())
+                 .unwrap_or(intent_classifier::DEFAULT_MODEL_COMPLEX)
+                 .to_string();
+             if !classifiers_config.enabled {
+                 info!("All classifiers disabled via config");
+                 (None, HashMap::new(), model_costs, baseline_model)
+             } else {
+                 let mut backends: Vec<Arc<dyn intent_classifier::IntentClassify + Send + Sync>> =
+                     Vec::new();
+
+                 for name in &classifiers_config.order {
+                     match name.as_str() {
+                         "regex" => {
+                             if regex_config.enabled {
+                                 match intent_classifier::RegexClassifier::from_env(
+                                     routing_map.clone(),
+                                     fallback_entry.clone(),
+                                     intent_classifier::SHORT_PROMPT_LEN,
+                                     categories.clone(),
+                                 ) {
+                                     Ok(c) => {
+                                         info!("Regex classifier initialized");
+                                         backends.push(Arc::new(c));
+                                     }
+                                     Err(e) => {
+                                         warn!("RegexClassifier disabled: {e}");
+                                     }
                                  }
-                                 Err(e) => {
-                                     warn!("RegexClassifier disabled: {e}");
-                                 }
+                             } else {
+                                 info!("Regex classifier disabled");
                              }
-                         } else {
-                             info!("Regex classifier disabled");
+                         }
+                         "llm" => {
+                             if let Some(llm_config) = config::load_llm_classifier_config_from_value(&config_root) {
+                                 let llm = intent_classifier::LLMClassifier::new(
+                                     llm_config,
+                                     http_client.clone(),
+                                     categories.clone(),
+                                     auth_providers.clone(),
+                                 );
+                                 info!(
+                                     "LLM classifier enabled: model={}, endpoint={}",
+                                     llm.model, llm.endpoint
+                                 );
+                                 backends.push(Arc::new(llm));
+                             }
+                         }
+                         unknown => {
+                             warn!("unknown classifier in order: '{unknown}'");
                          }
                      }
-                    "llm" => {
-                        if let Some(llm_config) = config::load_llm_classifier_config_from_value(&config_root) {
-                            let llm = intent_classifier::LLMClassifier::new(
-                                llm_config,
-                                http_client.clone(),
-                                categories.clone(),
-                                auth_providers.clone(),
-                            );
-                            info!(
-                                "LLM classifier enabled: model={}, endpoint={}",
-                                llm.model, llm.endpoint
-                            );
-                            backends.push(Arc::new(llm));
-                        }
-                    }
-                    unknown => {
-                        warn!("unknown classifier in order: '{unknown}'");
-                    }
-                }
-            }
+                 }
 
-            if backends.is_empty() {
-                warn!("no classifier backends enabled");
-                (None, HashMap::new(), model_costs, baseline_model)
-            } else {
-                let chain = intent_classifier::ClassifierChain::new(backends);
-                let mut merged_routing = HashMap::new();
-                for backend in chain.backends().iter() {
-                    if let Some(r) = backend.get_routing() {
-                        merged_routing.extend(r.clone());
-                    }
-                }
-                (Some(Arc::new(chain)), merged_routing, model_costs, baseline_model)
-            }
-        }
+                 if backends.is_empty() {
+                     warn!("no classifier backends enabled");
+                     (None, HashMap::new(), model_costs, baseline_model)
+                 } else {
+                     let chain = intent_classifier::ClassifierChain::new(backends);
+                     let mut merged_routing = HashMap::new();
+                     for backend in chain.backends().iter() {
+                         if let Some(r) = backend.get_routing() {
+                             merged_routing.extend(r.clone());
+                         }
+                     }
+                     (Some(Arc::new(chain)), merged_routing, model_costs, baseline_model)
+                 }
+             }
     };
 
     let db_config = config::load_database_config_from_value(&config_root);
@@ -259,6 +302,9 @@ async fn main() {
         }
     };
 
+    let cors_config = config::load_cors_config_from_value(&config_root);
+     let allowed_origins = Arc::new(RwLock::new(cors_config.allowed_origins));
+
     let app_state = Arc::new(AppState {
         persistence: persistence_state,
         classifier,
@@ -273,13 +319,10 @@ async fn main() {
         streaming_channel_capacity: http_config.streaming_channel_capacity,
         dashboard_config: config::load_dashboard_config_from_value(&config_root),
         auth_providers,
+        allowed_origins,
     });
 
-    let server_config = config::load_server_config_from_value(&config_root);
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(server_config.port);
+    let port = server_config.port;
 
     let app = build_app(auth_config, app_state);
     let bind_addr = format!("0.0.0.0:{port}");
@@ -799,13 +842,14 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
 
     let dashboard_routes = dashboard::routes(auth_config);
 
-    // Build CORS layer from ALLOWED_ORIGINS env (comma-separated). If empty, no CORS headers (secure default).
-    let allowed_origin_headers: Vec<HeaderValue> = std::env::var("ALLOWED_ORIGINS")
-        .unwrap_or_default()
-        .split(',')
-        .filter(|s| !s.trim().is_empty())
-        .filter_map(|s| header::HeaderValue::from_str(s.trim()).ok())
-        .collect();
+    // Build CORS layer from [cors].allowed_origins in config.toml. If empty, no CORS headers (secure default).
+     let allowed_origin_headers: Vec<HeaderValue> = app_state
+         .allowed_origins
+         .try_read()
+         .unwrap()
+         .iter()
+         .filter_map(|s| header::HeaderValue::from_str(s).ok())
+         .collect();
 
     let cors_layer = if allowed_origin_headers.is_empty() {
         CorsLayer::new()
@@ -853,6 +897,7 @@ mod tests {
         http_client: Option<reqwest::Client>,
         model_costs: intent_classifier::ModelCosts,
         baseline_model: String,
+        max_upstream_body_bytes: usize,
     ) -> Arc<AppState> {
         let classifier_chain = intent_classifier::ClassifierChain::new(vec![Arc::new(classifier)]);
         let classifier_arc = Some(Arc::new(classifier_chain));
@@ -872,17 +917,13 @@ mod tests {
             baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
             classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client,
-            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(
-                std::env::var("MAX_UPSTREAM_BODY_BYTES")
-                    .ok()
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(10_485_760),
-            )),
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(max_upstream_body_bytes)),
             keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
             request_body_limit_bytes: 10_485_760,
             streaming_channel_capacity: 32,
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
+            allowed_origins: Arc::new(RwLock::new(vec![])),
         })
     }
 
@@ -908,6 +949,7 @@ mod tests {
             streaming_channel_capacity: 32,
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
+            allowed_origins: Arc::new(RwLock::new(vec![])),
         });
         build_app(auth_config, app_state)
     }
@@ -956,6 +998,7 @@ mod tests {
             None,
             intent_classifier::ModelCosts::empty(),
             String::new(),
+            10_485_760,
         );
         build_app(auth_config, app_state)
     }
@@ -1036,18 +1079,10 @@ mod tests {
     #[serial]
     async fn test_max_upstream_body_bytes_truncation() {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        struct EnvGuard(&'static str);
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                std::env::remove_var(self.0);
-            }
-        }
-        let _guard1 = EnvGuard("MAX_UPSTREAM_BODY_BYTES");
         let _guard2 = EnvGuard("TEST_API_KEY");
-        // Set limit to 1.1MB (above 1MB min) and send response > limit to trigger truncation
-        std::env::set_var("MAX_UPSTREAM_BODY_BYTES", "1100000");
+        // Set limit to 1.1MB and send response > limit to trigger truncation
         std::env::set_var("TEST_API_KEY", "sk-test");
-        let (app, server) = test_app_with_http_client("TEST_API_KEY");
+        let (app, server) = test_app_with_http_client("TEST_API_KEY", 1_100_000);
         let large_content = "x".repeat(2_000_000); // 2MB payload
         let body = format!("{{\"choices\":[{{\"message\":{{\"content\":\"{large_content}\"}}}}]}}");
         let mock = server.mock(|when, then| {
@@ -1126,6 +1161,7 @@ mod tests {
             None,
             intent_classifier::ModelCosts::empty(),
             String::new(),
+            10_485_760,
         );
         build_app(auth_config, app_state)
     }
@@ -1705,7 +1741,7 @@ mod tests {
 
     // ── Upstream routing tests ────────────────────────────────────────────────
 
-    pub(crate) fn test_app_with_http_client(env_var_name: &str) -> (Router, httpmock::MockServer) {
+    pub(crate) fn test_app_with_http_client(env_var_name: &str, max_upstream_body_bytes: usize) -> (Router, httpmock::MockServer) {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
         let cats = intent_classifier::hardcoded_categories();
@@ -1755,6 +1791,7 @@ mod tests {
             Some(client),
             intent_classifier::ModelCosts::empty(),
             String::new(),
+            max_upstream_body_bytes,
         );
         let app = build_app(auth_config, app_state);
         (app, server)
@@ -1823,18 +1860,6 @@ mod tests {
                 }
             }
         }
-        let max_upstream_body_bytes = config::parse_env_int(
-            "MAX_UPSTREAM_BODY_BYTES",
-            10_485_760,
-            Some(1_048_576),
-            Some(100_485_760),
-        );
-        let keepalive_interval_secs = config::parse_env_int(
-            "KEEPALIVE_INTERVAL_SECS",
-            15,
-            Some(1),
-            None,
-        );
         let pool_owned = pool;
         let pg_backend = persistence::PostgresBackend { pool: (*pool_owned).clone() };
         let app_state = Arc::new(AppState {
@@ -1848,12 +1873,13 @@ mod tests {
             baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
             classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client: Some(client),
-            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(max_upstream_body_bytes as usize)),
-            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(keepalive_interval_secs as u64)),
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(10_485_760)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
             request_body_limit_bytes: 10_485_760,
             streaming_channel_capacity: 32,
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
+            allowed_origins: Arc::new(RwLock::new(vec![])),
         });
         let app = build_app(auth_config, app_state);
         (app, server)
@@ -1907,6 +1933,7 @@ mod tests {
             Some(client),
             intent_classifier::ModelCosts::empty(),
             String::new(),
+            10_485_760,
         );
         build_app(auth_config, app_state)
     }
@@ -1917,7 +1944,7 @@ mod tests {
         let env = "TEST_UPSTREAM_RESP";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
             then.status(200)
@@ -1957,7 +1984,7 @@ mod tests {
         let env = "TEST_UPSTREAM_AUTH";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST")
                 .path("/v1/chat/completions")
@@ -1991,7 +2018,7 @@ mod tests {
         let env = "TEST_UPSTREAM_CT";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST")
                 .path("/v1/chat/completions")
@@ -2058,7 +2085,7 @@ mod tests {
         let env = "TEST_UPSTREAM_SKIP";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
             then.status(200)
@@ -2102,7 +2129,7 @@ mod tests {
         let env = "TEST_STREAM_CT";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let sse_body =
             "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n";
         let mock = server.mock(|when, then| {
@@ -2156,7 +2183,7 @@ mod tests {
     async fn test_streaming_handler_forwards_upstream_bytes() {
         let env = "TEST_STREAM_FWD";
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let sse_chunks = "data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\ndata: [DONE]\n\n";
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
@@ -2204,7 +2231,7 @@ mod tests {
     async fn test_streaming_handler_non_2xx_returns_sse_error_event() {
         let env = "TEST_STREAM_ERR";
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
             then.status(503)
@@ -2244,7 +2271,7 @@ mod tests {
         let env = "TEST_STREAM_TSSE";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
             then.status(200)
@@ -2285,7 +2312,7 @@ mod tests {
         let env = "TEST_STREAM_FJSON";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
             then.status(200)
@@ -2326,7 +2353,7 @@ mod tests {
         let env = "TEST_STREAM_AJSON";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
             then.status(200)
@@ -2611,8 +2638,6 @@ mod slow_tests {
     #[serial]
     async fn test_streaming_keepalive_injected() {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        std::env::set_var("KEEPALIVE_INTERVAL_SECS", "1");
-        let _guard_ka = EnvGuard("KEEPALIVE_INTERVAL_SECS");
         let (url, server_handle) = spawn_slow_sse_server().await;
         let env = "TEST_STREAM_KA_SLOW";
         let _guard = EnvGuard(env);
@@ -2657,18 +2682,6 @@ mod slow_tests {
                 }
             }
         }
-        let max_upstream_body_bytes = config::parse_env_int(
-            "MAX_UPSTREAM_BODY_BYTES",
-            10_485_760,
-            Some(1_048_576),
-            Some(100_485_760),
-        );
-        let keepalive_interval_secs = config::parse_env_int(
-            "KEEPALIVE_INTERVAL_SECS",
-            15,
-            Some(1),
-            None,
-        );
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
             "user",
@@ -2682,12 +2695,13 @@ mod slow_tests {
             baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
             classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client: Some(client),
-            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(max_upstream_body_bytes as usize)),
-            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(keepalive_interval_secs as u64)),
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(10_485_760)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(1)),
             request_body_limit_bytes: 10_485_760,
             streaming_channel_capacity: 32,
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
+            allowed_origins: Arc::new(RwLock::new(vec![])),
         });
         let app = build_app(auth_config, app_state);
 

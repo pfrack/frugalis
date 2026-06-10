@@ -35,6 +35,8 @@ pub trait PersistenceBackend: Send + Sync {
 
 /// In-memory persistence backend backed by `Arc<RwLock<Vec<InferenceRecord>>>`.
 /// All queries operate over Rust iterators. p99 is computed in Rust.
+///
+/// ⚠️ Ephemeral: Data is lost when the process exits. Not suitable for production.
 pub struct MemoryBackend {
     pub records: Arc<std::sync::RwLock<Vec<InferenceRecord>>>,
 }
@@ -958,6 +960,14 @@ impl std::fmt::Display for QueryError {
     }
 }
 
+impl std::error::Error for QueryError {}
+
+impl From<sqlx::Error> for QueryError {
+    fn from(err: sqlx::Error) -> Self {
+        QueryError(err.to_string())
+    }
+}
+
 /// One row from the `inferences` table, pre-formatted for dashboard display.
 #[derive(Debug, Clone)]
 pub struct InferenceLog {
@@ -1143,6 +1153,7 @@ async fn insert_once(pool: &PgPool, record: &InferenceRecord) -> Result<(), sqlx
 }
 
 async fn insert_once_sqlite(pool: &SqlitePool, record: &InferenceRecord) -> Result<(), sqlx::Error> {
+    // Note: `created_at` is omitted and SQLite will use its default CURRENT_TIMESTAMP.
     sqlx::query(
         "INSERT INTO inferences \
          (request_id, status, category, upstream_model, duration_ms, prompt_snippet, prompt_char_count) \
@@ -1376,13 +1387,6 @@ mod tests {
 
     // ── Test helpers ────────────────────────────────────────────────────────
 
-    /// Wrapper around the module-level test_pool for PG-specific tests.
-    /// Returns None if no PG database is available.
-    async fn test_pool() -> Option<Arc<PgPool>> {
-        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        super::test_pool().await
-    }
-
     /// Create a persistence config backed by in-memory storage.
     /// Always succeeds, no DATABASE_URL required.
     fn test_backend() -> PersistenceConfig {
@@ -1391,16 +1395,6 @@ mod tests {
             backend: Arc::new(DbBackend::Memory(MemoryBackend::new())),
             task_semaphore: Arc::new(Semaphore::new(100)),
         }
-    }
-
-    /// Try to create a PG-backed persistence config for PG-specific tests.
-    async fn test_pg_backend() -> Option<PersistenceConfig> {
-        let pool = super::test_pool().await?;
-        let pool_owned = (*pool).clone();
-        Some(PersistenceConfig {
-            backend: Arc::new(DbBackend::Postgres(PostgresBackend { pool: pool_owned })),
-            task_semaphore: Arc::new(Semaphore::new(100)),
-        })
     }
 
     /// Create a SQLite in-memory backend for SQLite-specific tests.
@@ -2193,7 +2187,7 @@ mod tests {
     // ── PG-specific tests (require DATABASE_URL) ────────────────────────────
 
     #[tokio::test]
-    async fn test_log_concurrency_limit_parsed_from_env() {
+    async fn test_pg_log_concurrency_limit_parsed_from_env() {
         // This test requires a live DATABASE_URL. It verifies that the LOG_CONCURRENCY_LIMIT
         // environment variable is respected and the semaphore is created with the correct permit count.
         // Fast settings to avoid delays.
@@ -2201,7 +2195,7 @@ mod tests {
 
         // Quick check: ensure DATABASE_URL is set and we can actually connect.
         if super::test_pool().await.is_none() {
-            eprintln!("SKIP test_log_concurrency_limit_parsed_from_env: DATABASE_URL not set or unreachable");
+            eprintln!("SKIP test_pg_log_concurrency_limit_parsed_from_env: DATABASE_URL not set or unreachable");
             return;
         }
 

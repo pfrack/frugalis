@@ -13,6 +13,3 @@ rustc-ice-*.txt
 .idea/
 *.swp
 .DS_Store
-
-
-routing.toml

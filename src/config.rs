@@ -1,7 +1,6 @@
-use std::collections::HashMap;
-use tracing::warn;
+use std::collections::{HashMap, HashSet};
+use tracing::{debug, warn};
 
-#[allow(unused_imports)]
 use crate::intent_classifier::{hardcoded_categories, CategoryConfig};
 use crate::routing::*;
 
@@ -10,9 +9,6 @@ pub(crate) const CONFIG_DEFAULT: &str = "config.toml";
 #[cfg(test)]
 pub(crate) const ROUTING_CONFIG_LEGACY: &str = "routing.toml";
 
-pub(crate) fn env_or_default(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
 
 /// Load dashboard configuration from a parsed TOML value.
 /// Returns defaults if section is absent.
@@ -23,7 +19,10 @@ pub(crate) fn load_dashboard_config_from_value(root: &toml::Value) -> DashboardC
     };
     let dashboard_section = match table.get("dashboard").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None => return DashboardConfig::default(),
+        None => {
+            debug!("[dashboard] section not found; using defaults");
+            return DashboardConfig::default();
+        }
     };
     DashboardConfig {
         default_hours: dashboard_section
@@ -62,13 +61,26 @@ pub(crate) fn load_server_config_from_value(root: &toml::Value) -> ServerConfig 
     };
     let server_section = match table.get("server").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None => return ServerConfig::default(),
+        None => {
+            debug!("[server] section not found; using defaults");
+            return ServerConfig::default();
+        }
     };
     ServerConfig {
         port: server_section
             .get("port")
             .and_then(|v| v.as_integer())
             .unwrap_or(10000) as u16,
+        log_level: server_section
+            .get("log_level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info")
+            .to_string(),
+        log_format: server_section
+            .get("log_format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("compact")
+            .to_string(),
     }
 }
 
@@ -81,7 +93,10 @@ pub(crate) fn load_http_config_from_value(root: &toml::Value) -> HttpConfig {
     };
     let http_section = match table.get("http").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None => return HttpConfig::default(),
+        None => {
+            debug!("[http] section not found; using defaults");
+            return HttpConfig::default();
+        }
     };
     HttpConfig {
         max_upstream_body_bytes: http_section
@@ -120,7 +135,10 @@ pub(crate) fn load_database_config_from_value(root: &toml::Value) -> DatabaseCon
     };
     let db_section = match table.get("database").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None => return DatabaseConfig::default(),
+        None => {
+            debug!("[database] section not found; using defaults");
+            return DatabaseConfig::default();
+        }
     };
     DatabaseConfig {
         connection_retries: db_section
@@ -159,7 +177,10 @@ pub(crate) fn load_auth_providers_from_value(root: &toml::Value) -> Vec<AuthProv
     };
     let providers_array = match table.get("auth_provider").and_then(|v| v.as_array()) {
         Some(arr) => arr,
-        None => return vec![],
+        None => {
+            debug!("[auth_provider] section not found; no auth providers configured");
+            return vec![];
+        }
     };
 
     let mut providers = Vec::new();
@@ -189,17 +210,23 @@ pub(crate) fn load_auth_providers_from_value(root: &toml::Value) -> Vec<AuthProv
 }
 
 /// Recursively merge overlay TOML values into base, with overlay values taking precedence.
-pub(crate) fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
+/// Keys listed in `override_keys` are completely replaced (not recursively merged).
+pub(crate) fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value, override_keys: &HashSet<&str>) {
     if let (toml::Value::Table(base_table), toml::Value::Table(overlay_table)) = (base, overlay) {
         for (key, overlay_val) in overlay_table.iter() {
-            match (base_table.get_mut(key), overlay_val) {
-                (Some(ref mut base_val @ toml::Value::Table(_)), toml::Value::Table(overlay_nested)) => {
-                    // Recursively merge nested tables
-                    merge_toml_values(base_val, &toml::Value::Table(overlay_nested.clone()));
-                }
-                _ => {
-                    // Overlay value wins for non-table keys or when base doesn't exist
-                    base_table.insert(key.clone(), overlay_val.clone());
+            if override_keys.contains(key.as_str()) {
+                // Complete replacement for override keys
+                base_table.insert(key.clone(), overlay_val.clone());
+            } else {
+                match (base_table.get_mut(key), overlay_val) {
+                    (Some(ref mut base_val @ toml::Value::Table(_)), toml::Value::Table(overlay_nested)) => {
+                        // Recursively merge nested tables
+                        merge_toml_values(base_val, &toml::Value::Table(overlay_nested.clone()), override_keys);
+                    }
+                    _ => {
+                        // Overlay value wins for non-table keys or when base doesn't exist
+                        base_table.insert(key.clone(), overlay_val.clone());
+                    }
                 }
             }
         }
@@ -230,16 +257,60 @@ impl Default for DashboardConfig {
     }
 }
 
+/// CORS configuration loaded from [cors] section.
+#[derive(Clone, Debug)]
+pub struct CorsConfig {
+    pub allowed_origins: Vec<String>,
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self {
+            allowed_origins: vec![],
+        }
+    }
+}
+
+/// Load CORS configuration from a parsed TOML value.
+/// Returns defaults if section is absent.
+pub(crate) fn load_cors_config_from_value(root: &toml::Value) -> CorsConfig {
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => return CorsConfig::default(),
+    };
+    let cors_section = match table.get("cors").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => {
+            debug!("[cors] section not found; using defaults (empty allowed_origins)");
+            return CorsConfig::default();
+        }
+    };
+    let allowed_origins = cors_section
+        .get("allowed_origins")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    CorsConfig { allowed_origins }
+}
+
 /// Server configuration.
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub port: u16,
+    pub log_level: String,
+    pub log_format: String,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: 10000,
+            log_level: "info".to_string(),
+            log_format: "compact".to_string(),
         }
     }
 }
@@ -317,7 +388,10 @@ pub(crate) fn load_persistence_config_from_value(root: &toml::Value) -> Persiste
     };
     let persistence_section = match table.get("persistence").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None => return PersistenceSettings::default(),
+        None => {
+            debug!("[persistence] section not found; using defaults (memory backend)");
+            return PersistenceSettings::default();
+        }
     };
     PersistenceSettings {
         backend: persistence_section
@@ -341,9 +415,12 @@ pub struct AuthProviderConfig {
     pub value_template: Option<String>,
 }
 
+
+
 /// Parse an integer environment variable with optional min/max validation.
 /// Returns `default` if the variable is unset, empty, invalid, or out of range.
 /// Logs a warning on invalid or out-of-range values.
+#[cfg(test)]
 pub(crate) fn parse_env_int(
     var: &str,
     default: i32,
@@ -382,7 +459,7 @@ pub(crate) fn parse_env_int(
 pub(crate) fn hardcoded_routing(
     categories: &[CategoryConfig],
 ) -> (HashMap<String, RouteEntry>, RouteEntry) {
-    let endpoint = env_or_default("NVIDIA_ENDPOINT", "https://integrate.api.nvidia.com/v1/chat/completions");
+    let endpoint = "https://integrate.api.nvidia.com/v1/chat/completions";
     let mut routing = HashMap::new();
 
     for cat in categories {
@@ -390,7 +467,7 @@ pub(crate) fn hardcoded_routing(
             cat.name.clone(),
             RouteEntry {
                 model: DEFAULT_MODEL.to_string(),
-                endpoint: endpoint.clone(),
+                endpoint: endpoint.to_string(),
                 cost_per_1m_input_tokens: None,
                 provider_type: "nvidia_nim".to_string(),
                 api_key_env: Some("NVIDIA_API_KEY".to_string()),
@@ -399,8 +476,8 @@ pub(crate) fn hardcoded_routing(
     }
 
     let fallback = RouteEntry {
-        model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
-        endpoint,
+        model: DEFAULT_MODEL.to_string(),
+        endpoint: endpoint.to_string(),
         cost_per_1m_input_tokens: None,
         provider_type: "nvidia_nim".to_string(),
         api_key_env: Some("NVIDIA_API_KEY".to_string()),
@@ -426,7 +503,7 @@ pub(crate) fn load_routing_from_file(path: &str) -> Result<HashMap<String, Route
             m.to_string()
         } else {
             warn!(category = %key, "routing.toml missing 'model' for category; using DEFAULT_MODEL");
-            env_or_default("DEFAULT_MODEL", DEFAULT_MODEL)
+            DEFAULT_MODEL.to_string()
         };
         let endpoint = value
             .get("endpoint")
@@ -465,7 +542,6 @@ pub(crate) fn load_routing_from_file(path: &str) -> Result<HashMap<String, Route
 #[cfg(test)]
 pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
     let config_path = std::env::var("CONFIG_PATH")
-        .or_else(|_| std::env::var("ROUTING_CONFIG_PATH"))
         .unwrap_or_else(|_| CONFIG_DEFAULT.to_string());
 
     // Try config.toml first, then routing.toml for backward compat
@@ -489,8 +565,8 @@ pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
             return hardcoded_routing(&hardcoded_categories());
         }
     };
-    let fallback_entry = routing.remove("FALLBACK").unwrap_or_else(|| RouteEntry {
-        model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
+    let fallback_entry = routing.remove("DEFAULT").unwrap_or_else(|| RouteEntry {
+        model: DEFAULT_MODEL.to_string(),
         endpoint: String::new(),
         cost_per_1m_input_tokens: None,
         provider_type: String::new(),
@@ -507,6 +583,15 @@ pub(crate) fn routing_from_value(
     let table = root
         .as_table()
         .ok_or_else(|| "Root must be a table".to_string())?;
+
+    // Pre-extract the DEFAULT entry's model for missing-field fallbacks
+    let default_model = table
+        .get("DEFAULT")
+        .and_then(|v| v.get("model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(DEFAULT_MODEL)
+        .to_string();
+
     let mut routing = HashMap::new();
     for (key, value) in table {
         if key == "fallback" || key == "categories" {
@@ -515,8 +600,8 @@ pub(crate) fn routing_from_value(
         let model = if let Some(m) = value.get("model").and_then(|v| v.as_str()) {
             m.to_string()
         } else {
-            warn!(category = %key, "routing section missing 'model' for category; using DEFAULT_MODEL");
-            env_or_default("DEFAULT_MODEL", DEFAULT_MODEL)
+            warn!(category = %key, "routing section missing 'model' for category; using DEFAULT model");
+            default_model.clone()
         };
         let endpoint = value
             .get("endpoint")
@@ -549,8 +634,8 @@ pub(crate) fn routing_from_value(
             },
         );
     }
-    let fallback = routing.remove("FALLBACK").unwrap_or_else(|| RouteEntry {
-        model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
+    let fallback = routing.remove("DEFAULT").unwrap_or_else(|| RouteEntry {
+        model: default_model.clone(),
         endpoint: String::new(),
         cost_per_1m_input_tokens: None,
         provider_type: String::new(),
@@ -573,22 +658,36 @@ pub(crate) fn load_categories_from_value(
     };
 
     let mut categories = Vec::new();
+    let mut errors = Vec::new();
+
     for (i, cat) in cats_array.iter().enumerate() {
-        let t = cat
-            .as_table()
-            .ok_or_else(|| format!("categories[{i}] must be a table"))?;
-        let name = t
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| format!("categories[{i}]: missing 'name'"))?
-            .to_string();
+        let t = match cat.as_table() {
+            Some(t) => t,
+            None => {
+                errors.push(format!("categories[{}] is not a table", i));
+                continue;
+            }
+        };
+        let name = match t.get("name").and_then(|v| v.as_str()) {
+            Some(n) => n.to_string(),
+            None => {
+                errors.push(format!("categories[{}]: missing 'name'", i));
+                continue;
+            }
+        };
         let description = t
             .get("description")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let threshold = t.get("threshold").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
-        let priority = t.get("priority").and_then(|v| v.as_integer()).unwrap_or(99) as u8;
+        let threshold = t
+            .get("threshold")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(1) as u32;
+        let priority = t
+            .get("priority")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(99) as u8;
 
         categories.push(CategoryConfig {
             name,
@@ -598,9 +697,14 @@ pub(crate) fn load_categories_from_value(
         });
     }
 
-    if categories.is_empty() {
-        return Err("[[categories]] is empty".to_string());
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
     }
+
+    if categories.is_empty() {
+        return Err("No categories defined".to_string());
+    }
+
     Ok(categories)
 }
 
@@ -718,7 +822,10 @@ pub(crate) fn load_regex_classifier_config_from_value(root: &toml::Value) -> Reg
     };
     let regex_section = match table.get("regex_classifier") {
         Some(toml::Value::Table(t)) => t,
-        _ => return RegexClassifierConfig::default(),
+        _ => {
+            debug!("[regex_classifier] section not found or not a table; using defaults (enabled)");
+            return RegexClassifierConfig::default();
+        }
     };
     let enabled = regex_section
         .get("enabled")
@@ -764,8 +871,24 @@ pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConf
 pub(crate) fn load_llm_classifier_config_from_value(
     root: &toml::Value,
 ) -> Option<LlmClassifierConfig> {
-    let table = root.as_table()?;
-    let llm_section = table.get("llm_classifier")?.as_table()?;
+    let table = match root.as_table() {
+        Some(t) => t,
+        None => {
+            debug!("config root is not a table for llm_classifier config; llm classifier will be disabled");
+            return None;
+        }
+    };
+    let llm_section = match table.get("llm_classifier") {
+        Some(toml::Value::Table(t)) => t,
+        Some(_) => {
+            debug!("[llm_classifier] section is not a table; llm classifier will be disabled");
+            return None;
+        }
+        None => {
+            debug!("[llm_classifier] section not found; llm classifier will be disabled");
+            return None;
+        }
+    };
 
     if !llm_section
         .get("enabled")
@@ -826,22 +949,6 @@ mod tests {
     use crate::intent_classifier::hardcoded_categories;
     use crate::routing::RouteEntry;
     use serial_test::serial;
-    use std::collections::HashMap;
-
-    #[test]
-    #[serial]
-    fn env_or_default_returns_env_var_when_set() {
-        std::env::set_var("TEST_CONFIG_VAR", "override");
-        assert_eq!(env_or_default("TEST_CONFIG_VAR", "default"), "override");
-        std::env::remove_var("TEST_CONFIG_VAR");
-    }
-
-    #[test]
-    #[serial]
-    fn env_or_default_returns_default_when_unset() {
-        std::env::remove_var("UNSET_CONFIG_VAR");
-        assert_eq!(env_or_default("UNSET_CONFIG_VAR", "default"), "default");
-    }
 
     #[test]
     fn load_routing_from_file_success() {
@@ -952,31 +1059,18 @@ api_key_env = ""
     }
 
     #[test]
-    #[serial]
-    fn hardcoded_routing_respects_nvidia_endpoint_env() {
-        struct EnvGuard;
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                std::env::remove_var("NVIDIA_ENDPOINT");
-            }
-        }
-
-        let _guard = EnvGuard;
-        std::env::set_var(
-            "NVIDIA_ENDPOINT",
-            "https://custom.endpoint.example.com/v1/chat/completions",
-        );
+    fn hardcoded_routing_uses_hardcoded_endpoint() {
         let (_, fallback) = hardcoded_routing(&hardcoded_categories());
         assert_eq!(
             fallback.endpoint,
-            "https://custom.endpoint.example.com/v1/chat/completions"
+            "https://integrate.api.nvidia.com/v1/chat/completions"
         );
     }
 
     #[test]
     #[serial]
     fn load_routing_behavior() {
-        // 1. When ROUTING_CONFIG_PATH points to a valid file, load_routing returns parsed routing and fallback
+        // 1. When CONFIG_PATH points to a valid file, load_routing returns parsed routing and fallback
         let toml_content = r#"
 [SYNTAX_FIX]
 model = "file-sf-model"
@@ -984,17 +1078,17 @@ endpoint = "https://file.endpoint"
 provider_type = "openai_compatible"
 api_key_env = "FILE_API_KEY"
 
-[FALLBACK]
+[DEFAULT]
 model = "file-fallback"
 endpoint = ""
 provider_type = ""
 api_key_env = ""
 "#;
         let temp_dir = std::env::temp_dir();
-        let file_path = temp_dir.join("test_valid_routing.toml");
+        let file_path = temp_dir.join("test_valid_config.toml");
         std::fs::write(&file_path, toml_content).expect("write temp file");
 
-        std::env::set_var("ROUTING_CONFIG_PATH", file_path.to_str().unwrap());
+        std::env::set_var("CONFIG_PATH", file_path.to_str().unwrap());
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 1);
@@ -1002,33 +1096,33 @@ api_key_env = ""
         // fallback should be the file-defined fallback
         assert_eq!(fallback.model, "file-fallback");
 
-        std::env::remove_var("ROUTING_CONFIG_PATH");
+        std::env::remove_var("CONFIG_PATH");
 
         // 2. When file is missing, fall back to hardcoded defaults
-        std::env::set_var("ROUTING_CONFIG_PATH", "/nonexistent/routing.toml");
+        std::env::set_var("CONFIG_PATH", "/nonexistent/config.toml");
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 4);
         assert!(routing.contains_key("SYNTAX_FIX"));
         assert_eq!(fallback.model, DEFAULT_MODEL);
 
-        std::env::remove_var("ROUTING_CONFIG_PATH");
+        std::env::remove_var("CONFIG_PATH");
 
         // 3. When file exists but TOML is invalid, fall back to hardcoded defaults
         use std::io::Write;
-        let file_path_invalid = temp_dir.join("invalid_routing.toml");
+        let file_path_invalid = temp_dir.join("invalid_config.toml");
         let mut file = std::fs::File::create(&file_path_invalid).expect("create temp file");
         file.write_all(b"not valid toml {{").expect("write");
         drop(file);
 
-        std::env::set_var("ROUTING_CONFIG_PATH", file_path_invalid.to_str().unwrap());
+        std::env::set_var("CONFIG_PATH", file_path_invalid.to_str().unwrap());
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 4);
         assert!(routing.contains_key("SYNTAX_FIX"));
         assert_eq!(fallback.model, DEFAULT_MODEL);
 
-        std::env::remove_var("ROUTING_CONFIG_PATH");
+        std::env::remove_var("CONFIG_PATH");
     }
 
     #[test]

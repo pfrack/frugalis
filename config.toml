@@ -97,7 +97,7 @@ endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
-[FALLBACK]
+[DEFAULT]
 model = "meta/llama-3.1-8b-instruct"
 endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 provider_type = "nvidia_nim"
