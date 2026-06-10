@@ -828,8 +828,8 @@ Phase 4–6: Minor — `PatternMeta.category` changes from `&'static str` to `St
 
 #### Manual
 
-- [ ] 4.3 `config.toml` patterns match current const arrays in intent_classifier.rs
-- [ ] 4.4 TOML escaping verified — all regex patterns parse without errors
+- [x] 4.3 `config.toml` patterns match current const arrays in intent_classifier.rs
+- [x] 4.4 TOML escaping verified — all regex patterns parse without errors
 
 ### Phase 5: Engine Refactor
 
@@ -850,12 +850,12 @@ Phase 4–6: Minor — `PatternMeta.category` changes from `&'static str` to `St
 
 #### Automated
 
-- [x] 6.1 `cargo test` — all tests pass
-- [x] 6.2 `cargo test auth` — auth tests pass
-- [x] 6.3 `cargo test routes_auth` — route auth tests pass
-- [x] 6.4 `cargo build --release` builds cleanly
-- [x] 6.5 No `hardcoded_categories()` calls anywhere
-- [x] 6.6 No `SHORT_PROMPT_LEN`, `FR_WEIGHTS`, etc. references
+- [x] 6.1 `cargo test` — all tests pass — b947278
+- [x] 6.2 `cargo test auth` — auth tests pass — b947278
+- [x] 6.3 `cargo test routes_auth` — route auth tests pass — b947278
+- [x] 6.4 `cargo build --release` builds cleanly — b947278
+- [x] 6.5 No `hardcoded_categories()` calls anywhere — b947278
+- [x] 6.6 No `SHORT_PROMPT_LEN`, `FR_WEIGHTS`, etc. references — b947278
 
 #### Manual
 
