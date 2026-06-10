@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, Duration};
 
-use crate::config::parse_env_int;
+use crate::config::DatabaseConfig;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use sqlx::Row;
@@ -88,7 +88,7 @@ use sqlx::postgres::PgConnectOptions;
 use std::str::FromStr;
 
 impl PersistenceConfig {
-    pub async fn from_env() -> Result<Self, String> {
+    pub async fn from_env(db_config: &DatabaseConfig) -> Result<Self, String> {
         let url = std::env::var("DATABASE_URL")
             .map_err(|_| "DATABASE_URL environment variable is required".to_string())?;
 
@@ -96,27 +96,24 @@ impl PersistenceConfig {
             .map_err(|e| format!("DB connection string parse error: {e}"))?;
 
         let pool = PgPoolOptions::new()
-            .max_connections(10)
-            .acquire_timeout(std::time::Duration::from_secs(30))
-            .idle_timeout(std::time::Duration::from_secs(1800))
+            .max_connections(db_config.max_connections)
+            .acquire_timeout(std::time::Duration::from_secs(db_config.acquire_timeout_secs))
+            .idle_timeout(std::time::Duration::from_secs(db_config.idle_timeout_secs))
             .connect_lazy_with(options);
 
-        // Parse configurable retry settings
-        let db_retries = parse_env_int("DB_CONNECTION_RETRIES", 3, Some(1), Some(10)) as u32;
-        let db_retry_base_ms = parse_env_int("DB_RETRY_BASE_MS", 1000, Some(100), Some(60_000)) as u64;
-        let base_delay = Duration::from_millis(db_retry_base_ms);
+        let base_delay = Duration::from_millis(db_config.retry_base_ms);
 
         // Validate DB connectivity with retries (exponential backoff with jitter)
         let mut last_err = None;
 
-        for attempt in 0..db_retries {
+        for attempt in 0..db_config.connection_retries {
             match sqlx::query("SELECT 1").fetch_one(&pool).await {
                 Ok(_) => {
                     // success, break out
                     break;
                 }
                 Err(e) => {
-                    if attempt < db_retries - 1 {
+                    if attempt < db_config.connection_retries - 1 {
                         warn!("DB health check failed (attempt {}): {}. Retrying...", attempt + 1, &e);
                         // Exponential backoff
                         let backoff = base_delay * (1u32 << attempt);
@@ -137,7 +134,7 @@ impl PersistenceConfig {
 
         if let Some(e) = last_err {
             // DATABASE_URL is set, so we panic
-            panic!("Database health check failed after {} retries: {}", db_retries, e);
+            panic!("Database health check failed after {} retries: {}", db_config.connection_retries, e);
         }
 
         // Run migrations (fatal if fails)
@@ -146,12 +143,9 @@ impl PersistenceConfig {
         }
         info!("Migrations applied successfully");
 
-        // Parse concurrency limit for logging tasks
-        let log_concurrency_limit = parse_env_int("LOG_CONCURRENCY_LIMIT", 100, Some(1), Some(1000)) as usize;
-
         Ok(Self {
             pool: Arc::new(pool),
-            task_semaphore: Arc::new(Semaphore::new(log_concurrency_limit)),
+            task_semaphore: Arc::new(Semaphore::new(db_config.log_concurrency_limit as usize)),
         })
     }
 
@@ -541,6 +535,52 @@ async fn insert_once(pool: &PgPool, record: &InferenceRecord) -> Result<(), sqlx
     .map(|_| ())
 }
 
+/// Ephemeral PostgreSQL container for integration tests.
+/// Spins up via `testcontainers`; falls back to DATABASE_URL when Docker unavailable.
+#[cfg(test)]
+struct TestDb {
+    pool: Arc<PgPool>,
+    _container: testcontainers::ContainerAsync<testcontainers::GenericImage>,
+}
+
+#[cfg(test)]
+impl TestDb {
+    async fn new() -> Option<Self> {
+        use testcontainers::{
+            core::{IntoContainerPort, WaitFor},
+            runners::AsyncRunner,
+            GenericImage, ImageExt,
+        };
+        // GenericImage builder methods first, then ImageExt methods
+        let container = GenericImage::new("postgres", "16-alpine")
+            .with_exposed_port(5432.tcp())
+            .with_wait_for(WaitFor::message_on_stderr(
+                "database system is ready to accept connections",
+            ))
+            .with_env_var("POSTGRES_USER", "test")
+            .with_env_var("POSTGRES_PASSWORD", "test")
+            .with_env_var("POSTGRES_DB", "test")
+            .with_startup_timeout(Duration::from_secs(60))
+            .start()
+            .await
+            .ok()?;
+        let port = container.get_host_port_ipv4(5432.tcp()).await.ok()?;
+        let url = format!("postgres://test:test@127.0.0.1:{port}/test");
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect(&url)
+            .await
+            .ok()?;
+        sqlx::migrate!().run(&pool).await.ok()?;
+        eprintln!("Test DB: postgres://test:test@127.0.0.1:{port}/test");
+        Some(Self {
+            pool: Arc::new(pool),
+            _container: container,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,9 +753,7 @@ mod tests {
 
     async fn test_pool() -> Option<Arc<PgPool>> {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        let url = std::env::var("DATABASE_URL").ok()?;
-        let pool = sqlx::PgPool::connect(&url).await.ok()?;
-        Some(Arc::new(pool))
+        super::test_pool().await
     }
 
     fn make_persistence(pool: Arc<PgPool>) -> PersistenceConfig {
@@ -1482,7 +1520,15 @@ mod tests {
         std::env::set_var("DB_RETRY_BASE_MS", "10");
 
         // Attempt to create PersistenceConfig; should panic.
-        PersistenceConfig::from_env().await;
+        let db_config = DatabaseConfig {
+            connection_retries: 2,
+            retry_base_ms: 10,
+            max_connections: 10,
+            acquire_timeout_secs: 30,
+            idle_timeout_secs: 1800,
+            log_concurrency_limit: 100,
+        };
+        let _ = PersistenceConfig::from_env(&db_config).await;
     }
 
     #[tokio::test]
@@ -1493,23 +1539,9 @@ mod tests {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
 
         // Quick check: ensure DATABASE_URL is set and we can actually connect.
-        let url = match std::env::var("DATABASE_URL") {
-            Ok(u) => u,
-            Err(_) => {
-                eprintln!("SKIP test_log_concurrency_limit_parsed_from_env: DATABASE_URL not set");
-                return;
-            }
-        };
-        // Attempt a quick connection to verify DB is up; if fails, skip.
-        match sqlx::PgPool::connect(&url).await {
-            Ok(pool) => {
-                // Immediately close the pool; we just wanted to check connectivity.
-                drop(pool);
-            }
-            Err(_) => {
-                eprintln!("SKIP test_log_concurrency_limit_parsed_from_env: cannot connect to DB");
-                return;
-            }
+        if super::test_pool().await.is_none() {
+            eprintln!("SKIP test_log_concurrency_limit_parsed_from_env: DATABASE_URL not set or unreachable");
+            return;
         }
 
         struct EnvGuard(&'static str);
@@ -1526,14 +1558,37 @@ mod tests {
         std::env::set_var("DB_CONNECTION_RETRIES", "1");
         std::env::set_var("DB_RETRY_BASE_MS", "10");
 
-        let config = PersistenceConfig::from_env().await.expect("PersistenceConfig should succeed");
+        let db_config = DatabaseConfig {
+            connection_retries: 1,
+            retry_base_ms: 10,
+            max_connections: 10,
+            acquire_timeout_secs: 30,
+            idle_timeout_secs: 1800,
+            log_concurrency_limit: 7,
+        };
+        let config = PersistenceConfig::from_env(&db_config).await.expect("PersistenceConfig should succeed");
         assert_eq!(config.task_semaphore.available_permits(), 7);
     }
 }
 
-/// Test helper: Connect to the database if DATABASE_URL is set, or return None to skip.
+/// Test helper: create a test database pool.
+///
+/// Priority:
+/// 1. Ephemeral PostgreSQL container via testcontainers (Docker required)
+/// 2. DATABASE_URL env var with a short connect timeout (3s)
+///
+/// Returns `None` when neither is available.
 #[cfg(test)]
 pub async fn test_pool() -> Option<std::sync::Arc<PgPool>> {
+    // Try disposable PostgreSQL container first (in-memory, Docker-backed)
+    if let Some(tdb) = TestDb::new().await {
+        return Some(tdb.pool);
+    }
+    // Fall back to DATABASE_URL env var
     let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::PgPool::connect(&url).await.ok().map(std::sync::Arc::new)
+    tokio::time::timeout(Duration::from_secs(3), sqlx::PgPool::connect(&url))
+        .await
+        .ok()?
+        .ok()
+        .map(std::sync::Arc::new)
 }

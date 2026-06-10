@@ -14,7 +14,7 @@ use axum::{
 };
 use tokio_stream::{Stream, StreamExt};
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod auth;
@@ -32,13 +32,17 @@ use intent_classifier::IntentClassify;
 pub struct AppState {
     persistence: Option<persistence::PersistenceConfig>,
     classifier: Option<Arc<intent_classifier::ClassifierChain>>,
-    routing: Arc<std::collections::HashMap<String, intent_classifier::RouteEntry>>,
-    model_costs: intent_classifier::ModelCosts,
-    baseline_model: String,
-    classify_db_log: bool,
+    routing: Arc<tokio::sync::RwLock<std::collections::HashMap<String, intent_classifier::RouteEntry>>>,
+    model_costs: Arc<tokio::sync::RwLock<intent_classifier::ModelCosts>>,
+    baseline_model: Arc<tokio::sync::RwLock<String>>,
+    classify_db_log: Arc<std::sync::atomic::AtomicBool>,
     http_client: Option<reqwest::Client>,
-    max_upstream_body_bytes: usize,
-    keepalive_interval_secs: u64,
+    max_upstream_body_bytes: Arc<tokio::sync::RwLock<usize>>,
+    keepalive_interval_secs: Arc<tokio::sync::RwLock<u64>>,
+    request_body_limit_bytes: usize,
+    streaming_channel_capacity: usize,
+    dashboard_config: config::DashboardConfig,
+    auth_providers: Arc<Vec<config::AuthProviderConfig>>,
 }
 
 #[tokio::main]
@@ -63,85 +67,80 @@ async fn main() {
     });
     let auth_config = Arc::new(auth_config);
 
-    let persistence_state = match persistence::PersistenceConfig::from_env().await {
-        Ok(s) => {
-            info!("Database connected successfully");
-            Some(s)
-        }
-        Err(e) => {
-            warn!("persistence disabled: {e}");
-            None
-        }
-    };
     let config_path_option = std::env::var("CONFIG_PATH").ok();
 
-    // Read and parse config file once, reuse across all loaders
-    let config_root = config_path_option.as_deref().and_then(|path| {
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("failed to read config file at {}: {}", path, e);
-                return None;
+    // Embed config.toml as default
+    const DEFAULT_CONFIG_TOML: &str = include_str!("../config.toml");
+    let mut config_root = match toml::from_str::<toml::Value>(DEFAULT_CONFIG_TOML) {
+        Ok(root) => root,
+        Err(e) => {
+            error!("Embedded config.toml is invalid: {e}; using hardcoded defaults");
+            toml::Value::Table(Default::default())
+        }
+    };
+
+    // Merge CONFIG_PATH overlay if provided
+    if let Some(config_path) = config_path_option {
+        match std::fs::read_to_string(&config_path) {
+            Ok(content) => {
+                match toml::from_str::<toml::Value>(&content) {
+                    Ok(overlay) => {
+                        config::merge_toml_values(&mut config_root, &overlay);
+                        info!("Merged config from {}", config_path);
+                    }
+                    Err(e) => {
+                        warn!("failed to parse config file at {}: {}; using embedded defaults", config_path, e);
+                    }
+                }
             }
-        };
-        match toml::from_str::<toml::Value>(&content) {
-            Ok(v) => Some(v),
             Err(e) => {
-                warn!("failed to parse config file at {}: {}", path, e);
-                None
+                warn!("failed to read config file at {}: {}; using embedded defaults", config_path, e);
             }
         }
-    });
+    }
 
-    let regex_config = config_root
-        .as_ref()
-        .map(config::load_regex_classifier_config_from_value)
-        .unwrap_or_default();
+    let regex_config = config::load_regex_classifier_config_from_value(&config_root);
 
     // Load global classifiers config
-    let classifiers_config = config_root
-        .as_ref()
-        .map(config::load_classifiers_config_from_value)
-        .unwrap_or_default();
+    let classifiers_config = config::load_classifiers_config_from_value(&config_root);
+
+    let http_config = config::load_http_config_from_value(&config_root);
+    let max_upstream_body_bytes = http_config.max_upstream_body_bytes;
+    let keepalive_interval_secs = http_config.keepalive_interval_secs;
 
     let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(http_config.client_timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(http_config.client_connect_timeout_secs))
         .build()
         .expect("reqwest client should build");
 
-     let classify_db_log = std::env::var("CLASSIFY_DB_LOG")
-         .ok()
-         .and_then(|v| v.parse::<bool>().ok())
-         .unwrap_or(false);
-    let http_config = config::HttpClientConfig::from_env();
-    let max_upstream_body_bytes = http_config.max_upstream_body_bytes as usize;
-    let keepalive_interval_secs = http_config.keepalive_interval_secs as u64;
+    let classify_db_log = config_root
+        .get("classify_db_log")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let auth_providers = Arc::new(config::load_auth_providers_from_value(&config_root));
      let (classifier, routing, model_costs, baseline_model) = {
-        let categories = config_root
-            .as_ref()
-            .and_then(|root| config::load_categories_from_value(root).ok())
-            .unwrap_or_else(intent_classifier::hardcoded_categories);
-        let (routing_map, fallback_entry) = if let Some(root) = config_root.as_ref() {
-            match config::routing_from_value(root) {
-                Ok((map, fallback)) => (map, fallback),
-                Err(e) => {
-                    warn!(
-                        "routing config parsing failed: {}; using hardcoded routing defaults",
-                        e
-                    );
-                    config::hardcoded_routing(&categories)
-                }
+        let categories = config::load_categories_from_value(&config_root)
+            .unwrap_or_else(|_| intent_classifier::hardcoded_categories());
+        let (routing_map, fallback_entry) = match config::routing_from_value(&config_root) {
+            Ok((map, fallback)) => (map, fallback),
+            Err(e) => {
+                warn!(
+                    "routing config parsing failed: {}; using hardcoded routing defaults",
+                    e
+                );
+                config::hardcoded_routing(&categories)
             }
-        } else {
-            config::hardcoded_routing(&categories)
         };
-        let model_costs = config::build_model_costs(&routing_map);
-        let baseline_model =
-            config::env_or_default("BASELINE_MODEL", intent_classifier::DEFAULT_MODEL_COMPLEX);
+        let model_costs = config::build_model_costs(&config_root, &routing_map);
+        let baseline_model = config_root
+            .get("baseline_model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(intent_classifier::DEFAULT_MODEL_COMPLEX)
+            .to_string();
         if !classifiers_config.enabled {
             info!("All classifiers disabled via config");
-            (None, Arc::new(HashMap::new()), model_costs, baseline_model)
+            (None, HashMap::new(), model_costs, baseline_model)
         } else {
             let mut backends: Vec<Arc<dyn intent_classifier::IntentClassify + Send + Sync>> =
                 Vec::new();
@@ -167,14 +166,12 @@ async fn main() {
                         }
                     }
                     "llm" => {
-                        if let Some(llm_config) = config_root
-                            .as_ref()
-                            .and_then(config::load_llm_classifier_config_from_value)
-                        {
+                        if let Some(llm_config) = config::load_llm_classifier_config_from_value(&config_root) {
                             let llm = intent_classifier::LLMClassifier::new(
                                 llm_config,
                                 http_client.clone(),
                                 categories.clone(),
+                                auth_providers.clone(),
                             );
                             info!(
                                 "LLM classifier enabled: model={}, endpoint={}",
@@ -191,7 +188,7 @@ async fn main() {
 
             if backends.is_empty() {
                 warn!("no classifier backends enabled");
-                (None, Arc::new(HashMap::new()), model_costs, baseline_model)
+                (None, HashMap::new(), model_costs, baseline_model)
             } else {
                 let chain = intent_classifier::ClassifierChain::new(backends);
                 let mut merged_routing = HashMap::new();
@@ -200,25 +197,44 @@ async fn main() {
                         merged_routing.extend(r.clone());
                     }
                 }
-                let routing = Arc::new(merged_routing);
-                (Some(Arc::new(chain)), routing, model_costs, baseline_model)
+                (Some(Arc::new(chain)), merged_routing, model_costs, baseline_model)
             }
+        }
+    };
+
+    let db_config = config::load_database_config_from_value(&config_root);
+    let persistence_state = match persistence::PersistenceConfig::from_env(&db_config).await {
+        Ok(s) => {
+            info!("Database connected successfully");
+            Some(s)
+        }
+        Err(e) => {
+            warn!("persistence disabled: {e}");
+            None
         }
     };
 
     let app_state = Arc::new(AppState {
         persistence: persistence_state,
         classifier,
-        routing,
-        model_costs,
-        baseline_model,
-        classify_db_log,
+        routing: Arc::new(tokio::sync::RwLock::new(routing)),
+        model_costs: Arc::new(tokio::sync::RwLock::new(model_costs)),
+        baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
+        classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(classify_db_log)),
         http_client: Some(http_client),
-        max_upstream_body_bytes: max_upstream_body_bytes as usize,
-        keepalive_interval_secs: keepalive_interval_secs as u64,
+        max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(max_upstream_body_bytes as usize)),
+        keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(keepalive_interval_secs as u64)),
+        request_body_limit_bytes: http_config.request_body_limit_bytes,
+        streaming_channel_capacity: http_config.streaming_channel_capacity,
+        dashboard_config: config::load_dashboard_config_from_value(&config_root),
+        auth_providers,
     });
 
-    let port: u16 = config::parse_env_int("PORT", 10000, Some(1), Some(65535)) as u16;
+    let server_config = config::load_server_config_from_value(&config_root);
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(server_config.port);
 
     let app = build_app(auth_config, app_state);
     let bind_addr = format!("0.0.0.0:{port}");
@@ -350,6 +366,7 @@ fn build_upstream_request(
     classification: &intent_classifier::ClassificationResult,
     body: &Bytes,
     api_key: &str,
+    auth_providers: &[config::AuthProviderConfig],
 ) -> Result<(bool, reqwest::RequestBuilder), String> {
     let mut req_body: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| format!("invalid JSON body: {e}"))?;
@@ -370,7 +387,7 @@ fn build_upstream_request(
 
     let modified_body = serde_json::to_vec(&req_body).unwrap_or_else(|_| body.to_vec());
 
-    let auth_headers = intent_classifier::auth_headers_for(&classification.provider_type, api_key);
+    let auth_headers = intent_classifier::auth_headers_for(auth_providers, &classification.provider_type, api_key);
 
     let mut req = client
         .post(&classification.endpoint)
@@ -461,10 +478,7 @@ fn handle_streaming_response(
     byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
     keepalive_interval_secs: u64,
 ) -> Response<Body> {
-    let channel_capacity = std::env::var("STREAMING_CHANNEL_CAPACITY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(32);
+    let channel_capacity = state.streaming_channel_capacity;
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(channel_capacity);
 
     log_classification(&state, &classification, &body_str, start, "streaming");
@@ -601,7 +615,8 @@ async fn completion_handler(
     let classification = if let (Some(category), Some(model)) =
         (x_category.as_ref(), x_model.as_ref())
     {
-        match state.routing.get(category) {
+        let routing = state.routing.read().await;
+        match routing.get(category) {
             Some(entry) => intent_classifier::ClassificationResult {
                 category: category.clone(),
                 model: model.clone(),
@@ -664,7 +679,7 @@ async fn completion_handler(
     }
 
     let (client_wants_stream, upstream_req) =
-        match build_upstream_request(client, &classification, &body, &api_key) {
+        match build_upstream_request(client, &classification, &body, &api_key, &state.auth_providers) {
             Err(msg) => {
                 log_classification(&state, &classification, &body_str, start, "bad_request");
                 return json_response(StatusCode::BAD_REQUEST, upstream_error_json(400, &msg));
@@ -690,7 +705,7 @@ async fn completion_handler(
             return resp;
         }
 
-        let keepalive_interval_secs = state.keepalive_interval_secs;
+        let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
         return handle_streaming_response(
             state,
             classification,
@@ -701,7 +716,8 @@ async fn completion_handler(
         );
     }
 
-    let (status, body) = handle_buffered_response(upstream_response, state.max_upstream_body_bytes).await;
+    let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
+    let (status, body) = handle_buffered_response(upstream_response, max_upstream_body_bytes).await;
     let log_status = if status == StatusCode::OK {
         "ok"
     } else {
@@ -721,7 +737,7 @@ async fn classify_handler(
 ) -> impl IntoResponse {
     let start = std::time::Instant::now();
     let body_str = std::str::from_utf8(&body).unwrap_or("");
-    let log_status = if state.classify_db_log {
+    let log_status = if state.classify_db_log.load(std::sync::atomic::Ordering::Relaxed) {
         Some("classified")
     } else {
         None
@@ -762,7 +778,7 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
         .nest("/dashboard", dashboard_routes)
         .layer(cors_layer)
         .layer(TraceLayer::new_for_http())
-        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
+        .layer(RequestBodyLimitLayer::new(app_state.request_body_limit_bytes))
         .with_state(app_state)
 }
 
@@ -802,18 +818,25 @@ mod tests {
                 }
             }
         }
-        let routing = Arc::new(merged_routing);
-        let http_config = config::HttpClientConfig::from_env();
         Arc::new(AppState {
             persistence: None,
             classifier: classifier_arc,
-            routing,
-            model_costs,
-            baseline_model,
-            classify_db_log: false,
+            routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
+            model_costs: Arc::new(tokio::sync::RwLock::new(model_costs)),
+            baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
+            classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client,
-            max_upstream_body_bytes: http_config.max_upstream_body_bytes as usize,
-            keepalive_interval_secs: http_config.keepalive_interval_secs as u64,
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(
+                std::env::var("MAX_UPSTREAM_BODY_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(10_485_760),
+            )),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
+            request_body_limit_bytes: 10_485_760,
+            streaming_channel_capacity: 32,
+            dashboard_config: config::DashboardConfig::default(),
+            auth_providers: Arc::new(vec![]),
         })
     }
 
@@ -825,17 +848,20 @@ mod tests {
             "password",
         ));
         // No-op persistence: persistence is None, so completion_handler skips logging.
-        let http_config = config::HttpClientConfig::from_env();
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier: None,
-            routing: Arc::new(std::collections::HashMap::new()),
-            model_costs: intent_classifier::ModelCosts::empty(),
-            baseline_model: String::new(),
-            classify_db_log: false,
+            routing: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            model_costs: Arc::new(tokio::sync::RwLock::new(intent_classifier::ModelCosts::empty())),
+            baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
+            classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client: None,
-            max_upstream_body_bytes: http_config.max_upstream_body_bytes as usize,
-            keepalive_interval_secs: http_config.keepalive_interval_secs as u64,
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(10_485_760)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
+            request_body_limit_bytes: 10_485_760,
+            streaming_channel_capacity: 32,
+            dashboard_config: config::DashboardConfig::default(),
+            auth_providers: Arc::new(vec![]),
         });
         build_app(auth_config, app_state)
     }
@@ -1247,21 +1273,18 @@ mod tests {
     /// Runs only when DATABASE_URL is set.
     #[tokio::test]
     async fn persistence_integration_prompt_char_count_column_exists() {
-        let url = match std::env::var("DATABASE_URL") {
-            Ok(u) => u,
-            Err(_) => {
-                eprintln!("SKIP persistence_integration_prompt_char_count_column_exists: DATABASE_URL not set");
+        let pool = match persistence::test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP persistence_integration_prompt_char_count_column_exists: DATABASE_URL not set or unreachable");
                 return;
             }
         };
-        let pool = sqlx::PgPool::connect(&url)
-            .await
-            .expect("integration test DB connect should succeed");
         let row: Option<sqlx::postgres::PgRow> = sqlx::query(
             "SELECT data_type FROM information_schema.COLUMNS \
              WHERE table_name = 'inferences' AND column_name = 'prompt_char_count'",
         )
-        .fetch_optional(&pool)
+        .fetch_optional(pool.as_ref())
         .await
         .expect("schema query should succeed");
         let row = row.expect("prompt_char_count column should exist in the inferences table");
@@ -1275,17 +1298,13 @@ mod tests {
 
     #[tokio::test]
     async fn persistence_integration_insert_and_read_back() {
-        let url = match std::env::var("DATABASE_URL") {
-            Ok(u) => u,
-            Err(_) => {
-                eprintln!("SKIP persistence_integration: DATABASE_URL not set");
+        let pool = match persistence::test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP persistence_integration_insert_and_read_back: DATABASE_URL not set or unreachable");
                 return;
             }
         };
-        let pool = sqlx::PgPool::connect(&url)
-            .await
-            .expect("integration test DB connect should succeed");
-        let pool = Arc::new(pool);
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
 
         let request_id = uuid::Uuid::new_v4();
@@ -1331,21 +1350,15 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn persistence_integration_sse_streaming_success() {
-        let url = match std::env::var("DATABASE_URL") {
-            Ok(u) => u,
-            Err(_) => {
-                eprintln!(
-                    "SKIP persistence_integration_sse_streaming_success: DATABASE_URL not set"
-                );
+        let pool = match persistence::test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP persistence_integration_sse_streaming_success: DATABASE_URL not set or unreachable");
                 return;
             }
         };
 
         std::env::set_var("MOCK_API_KEY", "sk-test");
-        let pool = sqlx::PgPool::connect(&url)
-            .await
-            .expect("integration test DB connect should succeed");
-        let pool = Arc::new(pool);
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
 
         let (app, server) = build_app_with_persistence(pool.clone(), semaphore.clone(), None);
@@ -1406,19 +1419,15 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn persistence_integration_sse_streaming_error() {
-        let url = match std::env::var("DATABASE_URL") {
-            Ok(u) => u,
-            Err(_) => {
-                eprintln!("SKIP persistence_integration_sse_streaming_error: DATABASE_URL not set");
+        let pool = match persistence::test_pool().await {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP persistence_integration_sse_streaming_error: DATABASE_URL not set or unreachable");
                 return;
             }
         };
 
         std::env::set_var("MOCK_API_KEY", "sk-test");
-        let pool = sqlx::PgPool::connect(&url)
-            .await
-            .expect("integration test DB connect should succeed");
-        let pool = Arc::new(pool);
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
 
         let (app, server) = build_app_with_persistence(pool.clone(), semaphore.clone(), None);
@@ -1783,13 +1792,17 @@ mod tests {
                 task_semaphore: semaphore,
             }),
             classifier: classifier_arc,
-            routing: Arc::new(merged_routing),
-            model_costs: intent_classifier::ModelCosts::empty(),
-            baseline_model: String::new(),
-            classify_db_log: false,
+            routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
+            model_costs: Arc::new(tokio::sync::RwLock::new(intent_classifier::ModelCosts::empty())),
+            baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
+            classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client: Some(client),
-            max_upstream_body_bytes: max_upstream_body_bytes as usize,
-            keepalive_interval_secs: keepalive_interval_secs as u64,
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(max_upstream_body_bytes as usize)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(keepalive_interval_secs as u64)),
+            request_body_limit_bytes: 10_485_760,
+            streaming_channel_capacity: 32,
+            dashboard_config: config::DashboardConfig::default(),
+            auth_providers: Arc::new(vec![]),
         });
         let app = build_app(auth_config, app_state);
         (app, server)
@@ -2593,7 +2606,6 @@ mod slow_tests {
                 }
             }
         }
-        let routing = Arc::new(merged_routing);
         let max_upstream_body_bytes = config::parse_env_int(
             "MAX_UPSTREAM_BODY_BYTES",
             10_485_760,
@@ -2614,13 +2626,17 @@ mod slow_tests {
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier,
-            routing,
-            model_costs,
-            baseline_model,
-            classify_db_log: false,
+            routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
+            model_costs: Arc::new(tokio::sync::RwLock::new(model_costs)),
+            baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
+            classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client: Some(client),
-            max_upstream_body_bytes: max_upstream_body_bytes as usize,
-            keepalive_interval_secs: keepalive_interval_secs as u64,
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(max_upstream_body_bytes as usize)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(keepalive_interval_secs as u64)),
+            request_body_limit_bytes: 10_485_760,
+            streaming_channel_capacity: 32,
+            dashboard_config: config::DashboardConfig::default(),
+            auth_providers: Arc::new(vec![]),
         });
         let app = build_app(auth_config, app_state);
 
