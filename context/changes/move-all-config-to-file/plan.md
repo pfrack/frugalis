@@ -344,10 +344,10 @@ None — this is a configuration refactor, no runtime performance impact.
 
 #### Automated
 
-- [x] 2.1 `cargo build --release` compiles without errors
-- [x] 2.2 `cargo test` — all tests pass
-- [x] 2.3 `cargo test auth` — auth tests pass
-- [x] 2.4 `cargo test routes_auth` — route auth tests pass
+- [x] 2.1 `cargo build --release` compiles without errors — 2390ac4
+- [x] 2.2 `cargo test` — all tests pass — 2390ac4
+- [x] 2.3 `cargo test auth` — auth tests pass — 2390ac4
+- [x] 2.4 `cargo test routes_auth` — route auth tests pass — 2390ac4
 
 #### Manual
 
@@ -360,11 +360,11 @@ None — this is a configuration refactor, no runtime performance impact.
 
 #### Automated
 
-- [ ] 3.1 `cargo test` — all tests pass
-- [ ] 3.2 `cargo test auth` — auth tests pass
-- [ ] 3.3 `cargo test routes_auth` — route auth tests pass
-- [ ] 3.4 `cargo build --release` builds cleanly
-- [ ] 3.5 No remaining `ROUTING_CONFIG_PATH` references
+- [x] 3.1 `cargo test` — all tests pass
+- [x] 3.2 `cargo test auth` — auth tests pass
+- [x] 3.3 `cargo test routes_auth` — route auth tests pass
+- [x] 3.4 `cargo build --release` builds cleanly
+- [x] 3.5 No remaining `ROUTING_CONFIG_PATH` references
 
 #### Manual
 

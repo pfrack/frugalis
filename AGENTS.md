@@ -4,7 +4,7 @@ Cerebrum is a Rust/Axum gateway service that provides intent-aware request routi
 
 ## Required Setup Before Testing or Deploying
 
-Set these environment variables: `PROXY_API_BEARER_TOKEN`, `DASHBOARD_BASIC_USER`, `DASHBOARD_BASIC_PASSWORD` (all non-empty), and `PORT` (defaults to `10000`). The CI pipeline enforces auth tests before building; any failure blocks the Render webhook.
+Set these environment variables: `PROXY_API_BEARER_TOKEN`, `DASHBOARD_BASIC_USER`, `DASHBOARD_BASIC_PASSWORD` (all non-empty). Server port, log level, and other operational settings come from `config.toml` (or `CONFIG_PATH` overlay). The CI pipeline enforces auth tests before building; any failure blocks the Render webhook.
 
 ## Build, Test, and Development
 
@@ -73,4 +73,4 @@ Every push to main triggers the pipeline: check out, install Rust, run tests, bu
 
 ## Secrets & Sensitive Configuration
 
-Store all secrets in GitHub Actions or Render environment variables, never in source. Port and logging level are runtime-configured via env vars; see @render.yaml for the deployment contract.
+Store all secrets in GitHub Actions or Render environment variables, never in source. Port and logging level are runtime-configured via config.toml; see @render.yaml for the deployment contract.

@@ -8,8 +8,6 @@ services:
     envVars:
       - key: RUST_LOG
         value: info
-      - key: ROUTING_CONFIG_PATH
-        value: routing.toml
       - key: PROXY_API_BEARER_TOKEN
         sync: false
       - key: DASHBOARD_BASIC_USER
@@ -17,8 +15,4 @@ services:
       - key: DASHBOARD_BASIC_PASSWORD
         sync: false
       - key: DATABASE_URL
-        sync: false
-      - key: NVIDIA_NIM_API_KEY
-        sync: false
-      - key: OPENROUTER_API_KEY
         sync: false

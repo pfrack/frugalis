@@ -10,9 +10,6 @@ pub(crate) const CONFIG_DEFAULT: &str = "config.toml";
 #[cfg(test)]
 pub(crate) const ROUTING_CONFIG_LEGACY: &str = "routing.toml";
 
-pub(crate) fn env_or_default(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
 
 /// Load dashboard configuration from a parsed TOML value.
 /// Returns defaults if section is absent.
@@ -486,7 +483,7 @@ pub(crate) fn load_routing_from_file(path: &str) -> Result<HashMap<String, Route
             m.to_string()
         } else {
             warn!(category = %key, "routing.toml missing 'model' for category; using DEFAULT_MODEL");
-            env_or_default("DEFAULT_MODEL", DEFAULT_MODEL)
+            DEFAULT_MODEL.to_string()
         };
         let endpoint = value
             .get("endpoint")
@@ -525,7 +522,6 @@ pub(crate) fn load_routing_from_file(path: &str) -> Result<HashMap<String, Route
 #[cfg(test)]
 pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
     let config_path = std::env::var("CONFIG_PATH")
-        .or_else(|_| std::env::var("ROUTING_CONFIG_PATH"))
         .unwrap_or_else(|_| CONFIG_DEFAULT.to_string());
 
     // Try config.toml first, then routing.toml for backward compat
@@ -550,7 +546,7 @@ pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
         }
     };
     let fallback_entry = routing.remove("DEFAULT").unwrap_or_else(|| RouteEntry {
-        model: env_or_default("DEFAULT_MODEL", DEFAULT_MODEL),
+        model: DEFAULT_MODEL.to_string(),
         endpoint: String::new(),
         cost_per_1m_input_tokens: None,
         provider_type: String::new(),
@@ -895,22 +891,6 @@ mod tests {
     use crate::intent_classifier::hardcoded_categories;
     use crate::routing::RouteEntry;
     use serial_test::serial;
-use std::collections::{HashMap, HashSet};
-
-    #[test]
-    #[serial]
-    fn env_or_default_returns_env_var_when_set() {
-        std::env::set_var("TEST_CONFIG_VAR", "override");
-        assert_eq!(env_or_default("TEST_CONFIG_VAR", "default"), "override");
-        std::env::remove_var("TEST_CONFIG_VAR");
-    }
-
-    #[test]
-    #[serial]
-    fn env_or_default_returns_default_when_unset() {
-        std::env::remove_var("UNSET_CONFIG_VAR");
-        assert_eq!(env_or_default("UNSET_CONFIG_VAR", "default"), "default");
-    }
 
     #[test]
     fn load_routing_from_file_success() {
@@ -1032,7 +1012,7 @@ api_key_env = ""
     #[test]
     #[serial]
     fn load_routing_behavior() {
-        // 1. When ROUTING_CONFIG_PATH points to a valid file, load_routing returns parsed routing and fallback
+        // 1. When CONFIG_PATH points to a valid file, load_routing returns parsed routing and fallback
         let toml_content = r#"
 [SYNTAX_FIX]
 model = "file-sf-model"
@@ -1047,10 +1027,10 @@ provider_type = ""
 api_key_env = ""
 "#;
         let temp_dir = std::env::temp_dir();
-        let file_path = temp_dir.join("test_valid_routing.toml");
+        let file_path = temp_dir.join("test_valid_config.toml");
         std::fs::write(&file_path, toml_content).expect("write temp file");
 
-        std::env::set_var("ROUTING_CONFIG_PATH", file_path.to_str().unwrap());
+        std::env::set_var("CONFIG_PATH", file_path.to_str().unwrap());
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 1);
@@ -1058,33 +1038,33 @@ api_key_env = ""
         // fallback should be the file-defined fallback
         assert_eq!(fallback.model, "file-fallback");
 
-        std::env::remove_var("ROUTING_CONFIG_PATH");
+        std::env::remove_var("CONFIG_PATH");
 
         // 2. When file is missing, fall back to hardcoded defaults
-        std::env::set_var("ROUTING_CONFIG_PATH", "/nonexistent/routing.toml");
+        std::env::set_var("CONFIG_PATH", "/nonexistent/config.toml");
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 4);
         assert!(routing.contains_key("SYNTAX_FIX"));
         assert_eq!(fallback.model, DEFAULT_MODEL);
 
-        std::env::remove_var("ROUTING_CONFIG_PATH");
+        std::env::remove_var("CONFIG_PATH");
 
         // 3. When file exists but TOML is invalid, fall back to hardcoded defaults
         use std::io::Write;
-        let file_path_invalid = temp_dir.join("invalid_routing.toml");
+        let file_path_invalid = temp_dir.join("invalid_config.toml");
         let mut file = std::fs::File::create(&file_path_invalid).expect("create temp file");
         file.write_all(b"not valid toml {{").expect("write");
         drop(file);
 
-        std::env::set_var("ROUTING_CONFIG_PATH", file_path_invalid.to_str().unwrap());
+        std::env::set_var("CONFIG_PATH", file_path_invalid.to_str().unwrap());
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 4);
         assert!(routing.contains_key("SYNTAX_FIX"));
         assert_eq!(fallback.model, DEFAULT_MODEL);
 
-        std::env::remove_var("ROUTING_CONFIG_PATH");
+        std::env::remove_var("CONFIG_PATH");
     }
 
     #[test]

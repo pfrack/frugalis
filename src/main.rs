@@ -875,6 +875,7 @@ mod tests {
         http_client: Option<reqwest::Client>,
         model_costs: intent_classifier::ModelCosts,
         baseline_model: String,
+        max_upstream_body_bytes: usize,
     ) -> Arc<AppState> {
         let classifier_chain = intent_classifier::ClassifierChain::new(vec![Arc::new(classifier)]);
         let classifier_arc = Some(Arc::new(classifier_chain));
@@ -894,12 +895,7 @@ mod tests {
             baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
             classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client,
-            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(
-                std::env::var("MAX_UPSTREAM_BODY_BYTES")
-                    .ok()
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(10_485_760),
-            )),
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(max_upstream_body_bytes)),
             keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
             request_body_limit_bytes: 10_485_760,
             streaming_channel_capacity: 32,
@@ -980,6 +976,7 @@ mod tests {
             None,
             intent_classifier::ModelCosts::empty(),
             String::new(),
+            10_485_760,
         );
         build_app(auth_config, app_state)
     }
@@ -1060,18 +1057,10 @@ mod tests {
     #[serial]
     async fn test_max_upstream_body_bytes_truncation() {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        struct EnvGuard(&'static str);
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                std::env::remove_var(self.0);
-            }
-        }
-        let _guard1 = EnvGuard("MAX_UPSTREAM_BODY_BYTES");
         let _guard2 = EnvGuard("TEST_API_KEY");
-        // Set limit to 1.1MB (above 1MB min) and send response > limit to trigger truncation
-        std::env::set_var("MAX_UPSTREAM_BODY_BYTES", "1100000");
+        // Set limit to 1.1MB and send response > limit to trigger truncation
         std::env::set_var("TEST_API_KEY", "sk-test");
-        let (app, server) = test_app_with_http_client("TEST_API_KEY");
+        let (app, server) = test_app_with_http_client("TEST_API_KEY", 1_100_000);
         let large_content = "x".repeat(2_000_000); // 2MB payload
         let body = format!("{{\"choices\":[{{\"message\":{{\"content\":\"{large_content}\"}}}}]}}");
         let mock = server.mock(|when, then| {
@@ -1150,6 +1139,7 @@ mod tests {
             None,
             intent_classifier::ModelCosts::empty(),
             String::new(),
+            10_485_760,
         );
         build_app(auth_config, app_state)
     }
@@ -1729,7 +1719,7 @@ mod tests {
 
     // ── Upstream routing tests ────────────────────────────────────────────────
 
-    pub(crate) fn test_app_with_http_client(env_var_name: &str) -> (Router, httpmock::MockServer) {
+    pub(crate) fn test_app_with_http_client(env_var_name: &str, max_upstream_body_bytes: usize) -> (Router, httpmock::MockServer) {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
         let cats = intent_classifier::hardcoded_categories();
@@ -1779,6 +1769,7 @@ mod tests {
             Some(client),
             intent_classifier::ModelCosts::empty(),
             String::new(),
+            max_upstream_body_bytes,
         );
         let app = build_app(auth_config, app_state);
         (app, server)
@@ -1847,18 +1838,6 @@ mod tests {
                 }
             }
         }
-        let max_upstream_body_bytes = config::parse_env_int(
-            "MAX_UPSTREAM_BODY_BYTES",
-            10_485_760,
-            Some(1_048_576),
-            Some(100_485_760),
-        );
-        let keepalive_interval_secs = config::parse_env_int(
-            "KEEPALIVE_INTERVAL_SECS",
-            15,
-            Some(1),
-            None,
-        );
         let pool_owned = pool;
         let pg_backend = persistence::PostgresBackend { pool: (*pool_owned).clone() };
         let app_state = Arc::new(AppState {
@@ -1872,8 +1851,8 @@ mod tests {
             baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
             classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client: Some(client),
-            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(max_upstream_body_bytes as usize)),
-            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(keepalive_interval_secs as u64)),
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(10_485_760)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
             request_body_limit_bytes: 10_485_760,
             streaming_channel_capacity: 32,
             dashboard_config: config::DashboardConfig::default(),
@@ -1932,6 +1911,7 @@ mod tests {
             Some(client),
             intent_classifier::ModelCosts::empty(),
             String::new(),
+            10_485_760,
         );
         build_app(auth_config, app_state)
     }
@@ -1942,7 +1922,7 @@ mod tests {
         let env = "TEST_UPSTREAM_RESP";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
             then.status(200)
@@ -1982,7 +1962,7 @@ mod tests {
         let env = "TEST_UPSTREAM_AUTH";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST")
                 .path("/v1/chat/completions")
@@ -2016,7 +1996,7 @@ mod tests {
         let env = "TEST_UPSTREAM_CT";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST")
                 .path("/v1/chat/completions")
@@ -2083,7 +2063,7 @@ mod tests {
         let env = "TEST_UPSTREAM_SKIP";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
             then.status(200)
@@ -2127,7 +2107,7 @@ mod tests {
         let env = "TEST_STREAM_CT";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let sse_body =
             "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n";
         let mock = server.mock(|when, then| {
@@ -2181,7 +2161,7 @@ mod tests {
     async fn test_streaming_handler_forwards_upstream_bytes() {
         let env = "TEST_STREAM_FWD";
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let sse_chunks = "data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\ndata: [DONE]\n\n";
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
@@ -2229,7 +2209,7 @@ mod tests {
     async fn test_streaming_handler_non_2xx_returns_sse_error_event() {
         let env = "TEST_STREAM_ERR";
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
             then.status(503)
@@ -2269,7 +2249,7 @@ mod tests {
         let env = "TEST_STREAM_TSSE";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
             then.status(200)
@@ -2310,7 +2290,7 @@ mod tests {
         let env = "TEST_STREAM_FJSON";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
             then.status(200)
@@ -2351,7 +2331,7 @@ mod tests {
         let env = "TEST_STREAM_AJSON";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
-        let (app, server) = test_app_with_http_client(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
             then.status(200)
@@ -2636,8 +2616,6 @@ mod slow_tests {
     #[serial]
     async fn test_streaming_keepalive_injected() {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        std::env::set_var("KEEPALIVE_INTERVAL_SECS", "1");
-        let _guard_ka = EnvGuard("KEEPALIVE_INTERVAL_SECS");
         let (url, server_handle) = spawn_slow_sse_server().await;
         let env = "TEST_STREAM_KA_SLOW";
         let _guard = EnvGuard(env);
@@ -2682,18 +2660,6 @@ mod slow_tests {
                 }
             }
         }
-        let max_upstream_body_bytes = config::parse_env_int(
-            "MAX_UPSTREAM_BODY_BYTES",
-            10_485_760,
-            Some(1_048_576),
-            Some(100_485_760),
-        );
-        let keepalive_interval_secs = config::parse_env_int(
-            "KEEPALIVE_INTERVAL_SECS",
-            15,
-            Some(1),
-            None,
-        );
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
             "user",
@@ -2707,8 +2673,8 @@ mod slow_tests {
             baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
             classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client: Some(client),
-            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(max_upstream_body_bytes as usize)),
-            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(keepalive_interval_secs as u64)),
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(10_485_760)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(1)),
             request_body_limit_bytes: 10_485_760,
             streaming_channel_capacity: 32,
             dashboard_config: config::DashboardConfig::default(),
