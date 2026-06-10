@@ -360,11 +360,11 @@ None — this is a configuration refactor, no runtime performance impact.
 
 #### Automated
 
-- [x] 3.1 `cargo test` — all tests pass
-- [x] 3.2 `cargo test auth` — auth tests pass
-- [x] 3.3 `cargo test routes_auth` — route auth tests pass
-- [x] 3.4 `cargo build --release` builds cleanly
-- [x] 3.5 No remaining `ROUTING_CONFIG_PATH` references
+- [x] 3.1 `cargo test` — all tests pass — f3f96de
+- [x] 3.2 `cargo test auth` — auth tests pass — f3f96de
+- [x] 3.3 `cargo test routes_auth` — route auth tests pass — f3f96de
+- [x] 3.4 `cargo build --release` builds cleanly — f3f96de
+- [x] 3.5 No remaining `ROUTING_CONFIG_PATH` references — f3f96de
 
 #### Manual
 
