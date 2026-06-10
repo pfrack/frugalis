@@ -6,7 +6,7 @@
 # Your custom file merges on top of these embedded defaults—specify only what you want to change.
 
 [server]
-port = 10001
+port = 10000
 log_level = "info"
 log_format = "compact"
 
@@ -19,7 +19,7 @@ client_connect_timeout_secs = 30
 streaming_channel_capacity = 32
 
 [cors]
-allowed_origins = ["http://localhost:3000"]
+allowed_origins = []
 
 [database]
 connection_retries = 3

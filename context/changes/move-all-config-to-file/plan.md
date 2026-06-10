@@ -351,10 +351,10 @@ None — this is a configuration refactor, no runtime performance impact.
 
 #### Manual
 
-- [ ] 2.5 App starts without LOG_FORMAT env, uses config.toml log_format
-- [ ] 2.6 RUST_LOG=debug overrides config.toml log_level
-- [ ] 2.7 CORS headers match config.toml [cors].allowed_origins
-- [ ] 2.8 App binds to config.toml [server].port
+- [x] 2.5 App starts without LOG_FORMAT env, uses config.toml log_format
+- [x] 2.6 RUST_LOG=debug overrides config.toml log_level
+- [x] 2.7 CORS headers match config.toml [cors].allowed_origins
+- [x] 2.8 App binds to config.toml [server].port
 
 ### Phase 3: Clean Up Tests, render.yaml, and Dead Code
 
@@ -368,6 +368,6 @@ None — this is a configuration refactor, no runtime performance impact.
 
 #### Manual
 
-- [ ] 3.6 render.yaml only lists required secrets + optional RUST_LOG
-- [ ] 3.7 App starts successfully with only secrets as env vars
-- [ ] 3.8 RUST_LOG=debug cargo run produces debug-level logs
+- [x] 3.6 render.yaml only lists required secrets + optional RUST_LOG
+- [x] 3.7 App starts successfully with only secrets as env vars
+- [x] 3.8 RUST_LOG=debug cargo run produces debug-level logs
