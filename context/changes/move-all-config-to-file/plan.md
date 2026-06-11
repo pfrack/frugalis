@@ -840,11 +840,11 @@ Phase 4–6: Minor — `PatternMeta.category` changes from `&'static str` to `St
 - [x] 5.3 `cargo test auth` — auth tests pass — 13c72c2
 - [x] 5.4 `cargo test routes_auth` — route auth tests pass — 13c72c2
 - [x] 5.5 Zero hardcoded category name strings in engine code — 13c72c2
-
+ 
 #### Manual
 
-- [ ] 5.6 Default classification behavior matches pre-refactor output
-- [ ] 5.7 Custom `CONFIG_PATH` overlay with different categories works
+- [x] 5.6 Default classification behavior matches pre-refactor output
+- [x] 5.7 Custom `CONFIG_PATH` overlay with different categories works
 
 ### Phase 6: Tests & Cleanup
 
@@ -860,5 +860,5 @@ Phase 4–6: Minor — `PatternMeta.category` changes from `&'static str` to `St
 #### Manual
 
 - [x] 6.7 App starts with only secrets as env vars, classifier initializes
-- [ ] 6.8 `/v1/classify` returns correct category for test prompts
-- [ ] 6.9 Custom `CONFIG_PATH` overlay classification verified
+- [x] 6.8 `/v1/classify` returns correct category for test prompts
+- [x] 6.9 Custom `CONFIG_PATH` overlay classification verified

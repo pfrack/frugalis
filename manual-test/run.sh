@@ -79,36 +79,56 @@ if [ "$AUTO_MODE" = true ]; then
     test_threshold_override() {
         section "Test 2: Threshold Override (FILE_READING threshold = 100)"
         
-        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+         cat > /tmp/cerebrum-config-test.toml << 'EOF'
 [[categories]]
 name = "FILE_READING"
 description = "Reading, viewing, inspecting, searching, or navigating files or code"
 threshold = 100
 priority = 1
-model_env_var = "DEFAULT_MODEL_READING"
 
 [[categories]]
 name = "SYNTAX_FIX"
 description = "Fixing bugs, errors, typos, compilation issues, or broken code"
 threshold = 3
 priority = 2
-model_env_var = "DEFAULT_MODEL"
 
 [[categories]]
 name = "COMPLEX_REASONING"
 description = "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization"
 threshold = 3
 priority = 3
-model_env_var = "DEFAULT_MODEL_COMPLEX"
 
 [[categories]]
 name = "CASUAL"
 description = "Simple questions, greetings, general conversation, or short prompts"
 threshold = 1
 priority = 4
-model_env_var = "DEFAULT_MODEL"
 
-[FALLBACK]
+[routing.FILE_READING]
+model = "meta/llama-3.1-70b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.SYNTAX_FIX]
+model = "meta/llama-3.1-8b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.COMPLEX_REASONING]
+model = "meta/llama-3.3-70b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.CASUAL]
+model = "meta/llama-3.1-8b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.DEFAULT]
 model = "nvidia/nemotron-3-nano-30b-a3b"
 provider_type = "nvidia_nim"
 endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -140,23 +160,36 @@ EOF
     test_partial_categories() {
         section "Test 3: Partial Categories (FILE_READING + CASUAL only)"
         
-        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+         cat > /tmp/cerebrum-config-test.toml << 'EOF'
 [[categories]]
 name = "FILE_READING"
 description = "Reading files"
 threshold = 3
 priority = 1
-model_env_var = "DEFAULT_MODEL_READING"
 
 [[categories]]
 name = "CASUAL"
 description = "Simple questions"
 threshold = 1
 priority = 4
-model_env_var = "DEFAULT_MODEL"
 
-[FALLBACK]
+[routing.FILE_READING]
+model = "meta/llama-3.1-70b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.CASUAL]
+model = "meta/llama-3.1-8b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.DEFAULT]
 model = "nvidia/nemotron-3-nano-30b-a3b"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
 EOF
         
         if ! start_server "/tmp/cerebrum-config-test.toml"; then
@@ -224,36 +257,56 @@ EOF
     test_combined_config() {
         section "Test 5: Combined config.toml (categories + routing)"
         
-        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+         cat > /tmp/cerebrum-config-test.toml << 'EOF'
 [[categories]]
 name = "FILE_READING"
 description = "Reading, viewing, inspecting, searching, or navigating files or code"
 threshold = 3
 priority = 1
-model_env_var = "DEFAULT_MODEL_READING"
 
 [[categories]]
 name = "SYNTAX_FIX"
 description = "Fixing bugs, errors, typos, compilation issues, or broken code"
 threshold = 3
 priority = 2
-model_env_var = "DEFAULT_MODEL"
 
 [[categories]]
 name = "COMPLEX_REASONING"
 description = "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization"
 threshold = 3
 priority = 3
-model_env_var = "DEFAULT_MODEL_COMPLEX"
 
 [[categories]]
 name = "CASUAL"
 description = "Simple questions, greetings, general conversation, or short prompts"
 threshold = 1
 priority = 4
-model_env_var = "DEFAULT_MODEL"
 
-[FALLBACK]
+[routing.FILE_READING]
+model = "meta/llama-3.1-70b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.SYNTAX_FIX]
+model = "meta/llama-3.1-8b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.COMPLEX_REASONING]
+model = "meta/llama-3.3-70b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.CASUAL]
+model = "meta/llama-3.1-8b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.DEFAULT]
 model = "nvidia/nemotron-3-nano-30b-a3b"
 provider_type = "nvidia_nim"
 endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -289,40 +342,63 @@ EOF
         return $([ "$all_pass" = true ] && echo 0 || echo 1)
     }
 
-    test_field_integrity() {
-        section "Test 6: Field Value Integrity"
-        
-        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+     test_field_integrity() {
+         section "Test 6: Field Value Integrity"
+         
+         cat > /tmp/cerebrum-config-test.toml << 'EOF'
 [[categories]]
 name = "FILE_READING"
 description = "Test category"
 threshold = 100
 priority = 1
-model_env_var = "CUSTOM_MODEL"
 
 [[categories]]
 name = "SYNTAX_FIX"
 description = "Test syntax fix"
 threshold = 3
 priority = 2
-model_env_var = "DEFAULT_MODEL"
 
 [[categories]]
 name = "COMPLEX_REASONING"
 description = "Test complex"
 threshold = 3
 priority = 3
-model_env_var = "DEFAULT_MODEL_COMPLEX"
 
 [[categories]]
 name = "CASUAL"
 description = "Test casual"
 threshold = 1
 priority = 4
-model_env_var = "DEFAULT_MODEL"
 
-[FALLBACK]
+[routing.FILE_READING]
+model = "meta/llama-3.1-70b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.SYNTAX_FIX]
+model = "meta/llama-3.1-8b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.COMPLEX_REASONING]
+model = "meta/llama-3.3-70b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.CASUAL]
+model = "meta/llama-3.1-8b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.DEFAULT]
 model = "nvidia/nemotron-3-nano-30b-a3b"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
 EOF
         
         if ! start_server "/tmp/cerebrum-config-test.toml"; then
