@@ -286,12 +286,23 @@ async fn main() {
                     })
                 }
                 "sqlite" => {
-                    let backend = persistence::SqliteBackend::from_path(&persistence_settings.sqlite_path).await;
-                    info!("Persistence backend: sqlite (path={})", persistence_settings.sqlite_path);
-                    Some(persistence::PersistenceConfig {
-                        backend: Arc::new(persistence::DbBackend::Sqlite(backend)),
-                        task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
-                    })
+                    match persistence::SqliteBackend::from_path(&persistence_settings.sqlite_path).await {
+                        Ok(backend) => {
+                            info!("Persistence backend: sqlite (path={})", persistence_settings.sqlite_path);
+                            Some(persistence::PersistenceConfig {
+                                backend: Arc::new(persistence::DbBackend::Sqlite(backend)),
+                                task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
+                            })
+                        }
+                        Err(e) => {
+                            warn!("SQLite backend failed ({}); falling back to memory", e);
+                            let backend = persistence::MemoryBackend::new();
+                            Some(persistence::PersistenceConfig {
+                                backend: Arc::new(persistence::DbBackend::Memory(backend)),
+                                task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
+                            })
+                        }
+                    }
                 }
                 _ => {
                     // Default: memory.

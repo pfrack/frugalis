@@ -870,8 +870,6 @@ test_memory_backend_default() {
     
     # Ensure no persistence env/config
     unset DATABASE_URL
-    unset PERSISTENCE__BACKEND
-    unset PERSISTENCE__SQLITE_PATH
       # Use minimal config to avoid interference
       cat > /tmp/cerebrum-config-test.toml << 'EOF'
 classify_db_log = true
@@ -932,14 +930,15 @@ test_sqlite_backend_and_persistence() {
     local db_path="/tmp/cerebrum_test_$$.db"
     rm -f "$db_path"
     
-    # Set persistence via env
-    export PERSISTENCE__BACKEND="sqlite"
-    export PERSISTENCE__SQLITE_PATH="$db_path"
     unset DATABASE_URL
     
-     # Minimal config
-     cat > /tmp/cerebrum-config-test.toml << 'EOF'
+     # Minimal config with sqlite persistence
+     cat > /tmp/cerebrum-config-test.toml << EOF
 classify_db_log = true
+
+[persistence]
+backend = "sqlite"
+sqlite_path = "$db_path"
 
 [[categories]]
 name = "FILE_READING"
@@ -1001,7 +1000,6 @@ EOF
     
     # Cleanup
     rm -f "$db_path"
-    unset PERSISTENCE__BACKEND PERSISTENCE__SQLITE_PATH
 }
 
 # ============================================================================
@@ -1014,9 +1012,6 @@ test_postgres_backend() {
         log_info "DATABASE_URL not set, skipping Postgres test"
         return 0
     fi
-    
-    unset PERSISTENCE__BACKEND
-    unset PERSISTENCE__SQLITE_PATH
     
      # Minimal config (no persistence section)
      cat > /tmp/cerebrum-config-test.toml << 'EOF'

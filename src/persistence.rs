@@ -38,13 +38,13 @@ pub trait PersistenceBackend: Send + Sync {
 ///
 /// ⚠️ Ephemeral: Data is lost when the process exits. Not suitable for production.
 pub struct MemoryBackend {
-    pub records: Arc<std::sync::RwLock<Vec<InferenceRecord>>>,
+    pub records: Arc<tokio::sync::RwLock<Vec<InferenceRecord>>>,
 }
 
 impl MemoryBackend {
     pub fn new() -> Self {
         MemoryBackend {
-            records: Arc::new(std::sync::RwLock::new(Vec::new())),
+            records: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         }
     }
 }
@@ -59,30 +59,30 @@ pub struct SqliteBackend {
 impl SqliteBackend {
     /// Create a new SQLite backend from a file path.
     /// For `:memory:`, uses a shared-cache in-memory URI.
-    pub async fn from_path(path: &str) -> Self {
+    pub async fn from_path(path: &str) -> Result<Self, String> {
         let uri = if path == ":memory:" {
             "sqlite:file:cerebrum?mode=memory&cache=shared".to_string()
         } else {
             format!("sqlite:{path}?mode=rwc")
         };
-        let backend = Self::from_uri(&uri).await;
-        backend
+        Self::from_uri(&uri).await
     }
 
     /// Create a new SQLite backend from an arbitrary URI.
-    /// Initializes the schema synchronously on construction (panics on failure).
-    pub async fn from_uri(uri: &str) -> Self {
+    /// Initializes the schema on construction.
+    pub async fn from_uri(uri: &str) -> Result<Self, String> {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .min_connections(1)
             .connect(uri)
             .await
-            .expect("failed to create SQLite pool");
+            .map_err(|e| format!("failed to create SQLite pool: {e}"))?;
         let backend = Self { pool };
-        backend.init_schema().await;
-        backend
+        backend.init_schema().await?;
+        Ok(backend)
     }
 
-    async fn init_schema(&self) {
+    async fn init_schema(&self) -> Result<(), String> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS inferences (\
              request_id TEXT PRIMARY KEY, \
@@ -96,7 +96,7 @@ impl SqliteBackend {
         )
         .execute(&self.pool)
         .await
-        .expect("failed to initialize SQLite schema");
+        .map_err(|e| format!("failed to initialize SQLite schema: {e}"))?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_inferences_created_at \
@@ -104,7 +104,8 @@ impl SqliteBackend {
         )
         .execute(&self.pool)
         .await
-        .expect("failed to create SQLite index");
+        .map_err(|e| format!("failed to create SQLite index: {e}"))?;
+        Ok(())
     }
 }
 
@@ -193,7 +194,11 @@ fn percentile_99(durations: &[i32]) -> Option<i32> {
 #[async_trait]
 impl PersistenceBackend for MemoryBackend {
     async fn insert_inference(&self, record: &InferenceRecord) -> Result<(), String> {
-        self.records.write().map_err(|e| e.to_string())?.push(record.clone());
+        let mut records = self.records.write().await;
+        if records.len() >= 10_000 {
+            records.remove(0);
+        }
+        records.push(record.clone());
         Ok(())
     }
 
@@ -204,7 +209,7 @@ impl PersistenceBackend for MemoryBackend {
         filter_category: Option<&str>,
         filter_model: Option<&str>,
     ) -> Result<(Vec<InferenceLog>, i64), QueryError> {
-        let records = self.records.read().map_err(|e| QueryError(e.to_string()))?;
+        let records = self.records.read().await;
         let mut filtered: Vec<&InferenceRecord> = records.iter().collect();
 
         if let Some(cat) = filter_category {
@@ -242,7 +247,7 @@ impl PersistenceBackend for MemoryBackend {
     }
 
     async fn fetch_latency_summary(&self, hours: u32) -> Result<LatencySummary, QueryError> {
-        let records = self.records.read().map_err(|e| QueryError(e.to_string()))?;
+        let records = self.records.read().await;
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
 
         let window: Vec<&InferenceRecord> = records.iter().filter(|r| r.created_at >= cutoff).collect();
@@ -297,7 +302,7 @@ impl PersistenceBackend for MemoryBackend {
         model_costs: &dyn CostProvider,
         baseline_model: &str,
     ) -> Result<SavingsEstimate, QueryError> {
-        let records = self.records.read().map_err(|e| QueryError(e.to_string()))?;
+        let records = self.records.read().await;
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
 
         // Filter by time window, non-null category, non-null model.
@@ -435,6 +440,10 @@ impl PersistenceBackend for DbBackend {
     }
 }
 
+// NOTE: The dynamic WHERE clause building is intentionally duplicated between SqliteBackend
+// (uses `?` positional placeholders) and PostgresBackend (uses `$N` numbered placeholders).
+// The plan explicitly chose no ORM and no sqlx::Any, so dialect-specific bind syntax requires
+// separate implementations.
 #[async_trait]
 impl PersistenceBackend for SqliteBackend {
     async fn insert_inference(&self, record: &InferenceRecord) -> Result<(), String> {
@@ -1402,7 +1411,7 @@ mod tests {
     async fn test_sqlite_backend() -> PersistenceConfig {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         let uri = format!("sqlite:file:test_{}?mode=memory&cache=shared", uuid::Uuid::new_v4());
-        let backend = SqliteBackend::from_uri(&uri).await;
+        let backend = SqliteBackend::from_uri(&uri).await.expect("test SQLite backend setup failed");
         PersistenceConfig {
             backend: Arc::new(DbBackend::Sqlite(backend)),
             task_semaphore: Arc::new(Semaphore::new(100)),
@@ -2120,8 +2129,8 @@ mod tests {
         let id2 = uuid::Uuid::new_v4();
         let uri1 = format!("sqlite:file:test_{id1}?mode=memory&cache=shared");
         let uri2 = format!("sqlite:file:test_{id2}?mode=memory&cache=shared");
-        let backend1 = SqliteBackend::from_uri(&uri1).await;
-        let backend2 = SqliteBackend::from_uri(&uri2).await;
+        let backend1 = SqliteBackend::from_uri(&uri1).await.expect("test backend1 setup failed");
+        let backend2 = SqliteBackend::from_uri(&uri2).await.expect("test backend2 setup failed");
         let pc1 = PersistenceConfig {
             backend: Arc::new(DbBackend::Sqlite(backend1)),
             task_semaphore: Arc::new(Semaphore::new(100)),
