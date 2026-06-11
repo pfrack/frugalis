@@ -80,26 +80,22 @@ if [ "$AUTO_MODE" = true ]; then
         section "Test 2: Threshold Override (FILE_READING threshold = 100)"
         
          cat > /tmp/cerebrum-config-test.toml << 'EOF'
-[[categories]]
-name = "FILE_READING"
+[categories.FILE_READING]
 description = "Reading, viewing, inspecting, searching, or navigating files or code"
 threshold = 100
 priority = 1
 
-[[categories]]
-name = "SYNTAX_FIX"
+[categories.SYNTAX_FIX]
 description = "Fixing bugs, errors, typos, compilation issues, or broken code"
 threshold = 3
 priority = 2
 
-[[categories]]
-name = "COMPLEX_REASONING"
+[categories.COMPLEX_REASONING]
 description = "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization"
 threshold = 3
 priority = 3
 
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple questions, greetings, general conversation, or short prompts"
 threshold = 1
 priority = 4
@@ -161,14 +157,15 @@ EOF
         section "Test 3: Partial Categories (FILE_READING + CASUAL only)"
         
          cat > /tmp/cerebrum-config-test.toml << 'EOF'
-[[categories]]
-name = "FILE_READING"
+[categories.FILE_READING]
 description = "Reading files"
 threshold = 3
 priority = 1
+patterns = [
+  { regex = '(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b', weight = 3 }
+]
 
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple questions"
 threshold = 1
 priority = 4
@@ -263,24 +260,36 @@ name = "FILE_READING"
 description = "Reading, viewing, inspecting, searching, or navigating files or code"
 threshold = 3
 priority = 1
+patterns = [
+  { regex = '(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b', weight = 3 }
+]
 
 [[categories]]
 name = "SYNTAX_FIX"
 description = "Fixing bugs, errors, typos, compilation issues, or broken code"
 threshold = 3
 priority = 2
+patterns = [
+  { regex = '(?i)\b(?:fix|correct|repair|patch)\s+(?:this|the|my|a)\s+(?:bug|error|issue|typo|problem|mistake|warning)', weight = 3 }
+]
 
 [[categories]]
 name = "COMPLEX_REASONING"
 description = "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization"
 threshold = 3
 priority = 3
+patterns = [
+  { regex = '(?i)\b(?:architect|design\s+pattern|system\s+design|trade.?off|refactor|restructure|rearchitect)', weight = 3 }
+]
 
 [[categories]]
 name = "CASUAL"
 description = "Simple questions, greetings, general conversation, or short prompts"
 threshold = 1
 priority = 4
+patterns = [
+  { regex = '(?i)^\s*(?:hi|hey|hello|greetings|good\s+morning|good\s+afternoon|good\s+evening|howdy)(?:\s+there)?[\s!.,]*$', weight = 3 }
+]
 
 [routing.FILE_READING]
 model = "meta/llama-3.1-70b-instruct"
@@ -345,12 +354,16 @@ EOF
      test_field_integrity() {
          section "Test 6: Field Value Integrity"
          
-         cat > /tmp/cerebrum-config-test.toml << 'EOF'
+          cat > /tmp/cerebrum-config-test.toml << 'EOF'
 [[categories]]
 name = "FILE_READING"
-description = "Test category"
+description = "Reading files"
 threshold = 100
 priority = 1
+patterns = [
+  { regex = '(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b', weight = 3 }
+]
+
 
 [[categories]]
 name = "SYNTAX_FIX"

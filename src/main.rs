@@ -144,13 +144,13 @@ async fn main() {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let auth_providers = Arc::new(config::load_auth_providers_from_value(&config_root));
-     let (classifier, routing, model_costs, baseline_model) = {
-              let categories_res = config::load_categories_from_value(&config_root);
-              let categories_ok = categories_res.is_ok();
-              let mut categories = match categories_res {
-                  Ok(c) => c,
-                  Err(_) => vec![],
-              };
+      let (classifier, routing, model_costs, baseline_model) = {
+               let categories_res = config::load_categories_from_value(&config_root);
+               let categories_ok = categories_res.is_ok();
+               let mut categories = match categories_res {
+                   Ok(c) => c,
+                   Err(_) => vec![],
+               };
 
              let (mut routing_map, mut fallback_entry) = match config::routing_from_value(&config_root) {
                  Ok((map, fallback)) => (map, fallback),
@@ -176,9 +176,9 @@ async fn main() {
                       routing_map = new_map;
                       fallback_entry = new_fallback;
                   }
-             }
+              }
 
-             let model_costs = config::build_model_costs(&config_root, &routing_map);
+              let model_costs = config::build_model_costs(&config_root, &routing_map);
              let baseline_model = config_root
                  .get("baseline_model")
                  .and_then(|v| v.as_str())

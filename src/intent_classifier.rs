@@ -565,16 +565,16 @@ impl RegexClassifier {
             })
             .collect();
 
-        // Apply dual_threshold overrides from config
-        for (config, met_flag) in met.iter_mut() {
-            if let Some(dt) = &config.dual_threshold {
-                let score = *scores.get(config.name.as_str()).unwrap_or(&0);
-                let suppress_score = *scores.get(dt.suppress_if_present.as_str()).unwrap_or(&0);
-                *met_flag = score >= dt.alt_score || (score >= config.threshold && suppress_score == 0);
-            }
-        }
+         // Apply dual_threshold overrides from config
+         for (config, met_flag) in met.iter_mut() {
+             if let Some(dt) = &config.dual_threshold {
+                 let score = *scores.get(config.name.as_str()).unwrap_or(&0);
+                 let suppress_score = *scores.get(dt.suppress_if_present.as_str()).unwrap_or(&0);
+                 *met_flag = score >= dt.alt_score || (score >= config.threshold && suppress_score == 0);
+             }
+         }
 
-        let met_count = met.iter().filter(|(_, m)| *m).count();
+         let met_count = met.iter().filter(|(_, m)| *m).count();
 
         if met_count == 0 {
             return self.route_fallback(fallback_category(&self.categories));

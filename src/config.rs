@@ -662,7 +662,9 @@ pub(crate) fn routing_from_value(
 }
 
 /// Load categories from a parsed toml::Value.
-/// Reads from the `[categories]` table where each key is the category name.
+/// Reads categories from either:
+/// - `[categories]` table where each key is a category name (e.g., `[categories.FILE_READING]`)
+/// - `[[categories]]` array of tables with a required `name` field.
 pub(crate) fn load_categories_from_value(
     root: &toml::Value,
 ) -> Result<Vec<CategoryConfig>, String> {
@@ -670,79 +672,161 @@ pub(crate) fn load_categories_from_value(
         .as_table()
         .ok_or_else(|| "Root must be a table".to_string())?;
 
-    let cats_table = match table.get("categories") {
-        Some(toml::Value::Table(t)) => t,
-        _ => return Err("No [categories] section found".to_string()),
+    let cats_value = match table.get("categories") {
+        Some(v) => v,
+        None => return Err("No [categories] section found".to_string()),
     };
 
     let mut categories = Vec::new();
     let mut errors = Vec::new();
 
-    for (name, cat_value) in cats_table {
-        let t = match cat_value.as_table() {
-            Some(t) => t,
-            None => {
-                errors.push(format!("categories['{name}'] is not a table"));
-                continue;
-            }
-        };
-        let description = t
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let threshold = t
-            .get("threshold")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(1) as u32;
-        let priority = t
-            .get("priority")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(99) as u8;
-
-        let patterns = match t.get("patterns").and_then(|v| v.as_array()) {
-            Some(arr) => arr
-                .iter()
-                .filter_map(|v| {
-                    v.as_table().map(|pt| {
-                        let regex = pt
-                            .get("regex")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let weight = pt
-                            .get("weight")
-                            .and_then(|v| v.as_integer())
-                            .unwrap_or(1) as u8;
-                        PatternEntry { regex, weight }
-                    })
-                })
-                .collect(),
-            None => vec![],
-        };
-
-        let dual_threshold = t.get("dual_threshold").and_then(|v| v.as_table()).map(|dt| {
-            DualThreshold {
-                alt_score: dt
-                    .get("alt_score")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(1) as u32,
-                suppress_if_present: dt
-                    .get("suppress_if_present")
+    match cats_value {
+        toml::Value::Table(cats_table) => {
+            for (name, cat_value) in cats_table {
+                let t = match cat_value.as_table() {
+                    Some(t) => t,
+                    None => {
+                        errors.push(format!("categories['{name}'] is not a table"));
+                        continue;
+                    }
+                };
+                let description = t
+                    .get("description")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
-                    .to_string(),
-            }
-        });
+                    .to_string();
+                let threshold = t
+                    .get("threshold")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(1) as u32;
+                let priority = t
+                    .get("priority")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(99) as u8;
 
-        categories.push(CategoryConfig {
-            name: name.clone(),
-            description,
-            threshold,
-            priority,
-            patterns,
-            dual_threshold,
-        });
+                let patterns = match t.get("patterns").and_then(|v| v.as_array()) {
+                    Some(arr) => arr
+                        .iter()
+                        .filter_map(|v| {
+                            v.as_table().map(|pt| {
+                                let regex = pt
+                                    .get("regex")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let weight = pt
+                                    .get("weight")
+                                    .and_then(|v| v.as_integer())
+                                    .unwrap_or(1) as u8;
+                                PatternEntry { regex, weight }
+                            })
+                        })
+                        .collect(),
+                    None => vec![],
+                };
+
+                let dual_threshold = t.get("dual_threshold").and_then(|v| v.as_table()).map(|dt| {
+                    DualThreshold {
+                        alt_score: dt
+                            .get("alt_score")
+                            .and_then(|v| v.as_integer())
+                            .unwrap_or(1) as u32,
+                        suppress_if_present: dt
+                            .get("suppress_if_present")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    }
+                });
+
+                categories.push(CategoryConfig {
+                    name: name.clone(),
+                    description,
+                    threshold,
+                    priority,
+                    patterns,
+                    dual_threshold,
+                });
+            }
+        }
+        toml::Value::Array(arr) => {
+            for (idx, entry) in arr.iter().enumerate() {
+                let t = match entry.as_table() {
+                    Some(t) => t,
+                    None => {
+                        errors.push(format!("categories[{}] is not a table", idx));
+                        continue;
+                    }
+                };
+                let name = match t.get("name").and_then(|v| v.as_str()) {
+                    Some(n) => n,
+                    None => {
+                        errors.push(format!("categories[{}] missing 'name' field", idx));
+                        continue;
+                    }
+                };
+                let description = t
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let threshold = t
+                    .get("threshold")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(1) as u32;
+                let priority = t
+                    .get("priority")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(99) as u8;
+
+                let patterns = match t.get("patterns").and_then(|v| v.as_array()) {
+                    Some(arr) => arr
+                        .iter()
+                        .filter_map(|v| {
+                            v.as_table().map(|pt| {
+                                let regex = pt
+                                    .get("regex")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let weight = pt
+                                    .get("weight")
+                                    .and_then(|v| v.as_integer())
+                                    .unwrap_or(1) as u8;
+                                PatternEntry { regex, weight }
+                            })
+                        })
+                        .collect(),
+                    None => vec![],
+                };
+
+                let dual_threshold = t.get("dual_threshold").and_then(|v| v.as_table()).map(|dt| {
+                    DualThreshold {
+                        alt_score: dt
+                            .get("alt_score")
+                            .and_then(|v| v.as_integer())
+                            .unwrap_or(1) as u32,
+                        suppress_if_present: dt
+                            .get("suppress_if_present")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    }
+                });
+
+                categories.push(CategoryConfig {
+                    name: name.to_string(),
+                    description,
+                    threshold,
+                    priority,
+                    patterns,
+                    dual_threshold,
+                });
+            }
+        }
+        _ => {
+            return Err("categories section must be a table or an array".to_string());
+        }
     }
 
     if !errors.is_empty() {
@@ -1555,5 +1639,27 @@ priority = 1
         let res = parse_env_int("TEST_PARSE_INT", 42, None, Some(100));
         assert_eq!(res, 42);
         std::env::remove_var("TEST_PARSE_INT");
+    }
+
+    #[test]
+    fn load_categories_array_format() {
+        let toml_content = r#"
+[[categories]]
+name = "FILE_READING"
+description = "Reading files"
+threshold = 3
+priority = 1
+
+[[categories]]
+name = "CASUAL"
+description = "Simple"
+threshold = 1
+priority = 4
+"#;
+        let root: toml::Value = toml::from_str(toml_content).expect("valid TOML");
+        let cats = load_categories_from_value(&root).expect("load should succeed");
+        assert_eq!(cats.len(), 2);
+        assert_eq!(cats[0].name, "FILE_READING");
+        assert_eq!(cats[1].name, "CASUAL");
     }
 }
