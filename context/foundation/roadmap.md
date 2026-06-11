@@ -53,8 +53,8 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-10 | post-review-cleanup | (tech debt + hardening + reliability) Consolidates review-cleanup, review-hardening, and prod-hardening-reliability into a single 12-phase plan: SSE log timing, handler decomposition, cleanup, test safety, embedded migrations, LLM key refresh, auth hardening, streaming/JSON fixes, dead code, graceful shutdown, configurability, and observability | S-09a | — | planned |
 | S-11 | opentelemetry-integration | export application traces, metrics, and logs via OTLP to an observability backend (Grafana Cloud); leverages existing `tracing` crate with zero business-logic changes for traces | S-10 | FR-005 | proposed |
 | S-12 | in-memory-db-fallback | persistence always available: 3-tier backend config (`memory` / `sqlite` / `postgres`) via `DB_BACKEND` env; enables zero-dep dev startup and real persistence in tests | S-13 | FR-005, NFR (testing) | proposed |
-| S-13 | move-all-config-to-file | deploy with zero hardcoded config — everything is in `config.toml`; env vars reduced to API_KEYS + auth creds + DATABASE_URL only | S-09a, S-12 | FR-002, FR-003 | preparing |
-| S-14 | config-format-upgrade | Config format upgrade: support YAML + TOML with external pattern files; add `--validate` and `--migrate-config` tools | S-13 | FR-002, FR-003 | proposed |
+| S-13 | move-all-config-to-file | Config: eliminate all hardcoded values — 25 hardcoded Rust values + 19 env var reads moved to config.toml; env vars reduced to API_KEYS + auth creds + DATABASE_URL only; categories and regex patterns fully configurable | S-09a, **S-14** | FR-002, FR-003 | preparing |
+| S-14 | config-format-upgrade | Config: upgrade format to support YAML + external pattern files; add `--validate` and `--migrate-config` CLI tools | **S-13** | FR-002, FR-003 | proposed |
 
 ## Streams
 
@@ -67,7 +67,7 @@ Navigation aid — groups items that share a Prerequisites chain. Canonical orde
 | C | Metrics | — | All metrics features (S-04) integrated into dashboard stream (B). |
 | D | Critical Logging | `F-04` → `S-06` | Ensures all critical paths have observability logs and a dedicated UI page. |
 | E | Observability | `S-10` → `S-11` | Production hardening followed by OpenTelemetry integration for distributed tracing, metrics export, and log correlation. |
-| F | Config | `S-09a` → `S-13` → `S-14` | Config boundary formalization (S-09a) → unified TOML config for ALL settings (S-13) → multi-format + external patterns (S-14). |
+| F | Config | `S-09a` → `S-14` → `S-13` | Config boundary formalization (S-09a) → serde refactor + multi-format upgrade (S-14) → unified TOML config for ALL settings (S-13). |
 
 ## Baseline
 
@@ -387,7 +387,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
   - **Infrastructure**: `"0.0.0.0"` → `[server].bind_host`, `take(10_000)`/`take(200)`/`>1000` → `[persistence]`/`[http]` fields
 - **Change ID:** `move-all-config-to-file`
 - **PRD refs:** FR-002 (intent classification), FR-003 (routing)
-- **Prerequisites:** S-09a (classifier-config-boundary merged), S-12 (persistence backend config) — both implemented
+- **Prerequisites:** S-09a (classifier-config-boundary merged), S-14 (config-format-upgrade) — both implemented
 - **Parallel with:** —
 - **Blockers:** —
 - **Unknowns:** —
