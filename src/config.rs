@@ -702,7 +702,8 @@ pub(crate) fn load_categories_from_value(
                 let priority = t
                     .get("priority")
                     .and_then(|v| v.as_integer())
-                    .unwrap_or(99) as u8;
+                    .unwrap_or(99)
+                    .min(u8::MAX as i64) as u8;
 
                 let patterns = match t.get("patterns").and_then(|v| v.as_array()) {
                     Some(arr) => arr
@@ -717,7 +718,8 @@ pub(crate) fn load_categories_from_value(
                                 let weight = pt
                                     .get("weight")
                                     .and_then(|v| v.as_integer())
-                                    .unwrap_or(1) as u8;
+                                    .unwrap_or(1)
+                                    .min(u8::MAX as i64) as u8;
                                 PatternEntry { regex, weight }
                             })
                         })
@@ -777,7 +779,8 @@ pub(crate) fn load_categories_from_value(
                 let priority = t
                     .get("priority")
                     .and_then(|v| v.as_integer())
-                    .unwrap_or(99) as u8;
+                    .unwrap_or(99)
+                    .min(u8::MAX as i64) as u8;
 
                 let patterns = match t.get("patterns").and_then(|v| v.as_array()) {
                     Some(arr) => arr
@@ -792,7 +795,8 @@ pub(crate) fn load_categories_from_value(
                                 let weight = pt
                                     .get("weight")
                                     .and_then(|v| v.as_integer())
-                                    .unwrap_or(1) as u8;
+                                    .unwrap_or(1)
+                                    .min(u8::MAX as i64) as u8;
                                 PatternEntry { regex, weight }
                             })
                         })
@@ -877,7 +881,8 @@ pub(crate) fn load_negative_patterns_from_value(root: &toml::Value) -> Vec<Negat
         let penalty = t
             .get("penalty")
             .and_then(|v| v.as_integer())
-            .unwrap_or(2) as u8;
+            .unwrap_or(2)
+            .min(u8::MAX as i64) as u8;
         patterns.push(NegativePatternConfig {
             regex,
             suppressed,
@@ -1139,7 +1144,7 @@ mod tests {
     use crate::routing::RouteEntry;
     use serial_test::serial;
 
-    fn test_hardcoded_categories() -> Vec<CategoryConfig> {
+    fn test_categories() -> Vec<CategoryConfig> {
         vec![
             CategoryConfig {
                 name: "FILE_READING".to_string(),
@@ -1260,7 +1265,7 @@ api_key_env = ""
     #[test]
     #[serial]
     fn hardcoded_routing_produces_expected_defaults() {
-        let cats = test_hardcoded_categories();
+        let cats = test_categories();
         let (routing, fallback) = hardcoded_routing(&cats);
 
         assert_eq!(routing.len(), cats.len());
@@ -1286,7 +1291,7 @@ api_key_env = ""
 
     #[test]
     fn hardcoded_routing_uses_hardcoded_endpoint() {
-        let (_, fallback) = hardcoded_routing(&test_hardcoded_categories());
+        let (_, fallback) = hardcoded_routing(&test_categories());
         assert_eq!(
             fallback.endpoint,
             "https://integrate.api.nvidia.com/v1/chat/completions"

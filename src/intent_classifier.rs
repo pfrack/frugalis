@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use regex::Regex;
 use regex::RegexSet;
 
-#[allow(unused_imports)]
 pub use crate::routing::{
     ModelCosts, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX,
 };
@@ -48,7 +47,6 @@ pub(crate) struct NegativePatternConfig {
 /// is a breaking change requiring updates to all listed consumers.
 /// Names must stay [A-Z_]+ for compatibility with key.to_uppercase()
 /// normalization in the routing config loader.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct CategoryConfig {
     pub name: String,
@@ -158,7 +156,7 @@ pub struct LLMClassifier {
     pub model: String,
     pub endpoint: String,
     api_key_env: String,
-    api_key: Arc<tokio::sync::RwLock<String>>,
+    api_key: Arc<tokio::sync::RwLock<Arc<str>>>,
     provider_type: String,
     auth_providers: Arc<Vec<AuthProviderConfig>>,
     categories: Vec<CategoryConfig>,
@@ -192,8 +190,14 @@ impl LLMClassifier {
             build_llm_classifier_prompt(&categories)
         };
 
-        let api_key = std::env::var(&config.api_key_env).unwrap_or_else(|_| String::new());
-        let api_key_rwlock = Arc::new(tokio::sync::RwLock::new(api_key));
+        let api_key = match std::env::var(&config.api_key_env) {
+            Ok(k) => k,
+            Err(_) => {
+                tracing::warn!("LLM API key env {} not set; classifier will degrade", config.api_key_env);
+                String::new()
+            }
+        };
+        let api_key_rwlock = Arc::new(tokio::sync::RwLock::new(Arc::from(api_key.as_str())));
 
         let classifier_api_key = api_key_rwlock.clone();
         let key_env = config.api_key_env.clone();
@@ -205,9 +209,9 @@ impl LLMClassifier {
                 if let Ok(new_key) = std::env::var(&key_env) {
                     if !new_key.is_empty() {
                         let mut key = classifier_api_key.write().await;
-                        if *key != new_key {
+                        if **key != new_key[..] {
                             tracing::debug!("LLM API key refreshed from env");
-                            *key = new_key;
+                            *key = Arc::from(new_key.as_str());
                         }
                     }
                 }
@@ -551,7 +555,7 @@ impl RegexClassifier {
 
         // Short prompts (< short_prompt_len chars, no matches) → CASUAL
         let all_zero = scores.values().all(|&s| s == 0);
-        if sanitized.len() < self.short_prompt_len && all_zero {
+        if sanitized.chars().count() < self.short_prompt_len && all_zero {
             return self.route_fallback(fallback_category(&self.categories));
         }
 

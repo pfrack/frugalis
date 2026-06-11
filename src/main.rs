@@ -850,7 +850,7 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
      let allowed_origin_headers: Vec<HeaderValue> = app_state
          .allowed_origins
          .try_read()
-         .unwrap()
+         .expect("allowed_origins RwLock written at init; poisoning impossible")
          .iter()
          .filter_map(|s| header::HeaderValue::from_str(s).ok())
          .collect();
