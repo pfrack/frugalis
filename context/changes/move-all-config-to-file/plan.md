@@ -843,8 +843,8 @@ Phase 4–6: Minor — `PatternMeta.category` changes from `&'static str` to `St
  
 #### Manual
 
-- [x] 5.6 Default classification behavior matches pre-refactor output
-- [x] 5.7 Custom `CONFIG_PATH` overlay with different categories works
+- [x] 5.6 Default classification behavior matches pre-refactor output — 9fdb903
+- [x] 5.7 Custom `CONFIG_PATH` overlay with different categories works — 9fdb903
 
 ### Phase 6: Tests & Cleanup
 
@@ -859,6 +859,6 @@ Phase 4–6: Minor — `PatternMeta.category` changes from `&'static str` to `St
 
 #### Manual
 
-- [x] 6.7 App starts with only secrets as env vars, classifier initializes
-- [x] 6.8 `/v1/classify` returns correct category for test prompts
-- [x] 6.9 Custom `CONFIG_PATH` overlay classification verified
+- [x] 6.7 App starts with only secrets as env vars, classifier initializes — 9fdb903
+- [x] 6.8 `/v1/classify` returns correct category for test prompts — 9fdb903
+- [x] 6.9 Custom `CONFIG_PATH` overlay classification verified — 9fdb903
