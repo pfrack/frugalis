@@ -52,49 +52,21 @@ async fn main() {
     // Parse config before tracing init to get server settings
     let config_path_option = std::env::var("CONFIG_PATH").ok();
     const DEFAULT_CONFIG_TOML: &str = include_str!("../config.toml");
-    let mut config_root = match toml::from_str::<toml::Value>(DEFAULT_CONFIG_TOML) {
+    let mut config_root: config::ConfigRoot = match toml::from_str(DEFAULT_CONFIG_TOML) {
         Ok(root) => root,
         Err(e) => {
             eprintln!("Embedded config.toml is invalid: {e}; using hardcoded defaults");
-            toml::Value::Table(Default::default())
+            config::ConfigRoot::default()
         }
     };
 
     if let Some(config_path) = config_path_option {
-        match std::fs::read_to_string(&config_path) {
-            Ok(content) => {
-                match toml::from_str::<toml::Value>(&content) {
-                    Ok(overlay) => {
-                        let override_keys: std::collections::HashSet<&str> = overlay
-                            .as_table()
-                            .map(|t| {
-                                t.keys()
-                                    .filter(|k| {
-                                        matches!(
-                                            k.as_str(),
-                                            "classifiers"
-                                                | "regex_classifier"
-                                                | "llm_classifier"
-                                                | "categories"
-                                                | "auth_provider"
-                                                | "model_costs"
-                                                | "routing"
-                                                | "negative_patterns"
-                                        )
-                                    })
-                                    .map(|k| k.as_str())
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        config::merge_toml_values(&mut config_root, &overlay, &override_keys);
-                    }
-                    Err(e) => {
-                        eprintln!("failed to parse config file at {}: {}; using embedded defaults", config_path, e);
-                    }
-                }
+        match config::load_config_from_path(&config_path) {
+            Ok(overlay) => {
+                config::merge_configs(&mut config_root, overlay);
             }
             Err(e) => {
-                eprintln!("failed to read config file at {}: {}; using embedded defaults", config_path, e);
+                eprintln!("failed to parse config file at {}: {}; using embedded defaults", config_path, e);
             }
         }
     }
@@ -139,10 +111,7 @@ async fn main() {
         .build()
         .expect("reqwest client should build");
 
-    let classify_db_log = config_root
-        .get("classify_db_log")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let classify_db_log = config_root.classify_db_log.unwrap_or(false);
     let auth_providers = Arc::new(config::load_auth_providers_from_value(&config_root));
       let (classifier, routing, model_costs, baseline_model) = {
                let categories_res = config::load_categories_from_value(&config_root);
@@ -179,11 +148,9 @@ async fn main() {
               }
 
               let model_costs = config::build_model_costs(&config_root, &routing_map);
-             let baseline_model = config_root
-                 .get("baseline_model")
-                 .and_then(|v| v.as_str())
-                 .unwrap_or(intent_classifier::DEFAULT_MODEL_COMPLEX)
-                 .to_string();
+              let baseline_model = config_root.baseline_model
+                  .clone()
+                  .unwrap_or_else(|| intent_classifier::DEFAULT_MODEL_COMPLEX.to_string());
              if !classifiers_config.enabled {
                  info!("All classifiers disabled via config");
                  (None, HashMap::new(), model_costs, baseline_model)

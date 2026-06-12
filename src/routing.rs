@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use serde::Deserialize;
 
 // ── Shared Types ──
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct RouteEntry {
     pub model: String,
     pub endpoint: String,

@@ -3,6 +3,7 @@ use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
+use serde::Deserialize;
 
 use regex::Regex;
 use regex::RegexSet;
@@ -12,26 +13,35 @@ pub use crate::routing::{
 };
 
 /// A single regex pattern entry with its weight for intent classification.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct PatternEntry {
     pub regex: String,
+    #[serde(default = "default_weight")]
     pub weight: u8,
 }
 
+fn default_weight() -> u8 { 1 }
+
 /// Dual-threshold configuration for a category.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct DualThreshold {
+    #[serde(default = "default_alt_score")]
     pub alt_score: u32,
     pub suppress_if_present: String,
 }
 
+fn default_alt_score() -> u32 { 1 }
+
 /// A negative suppression pattern configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct NegativePatternConfig {
     pub regex: String,
     pub suppressed: String,
+    #[serde(default = "default_penalty")]
     pub penalty: u8,
 }
+
+fn default_penalty() -> u8 { 2 }
 
 /// Single source of truth for intent category definitions.
 /// Consumed by RegexClassifier (patterns, thresholds, routing) and
@@ -47,15 +57,22 @@ pub(crate) struct NegativePatternConfig {
 /// is a breaking change requiring updates to all listed consumers.
 /// Names must stay [A-Z_]+ for compatibility with key.to_uppercase()
 /// normalization in the routing config loader.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct CategoryConfig {
+    #[serde(default)]
     pub name: String,
     pub description: String,
+    #[serde(default = "default_threshold")]
     pub threshold: u32,
+    #[serde(default = "default_priority")]
     pub priority: u8,
+    #[serde(default)]
     pub patterns: Vec<PatternEntry>,
     pub dual_threshold: Option<DualThreshold>,
 }
+
+fn default_threshold() -> u32 { 1 }
+fn default_priority() -> u8 { 99 }
 
 #[derive(Clone)]
 pub struct ClassificationResult {
@@ -1025,6 +1042,7 @@ mod tests {
         });
 
         let config = LlmClassifierConfig {
+            enabled: true,
             model: "gpt-4o-mini".to_string(),
             endpoint: server.url("/v1/chat/completions"),
             api_key_env: "OPENAI_API_KEY".to_string(),
@@ -1058,6 +1076,7 @@ mod tests {
         });
 
         let config = LlmClassifierConfig {
+            enabled: true,
             model: "gpt-4o-mini".to_string(),
             endpoint: server.url("/v1/chat/completions"),
             api_key_env: "OPENAI_API_KEY".to_string(),
@@ -1081,6 +1100,7 @@ mod tests {
     #[serial]
     async fn llm_classifier_network_error() {
         let config = LlmClassifierConfig {
+            enabled: true,
             model: "gpt-4o-mini".to_string(),
             endpoint: "http://127.0.0.1:1/nonexistent".to_string(), // Invalid endpoint
             api_key_env: "OPENAI_API_KEY".to_string(),
@@ -1120,6 +1140,7 @@ mod tests {
         });
 
         let config = LlmClassifierConfig {
+            enabled: true,
             model: "gpt-4o-mini".to_string(),
             endpoint: server.url("/v1/chat/completions"),
             api_key_env: "OPENAI_API_KEY".to_string(),

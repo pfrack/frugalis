@@ -1,8 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::path::Path;
 use tracing::{debug, warn};
 
+use serde::Deserialize;
+
 use crate::intent_classifier::{
-    CategoryConfig, DualThreshold, NegativePatternConfig, PatternEntry,
+    CategoryConfig, NegativePatternConfig,
 };
 use crate::routing::*;
 
@@ -11,238 +14,97 @@ pub(crate) const CONFIG_DEFAULT: &str = "config.toml";
 #[cfg(test)]
 pub(crate) const ROUTING_CONFIG_LEGACY: &str = "routing.toml";
 
+// ── Serde default-value helpers ──
 
-/// Load dashboard configuration from a parsed TOML value.
+fn default_port() -> u16 { 10000 }
+fn default_log_level() -> String { "info".to_string() }
+fn default_log_format() -> String { "compact".to_string() }
+fn default_max_body_bytes() -> usize { 10_485_760 }
+fn default_keepalive_interval() -> u64 { 15 }
+fn default_client_timeout() -> u64 { 120 }
+fn default_client_connect_timeout() -> u64 { 30 }
+fn default_streaming_chan_cap() -> usize { 32 }
+fn default_connection_retries() -> u32 { 3 }
+fn default_retry_base_ms() -> u64 { 1000 }
+fn default_max_connections() -> u32 { 10 }
+fn default_acquire_timeout() -> u64 { 30 }
+fn default_idle_timeout() -> u64 { 1800 }
+fn default_log_concurrency() -> u32 { 100 }
+fn default_backend() -> String { "memory".to_string() }
+fn default_db_path() -> String { "./cerebrum.db".to_string() }
+fn default_dashboard_hours() -> u32 { 24 }
+fn default_hours_min() -> u32 { 1 }
+fn default_hours_max() -> u32 { 720 }
+fn default_page_limit() -> u32 { 20 }
+fn default_page_limit_max() -> u32 { 100 }
+fn default_recent_count() -> u32 { 5 }
+fn default_short_prompt_len() -> usize { 30 }
+fn default_timeout_secs() -> u64 { 3 }
+fn default_classifier_order() -> Vec<String> { vec!["regex".to_string(), "llm".to_string()] }
+fn default_llm_model() -> String { "gpt-4o-mini".to_string() }
+fn default_llm_api_key_env() -> String { "OPENAI_API_KEY".to_string() }
+fn default_provider_type() -> String { "openai_compatible".to_string() }
+fn default_enabled_true() -> bool { true }
+
+/// Load dashboard configuration from a parsed ConfigRoot.
 /// Returns defaults if section is absent.
-pub(crate) fn load_dashboard_config_from_value(root: &toml::Value) -> DashboardConfig {
-    let table = match root.as_table() {
-        Some(t) => t,
-        None => return DashboardConfig::default(),
-    };
-    let dashboard_section = match table.get("dashboard").and_then(|v| v.as_table()) {
-        Some(t) => t,
-        None => {
-            debug!("[dashboard] section not found; using defaults");
-            return DashboardConfig::default();
-        }
-    };
-    DashboardConfig {
-        default_hours: dashboard_section
-            .get("default_hours")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(24) as u32,
-        hours_min: dashboard_section
-            .get("hours_min")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(1) as u32,
-        hours_max: dashboard_section
-            .get("hours_max")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(720) as u32,
-        page_limit: dashboard_section
-            .get("page_limit")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(20) as u32,
-        page_limit_max: dashboard_section
-            .get("page_limit_max")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(100) as u32,
-        recent_count: dashboard_section
-            .get("recent_count")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(5) as u32,
-    }
+pub(crate) fn load_dashboard_config_from_value(root: &ConfigRoot) -> DashboardConfig {
+    root.dashboard.clone().unwrap_or_else(|| {
+        debug!("[dashboard] section not found; using defaults");
+        DashboardConfig::default()
+    })
 }
 
-/// Load server configuration from a parsed TOML value.
+/// Load server configuration from a parsed ConfigRoot.
 /// Returns defaults if section is absent.
-pub(crate) fn load_server_config_from_value(root: &toml::Value) -> ServerConfig {
-    let table = match root.as_table() {
-        Some(t) => t,
-        None => return ServerConfig::default(),
-    };
-    let server_section = match table.get("server").and_then(|v| v.as_table()) {
-        Some(t) => t,
-        None => {
-            debug!("[server] section not found; using defaults");
-            return ServerConfig::default();
-        }
-    };
-    ServerConfig {
-        port: server_section
-            .get("port")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(10000) as u16,
-        log_level: server_section
-            .get("log_level")
-            .and_then(|v| v.as_str())
-            .unwrap_or("info")
-            .to_string(),
-        log_format: server_section
-            .get("log_format")
-            .and_then(|v| v.as_str())
-            .unwrap_or("compact")
-            .to_string(),
-    }
+pub(crate) fn load_server_config_from_value(root: &ConfigRoot) -> ServerConfig {
+    root.server.clone().unwrap_or_else(|| {
+        debug!("[server] section not found; using defaults");
+        ServerConfig::default()
+    })
 }
 
-/// Load HTTP configuration from a parsed TOML value.
+/// Load HTTP configuration from a parsed ConfigRoot.
 /// Returns defaults if section is absent.
-pub(crate) fn load_http_config_from_value(root: &toml::Value) -> HttpConfig {
-    let table = match root.as_table() {
-        Some(t) => t,
-        None => return HttpConfig::default(),
-    };
-    let http_section = match table.get("http").and_then(|v| v.as_table()) {
-        Some(t) => t,
-        None => {
-            debug!("[http] section not found; using defaults");
-            return HttpConfig::default();
-        }
-    };
-    HttpConfig {
-        max_upstream_body_bytes: http_section
-            .get("max_upstream_body_bytes")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(10_485_760) as usize,
-        keepalive_interval_secs: http_section
-            .get("keepalive_interval_secs")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(15) as u64,
-        request_body_limit_bytes: http_section
-            .get("request_body_limit_bytes")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(10_485_760) as usize,
-        client_timeout_secs: http_section
-            .get("client_timeout_secs")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(120) as u64,
-        client_connect_timeout_secs: http_section
-            .get("client_connect_timeout_secs")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(30) as u64,
-        streaming_channel_capacity: http_section
-            .get("streaming_channel_capacity")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(32) as usize,
-    }
+pub(crate) fn load_http_config_from_value(root: &ConfigRoot) -> HttpConfig {
+    root.http.clone().unwrap_or_else(|| {
+        debug!("[http] section not found; using defaults");
+        HttpConfig::default()
+    })
 }
 
-/// Load database configuration from a parsed TOML value.
+/// Load database configuration from a parsed ConfigRoot.
 /// Returns defaults if section is absent.
-pub(crate) fn load_database_config_from_value(root: &toml::Value) -> DatabaseConfig {
-    let table = match root.as_table() {
-        Some(t) => t,
-        None => return DatabaseConfig::default(),
-    };
-    let db_section = match table.get("database").and_then(|v| v.as_table()) {
-        Some(t) => t,
-        None => {
-            debug!("[database] section not found; using defaults");
-            return DatabaseConfig::default();
-        }
-    };
-    DatabaseConfig {
-        connection_retries: db_section
-            .get("connection_retries")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(3) as u32,
-        retry_base_ms: db_section
-            .get("retry_base_ms")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(1000) as u64,
-        max_connections: db_section
-            .get("max_connections")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(10) as u32,
-        acquire_timeout_secs: db_section
-            .get("acquire_timeout_secs")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(30) as u64,
-        idle_timeout_secs: db_section
-            .get("idle_timeout_secs")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(1800) as u64,
-        log_concurrency_limit: db_section
-            .get("log_concurrency_limit")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(100) as u32,
-    }
+pub(crate) fn load_database_config_from_value(root: &ConfigRoot) -> DatabaseConfig {
+    root.database.clone().unwrap_or_else(|| {
+        debug!("[database] section not found; using defaults");
+        DatabaseConfig::default()
+    })
 }
 
-/// Load auth providers from a parsed TOML value.
+/// Load auth providers from a parsed ConfigRoot.
 /// Returns empty vec if section is absent.
-pub(crate) fn load_auth_providers_from_value(root: &toml::Value) -> Vec<AuthProviderConfig> {
-    let table = match root.as_table() {
-        Some(t) => t,
-        None => return vec![],
-    };
-    let providers_array = match table.get("auth_provider").and_then(|v| v.as_array()) {
-        Some(arr) => arr,
-        None => {
-            debug!("[auth_provider] section not found; no auth providers configured");
-            return vec![];
-        }
-    };
-
-    let mut providers = Vec::new();
-    for provider in providers_array {
-        if let Some(provider_table) = provider.as_table() {
-            let type_str = provider_table
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let header = provider_table
-                .get("header")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let value_template = provider_table
-                .get("value_template")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            providers.push(AuthProviderConfig {
-                type_: type_str,
-                header,
-                value_template,
-            });
-        }
-    }
-    providers
-}
-
-/// Recursively merge overlay TOML values into base, with overlay values taking precedence.
-/// Keys listed in `override_keys` are completely replaced (not recursively merged).
-pub(crate) fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value, override_keys: &HashSet<&str>) {
-    if let (toml::Value::Table(base_table), toml::Value::Table(overlay_table)) = (base, overlay) {
-        for (key, overlay_val) in overlay_table.iter() {
-            if override_keys.contains(key.as_str()) {
-                // Complete replacement for override keys
-                base_table.insert(key.clone(), overlay_val.clone());
-            } else {
-                match (base_table.get_mut(key), overlay_val) {
-                    (Some(ref mut base_val @ toml::Value::Table(_)), toml::Value::Table(overlay_nested)) => {
-                        // Recursively merge nested tables
-                        merge_toml_values(base_val, &toml::Value::Table(overlay_nested.clone()), override_keys);
-                    }
-                    _ => {
-                        // Overlay value wins for non-table keys or when base doesn't exist
-                        base_table.insert(key.clone(), overlay_val.clone());
-                    }
-                }
-            }
-        }
-    }
+pub(crate) fn load_auth_providers_from_value(root: &ConfigRoot) -> Vec<AuthProviderConfig> {
+    root.auth_providers.clone().unwrap_or_else(|| {
+        debug!("[auth_provider] section not found; no auth providers configured");
+        vec![]
+    })
 }
 
 /// Dashboard configuration for page defaults.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct DashboardConfig {
+    #[serde(default = "default_dashboard_hours")]
     pub default_hours: u32,
+    #[serde(default = "default_hours_min")]
     pub hours_min: u32,
+    #[serde(default = "default_hours_max")]
     pub hours_max: u32,
+    #[serde(default = "default_page_limit")]
     pub page_limit: u32,
+    #[serde(default = "default_page_limit_max")]
     pub page_limit_max: u32,
+    #[serde(default = "default_recent_count")]
     pub recent_count: u32,
 }
 
@@ -260,50 +122,29 @@ impl Default for DashboardConfig {
 }
 
 /// CORS configuration loaded from [cors] section.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct CorsConfig {
+    #[serde(default)]
     pub allowed_origins: Vec<String>,
 }
 
-impl Default for CorsConfig {
-    fn default() -> Self {
-        Self {
-            allowed_origins: vec![],
-        }
-    }
-}
-
-/// Load CORS configuration from a parsed TOML value.
+/// Load CORS configuration from a parsed ConfigRoot.
 /// Returns defaults if section is absent.
-pub(crate) fn load_cors_config_from_value(root: &toml::Value) -> CorsConfig {
-    let table = match root.as_table() {
-        Some(t) => t,
-        None => return CorsConfig::default(),
-    };
-    let cors_section = match table.get("cors").and_then(|v| v.as_table()) {
-        Some(t) => t,
-        None => {
-            debug!("[cors] section not found; using defaults (empty allowed_origins)");
-            return CorsConfig::default();
-        }
-    };
-    let allowed_origins = cors_section
-        .get("allowed_origins")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    CorsConfig { allowed_origins }
+pub(crate) fn load_cors_config_from_value(root: &ConfigRoot) -> CorsConfig {
+    root.cors.clone().unwrap_or_else(|| {
+        debug!("[cors] section not found; using defaults (empty allowed_origins)");
+        CorsConfig::default()
+    })
 }
 
 /// Server configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct ServerConfig {
+    #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default = "default_log_format")]
     pub log_format: String,
 }
 
@@ -318,13 +159,19 @@ impl Default for ServerConfig {
 }
 
 /// HTTP configuration for client limits and timeouts.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct HttpConfig {
+    #[serde(default = "default_max_body_bytes")]
     pub max_upstream_body_bytes: usize,
+    #[serde(default = "default_keepalive_interval")]
     pub keepalive_interval_secs: u64,
+    #[serde(default = "default_max_body_bytes")]
     pub request_body_limit_bytes: usize,
+    #[serde(default = "default_client_timeout")]
     pub client_timeout_secs: u64,
+    #[serde(default = "default_client_connect_timeout")]
     pub client_connect_timeout_secs: u64,
+    #[serde(default = "default_streaming_chan_cap")]
     pub streaming_channel_capacity: usize,
 }
 
@@ -342,13 +189,19 @@ impl Default for HttpConfig {
 }
 
 /// Database configuration for pool and retry settings.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct DatabaseConfig {
+    #[serde(default = "default_connection_retries")]
     pub connection_retries: u32,
+    #[serde(default = "default_retry_base_ms")]
     pub retry_base_ms: u64,
+    #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    #[serde(default = "default_acquire_timeout")]
     pub acquire_timeout_secs: u64,
+    #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u64,
+    #[serde(default = "default_log_concurrency")]
     pub log_concurrency_limit: u32,
 }
 
@@ -366,9 +219,11 @@ impl Default for DatabaseConfig {
 }
 
 /// Persistence backend configuration loaded from [persistence] section.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct PersistenceSettings {
+    #[serde(default = "default_backend")]
     pub backend: String,
+    #[serde(default = "default_db_path")]
     pub sqlite_path: String,
 }
 
@@ -381,37 +236,19 @@ impl Default for PersistenceSettings {
     }
 }
 
-/// Load persistence configuration from a parsed TOML value.
+/// Load persistence configuration from a parsed ConfigRoot.
 /// Returns defaults if section is absent.
-pub(crate) fn load_persistence_config_from_value(root: &toml::Value) -> PersistenceSettings {
-    let table = match root.as_table() {
-        Some(t) => t,
-        None => return PersistenceSettings::default(),
-    };
-    let persistence_section = match table.get("persistence").and_then(|v| v.as_table()) {
-        Some(t) => t,
-        None => {
-            debug!("[persistence] section not found; using defaults (memory backend)");
-            return PersistenceSettings::default();
-        }
-    };
-    PersistenceSettings {
-        backend: persistence_section
-            .get("backend")
-            .and_then(|v| v.as_str())
-            .unwrap_or("memory")
-            .to_string(),
-        sqlite_path: persistence_section
-            .get("sqlite_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("./cerebrum.db")
-            .to_string(),
-    }
+pub(crate) fn load_persistence_config_from_value(root: &ConfigRoot) -> PersistenceSettings {
+    root.persistence.clone().unwrap_or_else(|| {
+        debug!("[persistence] section not found; using defaults (memory backend)");
+        PersistenceSettings::default()
+    })
 }
 
 /// Authentication provider configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct AuthProviderConfig {
+    #[serde(rename = "type")]
     pub type_: String,
     pub header: Option<String>,
     pub value_template: Option<String>,
@@ -578,19 +415,13 @@ pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
     (routing, fallback_entry)
 }
 
-/// Build routing map and fallback entry from a parsed TOML value.
+/// Build routing map and fallback entry from a parsed ConfigRoot.
 /// Reads from the `[routing]` section. Returns (routing map, fallback entry).
-/// Returns an error only if the `[routing]` section exists but is not a table.
 pub(crate) fn routing_from_value(
-    root: &toml::Value,
+    config_root: &ConfigRoot,
 ) -> Result<(HashMap<String, RouteEntry>, RouteEntry), String> {
-    let table = root
-        .as_table()
-        .ok_or_else(|| "Root must be a table".to_string())?;
-
-    let routing_table = match table.get("routing") {
-        Some(toml::Value::Table(t)) => t,
-        Some(_) => return Err("'routing' config section must be a table".to_string()),
+    let routing_table = match &config_root.routing {
+        Some(t) => t,
         None => {
             debug!("[routing] section not found; no routing entries configured");
             let fallback = RouteEntry {
@@ -604,38 +435,30 @@ pub(crate) fn routing_from_value(
         }
     };
 
-    // Pre-extract the DEFAULT entry's model for missing-field fallbacks
     let default_model = routing_table
         .get("DEFAULT")
-        .and_then(|v| v.get("model"))
-        .and_then(|v| v.as_str())
+        .map(|e| e.model.as_str())
         .unwrap_or(DEFAULT_MODEL)
         .to_string();
 
     let mut routing = HashMap::new();
-    for (key, value) in routing_table {
-        let model = if let Some(m) = value.get("model").and_then(|v| v.as_str()) {
-            m.to_string()
+    for (key, entry) in routing_table {
+        let model = if !entry.model.is_empty() {
+            entry.model.clone()
         } else {
             warn!(category = %key, "routing section missing 'model' for category; using DEFAULT model");
             default_model.clone()
         };
-        let endpoint = value
-            .get("endpoint")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let cost_per_1m_input_tokens = value
-            .get("cost_per_1m_input_tokens")
-            .and_then(|v| v.as_float());
-        let provider_type = if let Some(pt) = value.get("provider_type").and_then(|v| v.as_str()) {
-            pt.to_string()
+        let endpoint = entry.endpoint.clone();
+        let cost_per_1m_input_tokens = entry.cost_per_1m_input_tokens;
+        let provider_type = if !entry.provider_type.is_empty() {
+            entry.provider_type.clone()
         } else {
             warn!(category = %key, "routing section missing 'provider_type' for category; defaulting to empty");
             String::new()
         };
-        let api_key_env = if let Some(ake) = value.get("api_key_env").and_then(|v| v.as_str()) {
-            Some(ake.to_string())
+        let api_key_env = if entry.api_key_env.is_some() {
+            entry.api_key_env.clone()
         } else {
             warn!(category = %key, "routing section missing 'api_key_env' for category; no API key will be resolved");
             None
@@ -652,7 +475,7 @@ pub(crate) fn routing_from_value(
         );
     }
     let fallback = routing.remove("DEFAULT").unwrap_or_else(|| RouteEntry {
-        model: default_model.clone(),
+        model: default_model,
         endpoint: String::new(),
         cost_per_1m_input_tokens: None,
         provider_type: String::new(),
@@ -661,250 +484,51 @@ pub(crate) fn routing_from_value(
     Ok((routing, fallback))
 }
 
-/// Load categories from a parsed toml::Value.
-/// Reads categories from either:
-/// - `[categories]` table where each key is a category name (e.g., `[categories.FILE_READING]`)
-/// - `[[categories]]` array of tables with a required `name` field.
+/// Load categories from a parsed ConfigRoot.
+/// Reads categories from the `[categories]` table where each key is a category name.
 pub(crate) fn load_categories_from_value(
-    root: &toml::Value,
+    config_root: &ConfigRoot,
 ) -> Result<Vec<CategoryConfig>, String> {
-    let table = root
-        .as_table()
-        .ok_or_else(|| "Root must be a table".to_string())?;
+    let cats_map = config_root
+        .categories
+        .as_ref()
+        .ok_or_else(|| "No [categories] section found".to_string())?;
 
-    let cats_value = match table.get("categories") {
-        Some(v) => v,
-        None => return Err("No [categories] section found".to_string()),
-    };
-
-    let mut categories = Vec::new();
-    let mut errors = Vec::new();
-
-    match cats_value {
-        toml::Value::Table(cats_table) => {
-            for (name, cat_value) in cats_table {
-                let t = match cat_value.as_table() {
-                    Some(t) => t,
-                    None => {
-                        errors.push(format!("categories['{name}'] is not a table"));
-                        continue;
-                    }
-                };
-                let description = t
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let threshold = t
-                    .get("threshold")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(1) as u32;
-                let priority = t
-                    .get("priority")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(99)
-                    .min(u8::MAX as i64) as u8;
-
-                let patterns = match t.get("patterns").and_then(|v| v.as_array()) {
-                    Some(arr) => arr
-                        .iter()
-                        .filter_map(|v| {
-                            v.as_table().map(|pt| {
-                                let regex = pt
-                                    .get("regex")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let weight = pt
-                                    .get("weight")
-                                    .and_then(|v| v.as_integer())
-                                    .unwrap_or(1)
-                                    .min(u8::MAX as i64) as u8;
-                                PatternEntry { regex, weight }
-                            })
-                        })
-                        .collect(),
-                    None => vec![],
-                };
-
-                let dual_threshold = t.get("dual_threshold").and_then(|v| v.as_table()).map(|dt| {
-                    DualThreshold {
-                        alt_score: dt
-                            .get("alt_score")
-                            .and_then(|v| v.as_integer())
-                            .unwrap_or(1) as u32,
-                        suppress_if_present: dt
-                            .get("suppress_if_present")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    }
-                });
-
-                categories.push(CategoryConfig {
-                    name: name.clone(),
-                    description,
-                    threshold,
-                    priority,
-                    patterns,
-                    dual_threshold,
-                });
-            }
-        }
-        toml::Value::Array(arr) => {
-            for (idx, entry) in arr.iter().enumerate() {
-                let t = match entry.as_table() {
-                    Some(t) => t,
-                    None => {
-                        errors.push(format!("categories[{}] is not a table", idx));
-                        continue;
-                    }
-                };
-                let name = match t.get("name").and_then(|v| v.as_str()) {
-                    Some(n) => n,
-                    None => {
-                        errors.push(format!("categories[{}] missing 'name' field", idx));
-                        continue;
-                    }
-                };
-                let description = t
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let threshold = t
-                    .get("threshold")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(1) as u32;
-                let priority = t
-                    .get("priority")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(99)
-                    .min(u8::MAX as i64) as u8;
-
-                let patterns = match t.get("patterns").and_then(|v| v.as_array()) {
-                    Some(arr) => arr
-                        .iter()
-                        .filter_map(|v| {
-                            v.as_table().map(|pt| {
-                                let regex = pt
-                                    .get("regex")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let weight = pt
-                                    .get("weight")
-                                    .and_then(|v| v.as_integer())
-                                    .unwrap_or(1)
-                                    .min(u8::MAX as i64) as u8;
-                                PatternEntry { regex, weight }
-                            })
-                        })
-                        .collect(),
-                    None => vec![],
-                };
-
-                let dual_threshold = t.get("dual_threshold").and_then(|v| v.as_table()).map(|dt| {
-                    DualThreshold {
-                        alt_score: dt
-                            .get("alt_score")
-                            .and_then(|v| v.as_integer())
-                            .unwrap_or(1) as u32,
-                        suppress_if_present: dt
-                            .get("suppress_if_present")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    }
-                });
-
-                categories.push(CategoryConfig {
-                    name: name.to_string(),
-                    description,
-                    threshold,
-                    priority,
-                    patterns,
-                    dual_threshold,
-                });
-            }
-        }
-        _ => {
-            return Err("categories section must be a table or an array".to_string());
-        }
-    }
-
-    if !errors.is_empty() {
-        return Err(errors.join("; "));
-    }
-
-    if categories.is_empty() {
+    if cats_map.is_empty() {
         return Err("No categories defined".to_string());
     }
 
+    let mut categories: Vec<CategoryConfig> = cats_map
+        .iter()
+        .map(|(name, cat)| {
+            let mut c = cat.clone();
+            c.name = name.clone();
+            c
+        })
+        .collect();
+
+    categories.sort_by_key(|c| c.priority);
     Ok(categories)
 }
 
-/// Load negative suppression patterns from a parsed toml::Value.
+/// Load negative suppression patterns from a parsed ConfigRoot.
 /// Returns empty vec if section is absent.
-pub(crate) fn load_negative_patterns_from_value(root: &toml::Value) -> Vec<NegativePatternConfig> {
-    let table = match root.as_table() {
-        Some(t) => t,
-        None => return vec![],
-    };
-    let neg_array = match table.get("negative_patterns").and_then(|v| v.as_array()) {
-        Some(arr) => arr,
-        None => {
-            debug!("[negative_patterns] section not found; no negative patterns configured");
-            return vec![];
-        }
-    };
-
-    let mut patterns = Vec::new();
-    for (i, entry) in neg_array.iter().enumerate() {
-        let t = match entry.as_table() {
-            Some(t) => t,
-            None => {
-                warn!("negative_patterns[{}] is not a table; skipping", i);
-                continue;
-            }
-        };
-        let regex = t
-            .get("regex")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let suppressed = t
-            .get("suppressed")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let penalty = t
-            .get("penalty")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(2)
-            .min(u8::MAX as i64) as u8;
-        patterns.push(NegativePatternConfig {
-            regex,
-            suppressed,
-            penalty,
-        });
-    }
-    patterns
+pub(crate) fn load_negative_patterns_from_value(root: &ConfigRoot) -> Vec<NegativePatternConfig> {
+    root.negative_patterns.clone().unwrap_or_else(|| {
+        debug!("[negative_patterns] section not found; no negative patterns configured");
+        vec![]
+    })
 }
 
-pub(crate) fn build_model_costs(root: &toml::Value, routing: &HashMap<String, RouteEntry>) -> ModelCosts {
+pub(crate) fn build_model_costs(config_root: &ConfigRoot, routing: &HashMap<String, RouteEntry>) -> ModelCosts {
     let mut costs = HashMap::new();
-    
-    // Override with values from [model_costs] section in TOML
-    if let Some(model_costs_table) = root.get("model_costs").and_then(|v| v.as_table()) {
-        for (model_name, cost_value) in model_costs_table {
-            if let Some(cost) = cost_value.as_float() {
-                costs.insert(model_name.clone(), cost);
-            }
+
+    if let Some(model_costs_table) = &config_root.model_costs {
+        for (model_name, cost) in model_costs_table {
+            costs.insert(model_name.clone(), *cost);
         }
     }
-    
-    // Apply per-route overrides
+
     for entry in routing.values() {
         if let Some(override_cost) = entry.cost_per_1m_input_tokens {
             costs.insert(entry.model.clone(), override_cost);
@@ -913,10 +537,171 @@ pub(crate) fn build_model_costs(root: &toml::Value, routing: &HashMap<String, Ro
     ModelCosts::from_costs(costs)
 }
 
+// ── Config Format Detection & Loading ──
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ConfigFormat {
+    Toml,
+    Yaml,
+}
+
+fn detect_format(path: &str) -> ConfigFormat {
+    match Path::new(path).extension().and_then(|s| s.to_str()) {
+        Some("yaml" | "yml") => ConfigFormat::Yaml,
+        _ => ConfigFormat::Toml,
+    }
+}
+
+/// Load a config file (TOML or YAML) and deserialize into ConfigRoot.
+pub(crate) fn load_config_from_path(path: &str) -> Result<ConfigRoot, String> {
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))?;
+    match detect_format(path) {
+        ConfigFormat::Toml => toml::from_str(&content).map_err(|e| format!("{}: {}", path, e)),
+        ConfigFormat::Yaml => {
+            serde_yaml::from_str(&content).map_err(|e| format!("{}: {}", path, e))
+        }
+    }
+}
+
+/// Merge overlay ConfigRoot into base, respecting override-key semantics.
+/// Override keys (classifiers, regex_classifier, llm_classifier, categories,
+/// auth_provider, model_costs, routing, negative_patterns) are completely replaced.
+/// Non-override struct fields are merged field-by-field (overlay values win).
+/// Non-override scalars (baseline_model, classify_db_log) are replaced by overlay.
+pub(crate) fn merge_configs(base: &mut ConfigRoot, overlay: ConfigRoot) {
+    if let Some(s) = overlay.server {
+        if let Some(ref mut b) = base.server {
+            b.port = s.port;
+            b.log_level = s.log_level;
+            b.log_format = s.log_format;
+        } else {
+            base.server = Some(s);
+        }
+    }
+    if let Some(s) = overlay.http {
+        if let Some(ref mut b) = base.http {
+            b.max_upstream_body_bytes = s.max_upstream_body_bytes;
+            b.keepalive_interval_secs = s.keepalive_interval_secs;
+            b.request_body_limit_bytes = s.request_body_limit_bytes;
+            b.client_timeout_secs = s.client_timeout_secs;
+            b.client_connect_timeout_secs = s.client_connect_timeout_secs;
+            b.streaming_channel_capacity = s.streaming_channel_capacity;
+        } else {
+            base.http = Some(s);
+        }
+    }
+    if let Some(s) = overlay.cors {
+        base.cors = Some(s);
+    }
+    if let Some(s) = overlay.database {
+        if let Some(ref mut b) = base.database {
+            b.connection_retries = s.connection_retries;
+            b.retry_base_ms = s.retry_base_ms;
+            b.max_connections = s.max_connections;
+            b.acquire_timeout_secs = s.acquire_timeout_secs;
+            b.idle_timeout_secs = s.idle_timeout_secs;
+            b.log_concurrency_limit = s.log_concurrency_limit;
+        } else {
+            base.database = Some(s);
+        }
+    }
+    if let Some(s) = overlay.persistence {
+        if let Some(ref mut b) = base.persistence {
+            b.backend = s.backend;
+            b.sqlite_path = s.sqlite_path;
+        } else {
+            base.persistence = Some(s);
+        }
+    }
+    if let Some(s) = overlay.dashboard {
+        if let Some(ref mut b) = base.dashboard {
+            b.default_hours = s.default_hours;
+            b.hours_min = s.hours_min;
+            b.hours_max = s.hours_max;
+            b.page_limit = s.page_limit;
+            b.page_limit_max = s.page_limit_max;
+            b.recent_count = s.recent_count;
+        } else {
+            base.dashboard = Some(s);
+        }
+    }
+    if let Some(v) = overlay.baseline_model {
+        base.baseline_model = Some(v);
+    }
+    if let Some(v) = overlay.classify_db_log {
+        base.classify_db_log = Some(v);
+    }
+    if let Some(v) = overlay.classifiers {
+        base.classifiers = Some(v);
+    }
+    if let Some(v) = overlay.regex_classifier {
+        base.regex_classifier = Some(v);
+    }
+    if let Some(v) = overlay.llm_classifier {
+        base.llm_classifier = Some(v);
+    }
+    if let Some(v) = overlay.categories {
+        base.categories = Some(v);
+    }
+    if let Some(v) = overlay.auth_providers {
+        base.auth_providers = Some(v);
+    }
+    if let Some(v) = overlay.model_costs {
+        base.model_costs = Some(v);
+    }
+    if let Some(v) = overlay.routing {
+        base.routing = Some(v);
+    }
+    if let Some(v) = overlay.negative_patterns {
+        base.negative_patterns = Some(v);
+    }
+}
+
+/// Top-level configuration root, mirroring all sections in config.toml/config.yaml.
+/// Every field is `Option` so missing sections deserialize as `None`.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct ConfigRoot {
+    #[serde(default)]
+    pub server: Option<ServerConfig>,
+    #[serde(default)]
+    pub http: Option<HttpConfig>,
+    #[serde(default)]
+    pub cors: Option<CorsConfig>,
+    #[serde(default)]
+    pub database: Option<DatabaseConfig>,
+    #[serde(default)]
+    pub persistence: Option<PersistenceSettings>,
+    #[serde(default)]
+    pub classifiers: Option<ClassifiersConfig>,
+    #[serde(default)]
+    pub regex_classifier: Option<RegexClassifierConfig>,
+    #[serde(default)]
+    pub llm_classifier: Option<LlmClassifierConfig>,
+    #[serde(default)]
+    pub categories: Option<HashMap<String, CategoryConfig>>,
+    #[serde(default)]
+    pub negative_patterns: Option<Vec<NegativePatternConfig>>,
+    #[serde(default)]
+    pub routing: Option<HashMap<String, RouteEntry>>,
+    #[serde(default, rename = "auth_provider")]
+    pub auth_providers: Option<Vec<AuthProviderConfig>>,
+    #[serde(default)]
+    pub model_costs: Option<HashMap<String, f64>>,
+    #[serde(default)]
+    pub baseline_model: Option<String>,
+    #[serde(default)]
+    pub classify_db_log: Option<bool>,
+    #[serde(default)]
+    pub dashboard: Option<DashboardConfig>,
+}
+
 /// Configuration for global classifier settings.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct ClassifiersConfig {
+    #[serde(default = "default_enabled_true")]
     pub enabled: bool,
+    #[serde(default = "default_classifier_order")]
     pub order: Vec<String>,
 }
 
@@ -929,44 +714,21 @@ impl Default for ClassifiersConfig {
     }
 }
 
-/// Load classifiers config from a parsed toml::Value.
+/// Load classifiers config from a parsed ConfigRoot.
 /// Returns default if section is absent.
-pub(crate) fn load_classifiers_config_from_value(root: &toml::Value) -> ClassifiersConfig {
-    let table = match root.as_table() {
-        Some(t) => t,
-        None => {
-            tracing::debug!("Config root is not a table for classifiers config; using defaults");
-            return ClassifiersConfig::default();
-        }
-    };
-    let classifiers_section = match table.get("classifiers").and_then(|v| v.as_table()) {
-        Some(t) => t,
-        None => {
-            tracing::debug!("No [classifiers] section in config; using defaults");
-            return ClassifiersConfig::default();
-        }
-    };
-    let enabled = classifiers_section
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let order = classifiers_section
-        .get("order")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_else(|| vec!["regex".to_string(), "llm".to_string()]);
-
-    ClassifiersConfig { enabled, order }
+pub(crate) fn load_classifiers_config_from_value(root: &ConfigRoot) -> ClassifiersConfig {
+    root.classifiers.clone().unwrap_or_else(|| {
+        tracing::debug!("No [classifiers] section in config; using defaults");
+        ClassifiersConfig::default()
+    })
 }
 
 /// Configuration for the regex classifier backend.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct RegexClassifierConfig {
+    #[serde(default = "default_enabled_true")]
     pub enabled: bool,
+    #[serde(default = "default_short_prompt_len")]
     pub short_prompt_len: usize,
 }
 
@@ -990,7 +752,7 @@ pub(crate) fn load_regex_classifier_config(path: &str) -> RegexClassifierConfig 
             return RegexClassifierConfig::default();
         }
     };
-    let root: toml::Value = match toml::from_str(&content) {
+    let root: ConfigRoot = match toml::from_str(&content) {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("Invalid TOML for regex classifier section: {e}");
@@ -1000,43 +762,29 @@ pub(crate) fn load_regex_classifier_config(path: &str) -> RegexClassifierConfig 
     load_regex_classifier_config_from_value(&root)
 }
 
-pub(crate) fn load_regex_classifier_config_from_value(root: &toml::Value) -> RegexClassifierConfig {
-    let table = match root.as_table() {
-        Some(t) => t,
-        None => {
-            tracing::warn!("Config file root is not a table for regex classifier");
-            return RegexClassifierConfig::default();
-        }
-    };
-    let regex_section = match table.get("regex_classifier") {
-        Some(toml::Value::Table(t)) => t,
-        _ => {
-            debug!("[regex_classifier] section not found or not a table; using defaults (enabled)");
-            return RegexClassifierConfig::default();
-        }
-    };
-    let enabled = regex_section
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let short_prompt_len = regex_section
-        .get("short_prompt_len")
-        .and_then(|v| v.as_integer())
-        .unwrap_or(30) as usize;
-    RegexClassifierConfig {
-        enabled,
-        short_prompt_len,
-    }
+pub(crate) fn load_regex_classifier_config_from_value(root: &ConfigRoot) -> RegexClassifierConfig {
+    root.regex_classifier.clone().unwrap_or_else(|| {
+        debug!("[regex_classifier] section not found; using defaults (enabled)");
+        RegexClassifierConfig::default()
+    })
 }
 
 /// Configuration for the LLM classifier backend.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct LlmClassifierConfig {
+    #[serde(default = "default_enabled_true")]
+    pub enabled: bool,
+    #[serde(default = "default_llm_model")]
     pub model: String,
+    #[serde(default)]
     pub endpoint: String,
+    #[serde(default = "default_llm_api_key_env")]
     pub api_key_env: String,
+    #[serde(default = "default_provider_type")]
     pub provider_type: String,
+    #[serde(default)]
     pub prompt_template_path: Option<String>,
+    #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
 }
 
@@ -1051,7 +799,7 @@ pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConf
             return None;
         }
     };
-    let root: toml::Value = match toml::from_str(&content) {
+    let root: ConfigRoot = match toml::from_str(&content) {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("Invalid TOML for LLM classifier section: {e}");
@@ -1061,81 +809,16 @@ pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConf
     load_llm_classifier_config_from_value(&root)
 }
 
-/// Load LLM classifier config from a parsed toml::Value.
+/// Load LLM classifier config from a parsed ConfigRoot.
 /// Returns None if section is absent or enabled = false.
 pub(crate) fn load_llm_classifier_config_from_value(
-    root: &toml::Value,
+    root: &ConfigRoot,
 ) -> Option<LlmClassifierConfig> {
-    let table = match root.as_table() {
-        Some(t) => t,
-        None => {
-            debug!("config root is not a table for llm_classifier config; llm classifier will be disabled");
-            return None;
-        }
-    };
-    let llm_section = match table.get("llm_classifier") {
-        Some(toml::Value::Table(t)) => t,
-        Some(_) => {
-            debug!("[llm_classifier] section is not a table; llm classifier will be disabled");
-            return None;
-        }
-        None => {
-            debug!("[llm_classifier] section not found; llm classifier will be disabled");
-            return None;
-        }
-    };
-
-    if !llm_section
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    let cfg = root.llm_classifier.as_ref()?;
+    if !cfg.enabled {
         return None;
     }
-
-    let model = llm_section
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or("gpt-4o-mini")
-        .to_string();
-
-    let endpoint = llm_section
-        .get("endpoint")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let api_key_env = llm_section
-        .get("api_key_env")
-        .and_then(|v| v.as_str())
-        .unwrap_or("OPENAI_API_KEY")
-        .to_string();
-
-    let provider_type = llm_section
-        .get("provider_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("openai_compatible")
-        .to_string();
-
-    let prompt_template_path = llm_section
-        .get("prompt_template_path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let timeout_secs = (llm_section
-        .get("timeout_secs")
-        .and_then(|v| v.as_integer())
-        .unwrap_or(3) as u64)
-        .max(1);
-
-    Some(LlmClassifierConfig {
-        model,
-        endpoint,
-        api_key_env,
-        provider_type,
-        prompt_template_path,
-        timeout_secs,
-    })
+    Some(cfg.clone())
 }
 
 #[cfg(test)]
@@ -1388,10 +1071,7 @@ api_key_env = ""
             },
         );
 
-        let costs = {
-            let empty_root: toml::Value = toml::from_str("").unwrap_or_else(|_| toml::Value::Table(Default::default()));
-            build_model_costs(&empty_root, &routing)
-        };
+        let costs = build_model_costs(&ConfigRoot::default(), &routing);
 
         // Route overrides only (no hardcoded seeds anymore)
         assert_eq!(costs.get("claude-3.5-sonnet"), Some(5.00));
@@ -1538,14 +1218,13 @@ priority = 1
 
     #[test]
     fn load_classifiers_config_defaults_when_missing() {
-        // Section absent → default values
         let toml_content = r#"
 [categories.CASUAL]
 description = "Simple"
 threshold = 1
 priority = 1
 "#;
-        let root: toml::Value = toml::from_str(toml_content).expect("valid TOML");
+        let root: ConfigRoot = toml::from_str(toml_content).expect("valid TOML");
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
         assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
@@ -1563,7 +1242,7 @@ description = "Simple"
 threshold = 1
 priority = 1
 "#;
-        let root: toml::Value = toml::from_str(toml_content).expect("valid TOML");
+        let root: ConfigRoot = toml::from_str(toml_content).expect("valid TOML");
         let cfg = load_classifiers_config_from_value(&root);
         assert!(!cfg.enabled);
         assert_eq!(cfg.order, vec!["llm".to_string(), "regex".to_string()]);
@@ -1581,7 +1260,7 @@ description = "Simple"
 threshold = 1
 priority = 1
 "#;
-        let root: toml::Value = toml::from_str(toml_content).expect("valid TOML");
+        let root: ConfigRoot = toml::from_str(toml_content).expect("valid TOML");
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
         assert_eq!(cfg.order, vec!["llm".to_string()]);
@@ -1589,7 +1268,7 @@ priority = 1
 
     #[test]
     fn load_classifiers_config_empty_root_returns_defaults() {
-        let root = toml::Value::Table(toml::value::Table::new());
+        let root = ConfigRoot::default();
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
         assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
@@ -1597,7 +1276,8 @@ priority = 1
 
     #[test]
     fn load_classifiers_config_non_table_root_returns_defaults() {
-        let root = toml::Value::String("not a table".to_string());
+        // ConfigRoot::default() has no classifiers section → returns defaults
+        let root = ConfigRoot::default();
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
         assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
@@ -1647,24 +1327,198 @@ priority = 1
     }
 
     #[test]
-    fn load_categories_array_format() {
+    fn load_categories_table_format() {
         let toml_content = r#"
-[[categories]]
-name = "FILE_READING"
+[categories.FILE_READING]
 description = "Reading files"
 threshold = 3
 priority = 1
 
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple"
 threshold = 1
 priority = 4
 "#;
-        let root: toml::Value = toml::from_str(toml_content).expect("valid TOML");
+        let root: ConfigRoot = toml::from_str(toml_content).expect("valid TOML");
         let cats = load_categories_from_value(&root).expect("load should succeed");
         assert_eq!(cats.len(), 2);
         assert_eq!(cats[0].name, "FILE_READING");
         assert_eq!(cats[1].name, "CASUAL");
+    }
+
+    #[test]
+    fn yaml_config_roundtrip() {
+        let toml = r#"
+[server]
+port = 9999
+log_level = "debug"
+
+[http]
+client_timeout_secs = 30
+
+[categories.CASUAL]
+description = "Simple"
+threshold = 1
+priority = 4
+"#;
+        let yaml = r#"
+server:
+  port: 9999
+  log_level: debug
+http:
+  client_timeout_secs: 30
+categories:
+  CASUAL:
+    description: Simple
+    threshold: 1
+    priority: 4
+"#;
+        let toml_root: ConfigRoot = toml::from_str(toml).expect("valid TOML");
+        let yaml_root: ConfigRoot = serde_yaml::from_str(yaml).expect("valid YAML");
+        assert_eq!(
+            toml_root.server.as_ref().map(|s| s.port),
+            yaml_root.server.as_ref().map(|s| s.port)
+        );
+        assert_eq!(
+            toml_root.server.as_ref().map(|s| s.log_level.as_str()),
+            yaml_root.server.as_ref().map(|s| s.log_level.as_str())
+        );
+        assert_eq!(
+            toml_root.http.as_ref().map(|h| h.client_timeout_secs),
+            yaml_root.http.as_ref().map(|h| h.client_timeout_secs)
+        );
+        assert_eq!(
+            toml_root.categories.as_ref().and_then(|c| c.get("CASUAL")).map(|c| c.threshold),
+            yaml_root.categories.as_ref().and_then(|c| c.get("CASUAL")).map(|c| c.threshold)
+        );
+    }
+
+    #[test]
+    fn yaml_config_with_auth_providers() {
+        let yaml = r#"
+server:
+  port: 10000
+auth_provider:
+  - type: openai_compatible
+    header: authorization
+    value_template: "Bearer {api_key}"
+  - type: anthropic
+    header: x-api-key
+    value_template: "{api_key}"
+categories:
+  CASUAL:
+    description: Simple
+    threshold: 1
+    priority: 4
+"#;
+        let root: ConfigRoot = serde_yaml::from_str(yaml).expect("valid YAML");
+        let providers = root.auth_providers.expect("auth_providers should be present");
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[0].type_, "openai_compatible");
+        assert_eq!(providers[1].type_, "anthropic");
+    }
+
+    #[test]
+    fn load_config_from_path_toml() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_load_config.toml");
+        let mut file = std::fs::File::create(&file_path).expect("create temp file");
+        write!(file, "[server]\nport = 8888\n").expect("write");
+        drop(file);
+
+        let result = load_config_from_path(file_path.to_str().unwrap());
+        assert!(result.is_ok(), "TOML load should succeed: {:?}", result.err());
+        let root = result.unwrap();
+        assert_eq!(root.server.unwrap().port, 8888);
+    }
+
+    #[test]
+    fn load_config_from_path_yaml() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_load_config.yaml");
+        let mut file = std::fs::File::create(&file_path).expect("create temp file");
+        write!(file, "server:\n  port: 7777\n").expect("write");
+        drop(file);
+
+        let result = load_config_from_path(file_path.to_str().unwrap());
+        assert!(result.is_ok(), "YAML load should succeed: {:?}", result.err());
+        let root = result.unwrap();
+        assert_eq!(root.server.unwrap().port, 7777);
+    }
+
+    #[test]
+    fn load_config_from_path_unknown_extension_defaults_to_toml() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_load_config.conf");
+        let mut file = std::fs::File::create(&file_path).expect("create temp file");
+        write!(file, "[server]\nport = 6666\n").expect("write");
+        drop(file);
+
+        let result = load_config_from_path(file_path.to_str().unwrap());
+        assert!(result.is_ok(), "unknown ext should be treated as TOML");
+    }
+
+    #[test]
+    fn load_config_from_path_missing_file() {
+        let result = load_config_from_path("/nonexistent/path/config.toml");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot read"));
+    }
+
+    #[test]
+    fn detect_format_yaml_extensions() {
+        assert_eq!(detect_format("config.yaml"), ConfigFormat::Yaml);
+        assert_eq!(detect_format("config.yml"), ConfigFormat::Yaml);
+        assert_eq!(detect_format("config.toml"), ConfigFormat::Toml);
+        assert_eq!(detect_format("config.conf"), ConfigFormat::Toml);
+        assert_eq!(detect_format("config"), ConfigFormat::Toml);
+    }
+
+    #[test]
+    fn merge_configs_overrides_categories() {
+        let mut base: ConfigRoot = toml::from_str(r#"
+[categories.CASUAL]
+description = "Original"
+threshold = 1
+priority = 4
+"#).expect("valid TOML");
+
+        let overlay: ConfigRoot = toml::from_str(r#"
+[categories.FILE_READING]
+description = "Override"
+threshold = 3
+priority = 1
+"#).expect("valid TOML");
+
+        merge_configs(&mut base, overlay);
+        // Categories is an override key → complete replacement
+        let cats = base.categories.unwrap();
+        assert!(!cats.contains_key("CASUAL"));
+        assert_eq!(cats.get("FILE_READING").unwrap().description, "Override");
+    }
+
+    #[test]
+    fn merge_configs_shallow_merge_server() {
+        let mut base: ConfigRoot = toml::from_str(r#"
+[server]
+port = 10000
+log_level = "info"
+log_format = "compact"
+"#).expect("valid TOML");
+
+        let overlay: ConfigRoot = toml::from_str(r#"
+[server]
+port = 20000
+"#).expect("valid TOML");
+
+        merge_configs(&mut base, overlay);
+        let server = base.server.unwrap();
+        // port overridden, log_level and log_format preserved
+        assert_eq!(server.port, 20000);
+        assert_eq!(server.log_level, "info");
+        assert_eq!(server.log_format, "compact");
     }
 }

@@ -8,7 +8,7 @@ This plan implements the research document's recommendation: a hybrid configurat
 - Phase 1: Replace manual TOML parsing (1559 lines) with `#[derive(Deserialize)]` structs
 - Phase 2: Add YAML support via `serde-saphyr` using format detection by extension
 - Phase 3: Add `patterns_file` field support and external pattern file loader
-- Phase 4: Add `--validate` and `--migrate-config` CLI flags to existing binary
+- Phase 4: Add `--validate` CLI flag to validate config schema + regex patterns
 
 ## Current State Analysis
 
@@ -44,17 +44,15 @@ After this plan, the configuration system will:
 1. **Multi-format support**: Accept `.toml` or `.yaml`/`.yml` config files with identical semantics. Same serde structs serve both formats.
 2. **External pattern files**: Categories can reference `patterns_file: "patterns/file_reading.patterns"` instead of inline `patterns: [...]`.
 3. **Zero-escaping pattern format**: Simple `weight | regex` lines, no string literal escaping issues.
-4. **Validation**: `cerebrum --validate` compiles all regex patterns and checks config schema, reporting file:line on errors.
-5. **Migration tool**: `cerebrum --migrate-config --input config.toml --output config.yaml --extract-patterns ./patterns/` converts existing configs.
-6. **Full backwards compatibility**: Existing `config.toml` with inline patterns continues to work indefinitely.
+4. **Validation**: `cerebrum --validate` checks config schema correctness (required fields, type constraints, structural validity) and compiles all regex patterns, reporting file:line on errors.
+5. **Full backwards compatibility**: Existing `config.toml` with inline patterns continues to work indefinitely.
 
 ### Success Criteria
 
 - All existing unit and integration tests pass unchanged
 - New YAML config with inline patterns loads identically to TOML
 - External pattern files compile correctly and integrate into classification scoring
-- `--validate` exits 0 on success, non-zero on any config/pattern error
-- Migration tool produces valid YAML + pattern files that classify identically to original TOML
+- `--validate` exits 0 on success (schema + patterns valid), non-zero on any config/pattern error
 - Documentation updated (research already covers format rationale)
 
 ## Implementation Approach
@@ -85,21 +83,14 @@ After this plan, the configuration system will:
    - Validate each regex compiles with `Regex::new`, report file:line if fails
    - Keep backward compatibility: Inline patterns remain the default if neither field is set
 
-4. **CLI Flags (Phase 4)**
-   - Add `std::env::args().collect()` check at top of `main()`
-   - If `--validate` present:
-     - Load config (using overlay if CONFIG_PATH set)
-     - Compile all patterns (including external files)
-     - Print success or all errors, exit with code 0 or 1
-   - If `--migrate-config` present with required `--input` and `--output`:
-     - Load input config (any format) from `--input <path>`
-     - Create output directory if needed
-     - Write config in YAML format to `--output`
-     - Extract all category patterns to `--extract-patterns <dir>`:
-       - For each category, create `<dir>/<category_name>.patterns`
-       - Write weight and regex lines
-     - Print summary and success message
-   - If no flags, proceed with normal server startup
+4. **Validation CLI (Phase 4)**
+- Add `std::env::args().collect()` check at top of `main()`
+- If `--validate` present:
+- Load config (using overlay if CONFIG_PATH set)
+- Validate config schema (required fields, type constraints, cross-references)
+- Compile all patterns (including external files)
+- Print success or all errors, exit with code 0 or 1
+- If no flags, proceed with normal server startup
 
 ## Critical Implementation Details
 
@@ -542,13 +533,14 @@ Follow existing test patterns in the codebase:
 
 6. **Validation mode:**
    - `--validate` flag should:
-     - Load config (with CONFIG_PATH overlay)
-     - Resolve patterns (external files)
-     - Compile every regex with `Regex::new`
-     - Report first error or all errors aggregated
-     - Exit 0 success, 1 failure
+   - Load config (with CONFIG_PATH overlay)
+   - Validate config schema (required fields, type constraints, cross-references)
+   - Resolve patterns (external files)
+   - Compile every regex with `Regex::new`
+   - Report all errors (schema + regex) aggregated
+   - Exit 0 success, 1 failure
 
-7. **Migration tool:** (see Phase 4)
+7. **No migration tool:** Users who want to switch to YAML + external patterns do so manually. The `--validate` flag helps them verify the result.
 
 **Backward compatibility:**
 - If neither `patterns` nor `patterns_file` is present, use empty vec (current behavior)
@@ -559,118 +551,81 @@ Follow existing test patterns in the codebase:
 - Category with `patterns_file` loads correctly and patterns compile
 - Category without `patterns_file` uses inline patterns as before
 - Invalid pattern weight or regex produces clear error with file:line (for external) or category name (for inline)
-- `--validate` detects both inline and external pattern errors
+- `--validate` detects schema errors, inline pattern errors, and external pattern errors
 - All existing tests pass; new tests cover external patterns
 
-### Phase 4: CLI Commands
+### Phase 4: Validation CLI
 
-**Goal:** Add `--validate` and `--migrate-config` options to the existing binary (no new binary, no clap dependency — simple arg matching).
+**Goal:** Add `--validate` flag to the existing binary that checks both config schema correctness and regex pattern validity. No migration tool — users manually convert configs if desired.
 
 #### Changes Required:
 
 1. **Main entry point modification:**
    - At the very start of `main()`, before any heavy lifting:
-     ```rust
-     let args: Vec<String> = std::env::args().collect();
-     let mut enable_validate = false;
-     let mut enable_migrate = false;
-     let mut migrate_input = None;
-     let mut migrate_output = None;
-     let mut migrate_extract_patterns = None;
-     
-     let mut i = 1;
-     while i < args.len() {
-         match args[i].as_str() {
-             "--validate" => {
-                 enable_validate = true;
-                 i += 1;
-             }
-             "--migrate-config" => {
-                 enable_migrate = true;
-                 i += 1;
-             }
-             "--input" if enable_migrate && i + 1 < args.len() => {
-                 migrate_input = Some(args[i+1].clone());
-                 i += 2;
-             }
-             "--output" if enable_migrate && i + 1 < args.len() => {
-                 migrate_output = Some(args[i+1].clone());
-                 i += 2;
-             }
-             "--extract-patterns" if enable_migrate && i + 1 < args.len() => {
-                 migrate_extract_patterns = Some(args[i+1].clone());
-                 i += 2;
-             }
-             _ => {
-                 eprintln!("unknown argument: {}", args[i]);
-                 std::process::exit(2);
-             }
-         }
-     }
-     
-     if enable_migrate && (migrate_input.is_none() || migrate_output.is_none() || migrate_extract_patterns.is_none()) {
-         eprintln!("--migrate-config requires --input, --output, and --extract-patterns");
-         std::process::exit(2);
-     }
-     ```
+   ```rust
+   let args: Vec<String> = std::env::args().collect();
+   let mut enable_validate = false;
+
+   let mut i = 1;
+   while i < args.len() {
+       match args[i].as_str() {
+           "--validate" => {
+               enable_validate = true;
+               i += 1;
+           }
+           _ => {
+               eprintln!("unknown argument: {}", args[i]);
+               std::process::exit(2);
+           }
+       }
+   }
+   ```
 
 2. **Validation path:**
    - If `enable_validate`:
      - Load config (respect CONFIG_PATH if set, else embedded defaults)
-     - Build `ConfigRoot`
-     - Resolve patterns (including external)
-     - Compile all regexes; collect errors
-     - If errors: print to stderr, exit 1
+     - Build `ConfigRoot` — any deserialization error means schema invalid
+     - Validate config schema beyond serde: required sections present, valid port range, non-empty strings where needed, valid `provider_type` values, etc.
+     - Resolve patterns (including external files)
+     - Compile all regexes with `Regex::new`; collect errors
+     - If any errors: print all to stderr with file:line context, exit 1
      - Else: println!("Configuration valid"); exit 0
-   - Do not start server
+     - Do not start server
 
-3. **Migration path:**
-   - If `enable_migrate`:
-     - Load input config from `migrate_input.unwrap()` using `load_config_from_path` (must succeed)
-     - Convert to `ConfigRoot`
-     - For each category in `categories` (sorted by priority? or alphabetical for consistency):
-       - Replace `patterns` with `patterns_file: "patterns/<category_name>.patterns"`
-       - Ensure order preservation? YAML maps are unordered but serde_yaml writes in insertion order if we iterate sorted keys.
-     - Write `ConfigRoot` to `migrate_output.unwrap()` in YAML format using `serde_yaml` (maybe `serde_saphyr` provides serialization). **Check:** `serde-saphyr` supports `Serialize` as well.
-       ```rust
-       let yaml = serde_saphyr::to_string(&config_root).map_err(|e| ...)?;
-       std::fs::write(&output_path, yaml)?;
-       ```
-     - Ensure output file has `.yaml` or `.yml` extension (recommend)
-     - Extract patterns: create `migrate_extract_patterns.unwrap()` directory (mkdir -p)
-       - For each category (use same order as in YAML keys), create `<category>.patterns` file
-       - If category has inline patterns, write `weight | regex` lines
-       - If category already has `patterns_file` (unlikely), copy that file? Or warn.
-     - Print success message: "Migrated config to <output> with patterns in <dir>"
-     - Exit 0
+3. **Schema validation checks (beyond serde deserialization):**
+   - `server.port` is in valid range (1–65535)
+   - `server.log_level` is one of: trace, debug, info, warn, error
+   - `server.log_format` is one of: compact, full, json, pretty
+   - `http.client_timeout_secs` > 0
+   - Routing entries reference categories that exist in `categories`
+   - `auth_providers[].type` is one of the known provider types
+   - Category `threshold` > 0
+   - Category `priority` > 0
+   - `patterns_file` paths are readable (if specified)
+   - `patterns_dir` exists (if specified)
+   - Each `model_costs` value > 0.0
+   - Collect all schema errors before reporting (don't fail on first)
 
-4. **Pattern file naming:**
-   - Use category name in snake_case? The research example uses `file_reading.patterns`. We can use the category name as-is: `FILE_READING.patterns` or convert to snake case. Simpler: use the category name exactly (e.g., `FILE_READING.patterns`). But research used lowercase with underscores. We can follow config ordering: the `ConfigRoot.categories` is a HashMap; we can iterate in sorted order (by priority) and use `category.name` directly. Users can rename files if they want.
+4. **Regex pattern validation:**
+   - For each category (inline or external patterns), attempt `Regex::new` on every pattern
+   - For external patterns: report file:line (e.g., `patterns/file_reading.patterns:5: invalid regex ...`)
+   - For inline patterns: report category name and pattern index
+   - Collect all regex errors before reporting
 
-5. **YAML serialization:**
-   - Use `serde_saphyr::to_string`. It supports ordered maps? `serde_saphyr::Serializer` does preserve order on serialization when using `serde::ser::SerializeMap`? But our `ConfigRoot` has `HashMap` for categories. We want deterministic output. For migration, we can sort categories by `priority` ascending and build an ordered map.
-   - Create a helper: `fn sorted_config_root(config: ConfigRoot) -> BTreeMap<String, CategoryConfig>` to output sorted categories.
-   - Or: Implement manual YAML writing: iterate `config.categories` sorted by priority, write YAML fragments with `serde_yaml::to_string` for each, and compose. But easier: convert `HashMap<String, CategoryConfig>` to `BTreeMap<String, CategoryConfig>` sorted by category priority (store priority separately). For migration tool, we don't need perfect round-trip; we just need a readable YAML.
-
-   Actually simpler: The `--migrate-config` tool is a one-shot operation. We can use a temporary struct with ordered fields. Let's design:
-
-   - Create a `MigrateConfig` struct that mirrors `ConfigRoot` but with `categories: Vec<CategoryConfig>` instead of `HashMap`. We'll sort categories by `priority asc` and then `name` to break ties.
-   - Load `ConfigRoot` from source.
-   - Build `MigrateConfig` by copying all fields; for `categories`, take `config_root.categories.into_values().collect()` sort by (priority, name).
-   - Serialize `MigrateConfig` to YAML; order of fields in struct is the order we define.
+5. **Refactor for testability:**
+   - Create `fn run_validation(config_path: Option<&str>) -> Result<(), Vec<String>>` that can be unit tested
+   - `main` calls `run_validation` and exits with appropriate code
 
 6. **Error handling:**
    - Use `eprintln!` for errors
-   - Exit code 0 success, 1 for validation errors or migration failures, 2 for argument errors
-
-7. **Documentation output:**
-   - After migration, print instructions: "Edit the generated YAML config. Pattern files are in `patterns/`. Run with `CONFIG_PATH=config.yaml`."
+   - Exit code 0 = success, 1 = validation errors, 2 = argument errors
+   - Print all errors, not just the first one
 
 #### Success Criteria for Phase 4:
-- `cerebrum --validate` verifies config and patterns, exits 0 on success
-- `cerebrum --migrate-config --input config.toml --output config.yaml --extract-patterns ./patterns/` succeeds
-- Migrated YAML config + pattern files produce identical classification results
-- Helpful error messages for invalid flags
+- `cerebrum --validate` verifies config schema + compiles all patterns, exits 0 on success
+- Schema errors (invalid port, unknown provider type, missing required field) are reported
+- Regex errors in both inline and external patterns are reported with file:line context
+- Helpful error message for invalid flags
 - No regression in normal server startup (no flags)
 
 ---
@@ -770,43 +725,23 @@ fn external_patterns_compile_success() {
 **Validation flag test:**
 - Run with `--validate` on a config containing an invalid regex in an external file — expect exit code 1
 
-### Phase 4 (CLI)
+### Phase 4 (CLI Validation)
 
 **Tests in main.rs (or dedicated tests module):**
 
-- `test_validate_success()`: mock config file, call `main` with `--validate` via `std::process::Command`? That's hard to test in unit tests. Better: factor validation logic into a public function `validate_config() -> Result<(), String>` and test that directly. Then `main` just calls it and exits.
+- `test_validate_success()`: valid config + patterns → Ok
+- `test_validate_invalid_regex()`: config with bad regex → Err with file:line
+- `test_validate_schema_error_invalid_port()`: port out of range → Err
+- `test_validate_schema_error_unknown_provider()`: bad provider_type → Err
+- `test_validate_schema_error_missing_required()`: missing required field → Err
+- `test_validate_collects_all_errors()`: multiple errors reported, not just first
+- `test_validate_external_pattern_file_not_found()`: missing patterns_file → Err with path
 
-  Refactor: create `fn run_validation() -> Result<(), String>` and `fn run_migration(args) -> Result<(), String>` that can be unit tested. Then `main` becomes a dispatcher.
-
-  ```rust
-  #[test]
-  fn validate_success() {
-      // setup temp config and pattern files
-      let config_path = "...";
-      let result = run_validation_with_path(config_path);
-      assert!(result.is_ok());
-  }
-  
-  #[test]
-  fn validate_invalid_pattern() {
-      // create config with bad regex
-      let result = run_validation();
-      assert!(result.is_err());
-  }
-  ```
-
-- `test_migrate_config_creates_files()`: 
-  - Input: TOML config with inline patterns
-  - Output: assert YAML file created, pattern directory with files
-  - Compare that pattern file contents match expected `weight | regex`
+Refactor: create `fn run_validation(config_path: Option<&str>) -> Result<(), Vec<String>>` and test that directly. Then `main` just calls it and exits.
 
 **Manual testing:**
 - `cargo run -- --validate` on current repo's `config.toml` should succeed
-- `cargo run -- --migrate-config --input config.toml --output migrated.yaml --extract-patterns ./migrated_patterns/`
-  - Check `migrated.yaml` is valid YAML
-  - Check `migrated_patterns/FILE_READING.patterns` etc. exist
-  - Run with `CONFIG_PATH=migrated.yaml` and same `patterns` dir → same behavior
-- `cerebrum --badflag` prints error and exits 2
+- `cargo run -- --badflag` prints error and exits 2
 
 ## Migration Notes
 
@@ -814,13 +749,14 @@ fn external_patterns_compile_success() {
 
 Existing `config.toml` (with inline `patterns`) will continue to work unchanged. No action required. The multi-format support and external patterns are **opt-in**.
 
-**Opt-in migration path:**
+**Manual migration path (if desired):**
 
-1. Run: `cerebrum --migrate-config --input config.toml --output config.yaml --extract-patterns ./patterns/`
-2. Review generated `config.yaml` and `patterns/*.patterns` files
-3. Optionally rename pattern files or edit YAML to use different paths
-4. Start with: `CONFIG_PATH=config.yaml cargo run`
-5. Delete old `config.toml` once satisfied
+1. Create a YAML version of `config.toml` (by hand or with any TOML→YAML converter)
+2. Extract category patterns into `patterns/*.patterns` files using the `weight | regex` line format
+3. Replace `patterns: [...]` with `patterns_file: "patterns/<category>.patterns"` in each category
+4. Run `cerebrum --validate` to verify the new config
+5. Start with: `CONFIG_PATH=config.yaml cargo run`
+6. Delete old `config.toml` once satisfied
 
 **Rollback:** Switch back to `config.toml` or keep using TOML forever.
 
@@ -839,39 +775,8 @@ Existing `config.toml` (with inline `patterns`) will continue to work unchanged.
 2. **Assumption:** YAML and TOML can be deserialized to the same `ConfigRoot` without special renames. Conflicts may arise: YAML uses `?` for complex keys; TOML uses `[[array]]` for arrays of tables. Our config uses `[[auth_provider]]` and `[[negative_patterns]]`. These map to `Vec<AuthProviderConfig>` and `Vec<NegativePatternConfig>` in serde. Should work identically!
 3. **Risk:** Changing error messages from custom `String::from("No [categories] section found")` to serde's `missing field` errors may break tests or user expectations. We can provide custom error messages with `#[serde(skip_deserializing)]` and manual validation after deserialization. But simpler: accept new error messages as they're still informative.
 4. **Risk:** The `routing` config uses inline tables like `[routing.FILE_READING]`. This is a table of tables. In YAML, that is a nested map. serde should handle it.
-5. **Risk:** `config::merge_toml_values` currently does deep merging with overrides. We need to replicate that merging logic for YAML overlay. Our `load_config_from_path` only loads one format; the merge must happen before deserialization. Current approach: read overlay and merge as `toml::Value` then deserialize. This works with `toml::Value` intermediate. For YAML overlay on TOML base, we could:
-   - Deserialize base TOML to `ConfigRoot`
-   - Deserialize overlay YAML to `ConfigRoot`
-   - Merge fields manually (complex)
-   - Or: convert base to a generic `toml::Value` representation (still TOML), overlay YAML to `toml::Value`? Not directly.
-
-   Simpler: Keep the merging as `toml::Value` but read YAML overlay and convert to TOML-like structure? Not possible. We need a unified merge. We could:
-   - Read embedded defaults as `ConfigRoot`
-   - Read overlay (any format) as `ConfigRoot`
-   - Use a `merge_configs(base: ConfigRoot, overlay: ConfigRoot) -> ConfigRoot` that recursively overlays fields (with same override_keys logic). This is doable with serde's `merge` crate or manual. Since config is not deeply nested (mostly flat within sections), we can implement manual overlay:
-     - For each top-level field in overlay, if it's `Some(...)`, replace base's field; else keep base's.
-     - Special case: `categories` merge by key: overlay category overrides base category of same name; but also allow new categories to be added. The current `merge_toml_values` handles nested tables, which means overlay categories are merged with base categories (table insertion). Actually currently, if you have a base category and overlay defines same category key, the entire category table is replaced (because `override_keys` includes `"categories"`). So we can do the same: replace whole `categories` map when any category is overridden? But the current code says `override_keys` are the ones that get complete replacement, and it includes `categories`, `routing`, `auth_provider`, etc. That means if overlay contains `categories`, the whole section is replaced. So we can just replace the whole `HashMap` when present.
-
-   So merge becomes: for each field (server, http, cors, database, persistence, classifiers, regex_classifier, llm_classifier, categories, negative_patterns, routing, auth_providers, model_costs, baseline_model, classify_db_log, dashboard), if overlay has `Some(value)`, use it; else use base's value.
-
-   That is simple. We'll implement `fn merge_configs(base: ConfigRoot, overlay: ConfigRoot, override_keys: &[&str]) -> ConfigRoot`. Actually the current `merge_toml_values` does a recursive merge except for `override_keys` which replace completely. To match behavior, we need to replicate that at the `ConfigRoot` level.
-
-   But note: `override_keys` from main.rs: classifiers, regex_classifier, llm_classifier, categories, auth_provider, model_costs, routing, negative_patterns. That's almost every user-configurable section. Effectively, overlay completely replaces those sections, while server, http, database, etc. are merged shallowly. So our merge can be:
-
-   ```rust
-   let mut merged = base.clone();
-   if let Some(overlay_server) = overlay.server { merged.server = Some(overlay_server); }
-   if let Some(overlay_http) = overlay.http { merged.http = Some(overlay_http); }
-   // ... for each field
-   if override_keys.contains("categories") && overlay.categories.is_some() {
-       merged.categories = overlay.categories;
-   }
-   // Similarly for routing, auth_providers, etc.
-   ```
-
-   We'll implement in main.rs merging. That's Phase 2 work.
-
-6. **Risk:** Users may place pattern files in non-standard locations. We should document that `patterns_file` is relative to the config file's directory (or to `patterns_dir`). The `load_patterns_from_file` function should interpret the path relative to the config file's directory if it's not absolute. For migration, we write to `patterns/` relative to config dir.
+5. **Risk:** `config::merge_toml_values` currently does deep merging with overrides. We need to replicate that merging logic for YAML overlay. The current `override_keys` (categories, routing, auth_provider, etc.) trigger complete section replacement. We'll implement `merge_configs(base: ConfigRoot, overlay: ConfigRoot)` that replaces override-key sections wholesale and shallowly merges the rest (server, http, etc.).
+6. **Risk:** Users may place pattern files in non-standard locations. We should document that `patterns_file` is relative to `patterns_dir` (or to the config file's directory if not absolute).
 7. **Assumption:** Pattern files are small enough to read into memory; no need for streaming.
 
 ## Progress
@@ -881,12 +786,12 @@ Existing `config.toml` (with inline `patterns`) will continue to work unchanged.
 ### Phase 1: Serde Derive Refactor
 
 #### Automated
-- [ ] 1.1 Add `serde` to Cargo.toml
-- [ ] 1.2 Annotate all config structs with `#[derive(Deserialize)]` and `#[serde(rename_all = "snake_case")]`
-- [ ] 1.3 Refactor `load_*_from_value` functions to deserialize directly from `ConfigRoot` or `toml::Value` with serde
-- [ ] 1.4 Update `CategoryConfig` and `load_categories_from_value` to use serde
-- [ ] 1.5 Update tests to work with new deserialization paths (may require adjusting expected error messages)
-- [ ] 1.6 Run full test suite and verify all tests pass
+- [x] 1.1 Add `serde` to Cargo.toml
+- [x] 1.2 Annotate all config structs with `#[derive(Deserialize)]` and `#[serde(rename_all = "snake_case")]`
+- [x] 1.3 Refactor `load_*_from_value` functions to deserialize directly from `ConfigRoot` or `toml::Value` with serde
+- [x] 1.4 Update `CategoryConfig` and `load_categories_from_value` to use serde
+- [x] 1.5 Update tests to work with new deserialization paths (may require adjusting expected error messages)
+- [x] 1.6 Run full test suite and verify all tests pass
 
 #### Manual
 - [ ] 1.7 Verify config loading still works with embedded `config.toml`
@@ -897,13 +802,13 @@ Existing `config.toml` (with inline `patterns`) will continue to work unchanged.
 ### Phase 2: Multi-Format Support
 
 #### Automated
-- [ ] 2.1 Add `serde-saphyr` dependency
-- [ ] 2.2 Implement `load_config_from_path` with format detection
-- [ ] 2.3 Update `main.rs` config loading to use `ConfigRoot` deserialization (with CONFIG_PATH overlay merging)
-- [ ] 2.4 Implement `merge_configs` to replace `merge_toml_values` for overlay
-- [ ] 2.5 Update all `load_*` calls to use `&ConfigRoot` instead of `&toml::value`
-- [ ] 2.6 Add YAML-specific test cases
-- [ ] 2.7 Test both TOML and YAML configs produce identical `ConfigRoot`
+- [x] 2.1 Add `serde_yaml` dependency (adapted from plan's `serde-saphyr`)
+- [x] 2.2 Implement `load_config_from_path` with format detection
+- [x] 2.3 Update `main.rs` config loading to use `ConfigRoot` deserialization (with CONFIG_PATH overlay merging)
+- [x] 2.4 Implement `merge_configs` to replace `merge_toml_values` for overlay
+- [x] 2.5 Update all `load_*` calls to use `&ConfigRoot` instead of `&toml::Value`
+- [x] 2.6 Add YAML-specific test cases
+- [x] 2.7 Test both TOML and YAML configs produce identical `ConfigRoot`
 
 #### Manual
 - [ ] 2.8 Create a sample YAML config and start with `CONFIG_PATH=sample.yaml`
@@ -921,8 +826,7 @@ Existing `config.toml` (with inline `patterns`) will continue to work unchanged.
 - [ ] 3.5 Compile all patterns (inline + external) and report errors with file:line for external files
 - [ ] 3.6 Modify `RegexClassifier::from_env` to accept resolved categories (no external references) — or perform resolution before calling it
 - [ ] 3.7 Add validation in startup to compile all regexes and abort on error
-- [ ] 3.8 Add `--validate` flag logic (lightweight: just load config and compile patterns, then exit)
-- [ ] 3.9 Add tests: pattern file loading, external patterns integration, validation errors
+- [ ] 3.8 Add tests: pattern file loading, external patterns integration, validation errors
 
 #### Manual
 - [ ] 3.10 Create sample pattern file and verify correct parsing
@@ -930,24 +834,19 @@ Existing `config.toml` (with inline `patterns`) will continue to work unchanged.
 
 ---
 
-### Phase 4: Migration Tool
+### Phase 4: Validation CLI
 
 #### Automated
-- [ ] 4.1 Extend argument parser to handle `--migrate-config --input <p> --output <p> --extract-patterns <dir>`
-- [ ] 4.2 Implement `run_migration(input_path, output_path, patterns_dir)`:
-   - Load input config
-   - Sort categories by priority ascending
-   - Replace each category's `patterns` with `patterns_file: "patterns/<category>.patterns"`
-   - Serialize to YAML (use `serde_saphyr` with `Serializer` configured for sorted keys)
-   - Write to output file
-   - Create patterns directory
-   - For each category (sorted), write pattern file with `weight | regex` lines
-- [ ] 4.3 Add tests: migration produces valid YAML and pattern files; migrated config loads successfully
+- [ ] 4.1 Extend argument parser to handle `--validate`
+- [ ] 4.2 Implement `run_validation(config_path: Option<&str>) -> Result<(), Vec<String>>`: load config, validate schema, resolve patterns, compile all regexes, collect all errors
+- [ ] 4.3 Add schema validation checks (port range, log level, provider types, required fields, cross-references)
+- [ ] 4.4 Add regex validation with file:line context for external patterns and category+index for inline
+- [ ] 4.5 Add tests: validate success, schema errors, regex errors, multiple errors collected, external file not found
+- [ ] 4.6 Wire `--validate` flag in `main()` to call `run_validation` and exit with appropriate code
 
 #### Manual
-- [ ] 4.4 Run migration on existing `config.toml`; inspect output
-- [ ] 4.5 Start server with migrated YAML and extracted patterns; verify identical behavior
-- [ ] 4.6 Verify pattern files can be edited independently
+- [ ] 4.7 Run `--validate` on existing `config.toml` — should succeed
+- [ ] 4.8 Verify helpful error output on intentionally broken config
 
 ---
 
