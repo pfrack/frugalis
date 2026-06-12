@@ -1,7 +1,7 @@
 # Config Format Upgrade: Multi-Format + External Patterns
 
 - **created**: 2026-06-11
-- **updated**: 2026-06-11
+- **updated**: 2026-06-12
 - **last_research**: config-format (2026-06-11)
 
 - **status**: implementing

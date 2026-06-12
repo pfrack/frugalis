@@ -564,6 +564,38 @@ pub(crate) fn load_config_from_path(path: &str) -> Result<ConfigRoot, String> {
     }
 }
 
+/// Load patterns from an external pattern file.
+/// Lines starting with `#` are comments; empty lines are skipped.
+/// Each non-comment line must match: `<weight> | <regex>`
+pub(crate) fn load_patterns_from_file(
+    path: &str,
+    base_dir: &Path,
+) -> Result<Vec<crate::intent_classifier::PatternEntry>, String> {
+    let full_path = base_dir.join(path);
+    let content =
+        std::fs::read_to_string(&full_path).map_err(|e| format!("cannot read pattern file {}: {}", full_path.display(), e))?;
+
+    let mut entries = Vec::new();
+    for (line_num, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let (weight_str, regex) = trimmed
+            .split_once(" | ")
+            .ok_or_else(|| format!("{}:{}: invalid format, expected '<weight> | <regex>'", path, line_num + 1))?;
+        let weight = weight_str
+            .trim()
+            .parse::<u8>()
+            .map_err(|e| format!("{}:{}: invalid weight: {}", path, line_num + 1, e))?;
+        entries.push(crate::intent_classifier::PatternEntry {
+            regex: regex.to_string(),
+            weight,
+        });
+    }
+    Ok(entries)
+}
+
 /// Merge overlay ConfigRoot into base, respecting override-key semantics.
 /// Override keys (classifiers, regex_classifier, llm_classifier, categories,
 /// auth_provider, model_costs, routing, negative_patterns) are completely replaced.
@@ -653,6 +685,9 @@ pub(crate) fn merge_configs(base: &mut ConfigRoot, overlay: ConfigRoot) {
     if let Some(v) = overlay.routing {
         base.routing = Some(v);
     }
+    if let Some(v) = overlay.patterns_dir {
+        base.patterns_dir = Some(v);
+    }
     if let Some(v) = overlay.negative_patterns {
         base.negative_patterns = Some(v);
     }
@@ -680,6 +715,8 @@ pub(crate) struct ConfigRoot {
     pub llm_classifier: Option<LlmClassifierConfig>,
     #[serde(default)]
     pub categories: Option<HashMap<String, CategoryConfig>>,
+    #[serde(default)]
+    pub patterns_dir: Option<String>,
     #[serde(default)]
     pub negative_patterns: Option<Vec<NegativePatternConfig>>,
     #[serde(default)]
@@ -835,6 +872,7 @@ mod tests {
                 threshold: 3,
                 priority: 1,
                 patterns: vec![],
+                patterns_file: None,
                 dual_threshold: None,
             },
             CategoryConfig {
@@ -843,6 +881,7 @@ mod tests {
                 threshold: 3,
                 priority: 2,
                 patterns: vec![],
+                patterns_file: None,
                 dual_threshold: None,
             },
             CategoryConfig {
@@ -851,6 +890,7 @@ mod tests {
                 threshold: 3,
                 priority: 3,
                 patterns: vec![],
+                patterns_file: None,
                 dual_threshold: None,
             },
             CategoryConfig {
@@ -859,6 +899,7 @@ mod tests {
                 threshold: 1,
                 priority: 4,
                 patterns: vec![],
+                patterns_file: None,
                 dual_threshold: None,
             },
         ]
@@ -1520,5 +1561,126 @@ port = 20000
         assert_eq!(server.port, 20000);
         assert_eq!(server.log_level, "info");
         assert_eq!(server.log_format, "compact");
+    }
+
+    // ── Phase 3: External Pattern File Tests ──
+
+    #[test]
+    fn load_patterns_from_file_basic() {
+        let tmp_dir = std::env::temp_dir();
+        let pattern_file = tmp_dir.join("test_basic.patterns");
+        std::fs::write(&pattern_file, "3 | hello\n2 | world\n").unwrap();
+
+        let patterns = load_patterns_from_file("test_basic.patterns", &tmp_dir).unwrap();
+        assert_eq!(patterns.len(), 2);
+        assert_eq!(patterns[0].regex, "hello");
+        assert_eq!(patterns[0].weight, 3);
+        assert_eq!(patterns[1].regex, "world");
+        assert_eq!(patterns[1].weight, 2);
+    }
+
+    #[test]
+    fn load_patterns_from_file_with_comments() {
+        let tmp_dir = std::env::temp_dir();
+        let pattern_file = tmp_dir.join("test_comments.patterns");
+        std::fs::write(
+            &pattern_file,
+            "# This is a comment\n3 | hello\n\n# Another comment\n2 | world\n",
+        )
+        .unwrap();
+
+        let patterns = load_patterns_from_file("test_comments.patterns", &tmp_dir).unwrap();
+        assert_eq!(patterns.len(), 2);
+        assert_eq!(patterns[0].regex, "hello");
+        assert_eq!(patterns[1].regex, "world");
+    }
+
+    #[test]
+    fn load_patterns_from_file_invalid_weight() {
+        let tmp_dir = std::env::temp_dir();
+        let pattern_file = tmp_dir.join("test_invalid_weight.patterns");
+        std::fs::write(&pattern_file, "not_a_number | hello\n").unwrap();
+
+        let result = load_patterns_from_file("test_invalid_weight.patterns", &tmp_dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid weight"));
+    }
+
+    #[test]
+    fn load_patterns_from_file_invalid_format() {
+        let tmp_dir = std::env::temp_dir();
+        let pattern_file = tmp_dir.join("test_invalid_format.patterns");
+        std::fs::write(&pattern_file, "no delimiter here\n").unwrap();
+
+        let result = load_patterns_from_file("test_invalid_format.patterns", &tmp_dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid format"));
+    }
+
+    #[test]
+    fn load_patterns_from_file_missing_file() {
+        let tmp_dir = std::env::temp_dir();
+        let result = load_patterns_from_file("nonexistent.patterns", &tmp_dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot read pattern file"));
+    }
+
+    #[test]
+    fn load_patterns_from_file_leading_trailing_spaces() {
+        let tmp_dir = std::env::temp_dir();
+        let pattern_file = tmp_dir.join("test_spaces.patterns");
+        std::fs::write(&pattern_file, "  3  |  hello world  \n").unwrap();
+
+        let patterns = load_patterns_from_file("test_spaces.patterns", &tmp_dir).unwrap();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].weight, 3);
+        // regex is not trimmed after delimiter; leading spaces preserved
+        assert_eq!(patterns[0].regex, " hello world");
+    }
+
+    #[test]
+    fn load_patterns_from_file_compiles_regex() {
+        let tmp_dir = std::env::temp_dir();
+        let pattern_file = tmp_dir.join("test_compile.patterns");
+        std::fs::write(
+            &pattern_file,
+            "3 | (?i)\\b(?:read|show)\\s+file\\b\n",
+        )
+        .unwrap();
+
+        let patterns = load_patterns_from_file("test_compile.patterns", &tmp_dir).unwrap();
+        assert_eq!(patterns.len(), 1);
+        // Verify the regex compiles
+        let re = regex::Regex::new(&patterns[0].regex);
+        assert!(re.is_ok(), "regex from pattern file should compile");
+    }
+
+    #[test]
+    fn config_root_with_patterns_dir() {
+        let toml = r#"
+patterns_dir = "./custom_patterns"
+[server]
+port = 9999
+[categories.CASUAL]
+description = "Simple"
+threshold = 1
+priority = 4
+"#;
+        let root: ConfigRoot = toml::from_str(toml).expect("valid TOML");
+        assert_eq!(root.patterns_dir.as_deref(), Some("./custom_patterns"));
+    }
+
+    #[test]
+    fn config_root_with_patterns_file() {
+        let toml = r#"
+[categories.CASUAL]
+description = "Simple"
+threshold = 1
+priority = 4
+patterns_file = "casual.patterns"
+"#;
+        let root: ConfigRoot = toml::from_str(toml).expect("valid TOML");
+        let cat = root.categories.as_ref().unwrap().get("CASUAL").unwrap();
+        assert_eq!(cat.patterns_file.as_deref(), Some("casual.patterns"));
     }
 }

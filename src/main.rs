@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::panic;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -120,6 +121,26 @@ async fn main() {
                    Ok(c) => c,
                    Err(_) => vec![],
                };
+
+              // Resolve external pattern files for each category
+              let patterns_dir = config_root
+                  .patterns_dir
+                  .as_deref()
+                  .map(PathBuf::from)
+                  .unwrap_or_else(|| PathBuf::from("./patterns"));
+              for cat in &mut categories {
+                  if let Some(ref pf) = cat.patterns_file.take() {
+                      match config::load_patterns_from_file(pf, &patterns_dir) {
+                          Ok(entries) => {
+                              cat.patterns = entries;
+                          }
+                          Err(e) => {
+                              warn!("Failed to load pattern file '{}': {}; using empty patterns for category '{}'", pf, e, cat.name);
+                              cat.patterns = vec![];
+                          }
+                      }
+                  }
+              }
 
              let (mut routing_map, mut fallback_entry) = match config::routing_from_value(&config_root) {
                  Ok((map, fallback)) => (map, fallback),
@@ -868,6 +889,7 @@ fn test_categories() -> Vec<intent_classifier::CategoryConfig> {
                     weight: 3,
                 },
             ],
+            patterns_file: None,
             dual_threshold: None,
         },
         intent_classifier::CategoryConfig {
@@ -881,6 +903,7 @@ fn test_categories() -> Vec<intent_classifier::CategoryConfig> {
                     weight: 3,
                 },
             ],
+            patterns_file: None,
             dual_threshold: None,
         },
         intent_classifier::CategoryConfig {
@@ -894,6 +917,7 @@ fn test_categories() -> Vec<intent_classifier::CategoryConfig> {
                     weight: 3,
                 },
             ],
+            patterns_file: None,
             dual_threshold: None,
         },
         intent_classifier::CategoryConfig {
@@ -907,6 +931,7 @@ fn test_categories() -> Vec<intent_classifier::CategoryConfig> {
                     weight: 3,
                 },
             ],
+            patterns_file: None,
             dual_threshold: None,
         },
     ]

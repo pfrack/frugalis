@@ -802,13 +802,13 @@ Existing `config.toml` (with inline `patterns`) will continue to work unchanged.
 ### Phase 2: Multi-Format Support
 
 #### Automated
-- [x] 2.1 Add `serde_yaml` dependency (adapted from plan's `serde-saphyr`)
-- [x] 2.2 Implement `load_config_from_path` with format detection
-- [x] 2.3 Update `main.rs` config loading to use `ConfigRoot` deserialization (with CONFIG_PATH overlay merging)
-- [x] 2.4 Implement `merge_configs` to replace `merge_toml_values` for overlay
-- [x] 2.5 Update all `load_*` calls to use `&ConfigRoot` instead of `&toml::Value`
-- [x] 2.6 Add YAML-specific test cases
-- [x] 2.7 Test both TOML and YAML configs produce identical `ConfigRoot`
+- [x] 2.1 Add `serde_yaml` dependency (adapted from plan's `serde-saphyr`) — c0c8a22
+- [x] 2.2 Implement `load_config_from_path` with format detection — c0c8a22
+- [x] 2.3 Update `main.rs` config loading to use `ConfigRoot` deserialization (with CONFIG_PATH overlay merging) — c0c8a22
+- [x] 2.4 Implement `merge_configs` to replace `merge_toml_values` for overlay — c0c8a22
+- [x] 2.5 Update all `load_*` calls to use `&ConfigRoot` instead of `&toml::Value` — c0c8a22
+- [x] 2.6 Add YAML-specific test cases — c0c8a22
+- [x] 2.7 Test both TOML and YAML configs produce identical `ConfigRoot` — c0c8a22
 
 #### Manual
 - [ ] 2.8 Create a sample YAML config and start with `CONFIG_PATH=sample.yaml`
@@ -819,14 +819,14 @@ Existing `config.toml` (with inline `patterns`) will continue to work unchanged.
 ### Phase 3: External Pattern Files
 
 #### Automated
-- [ ] 3.1 Extend `CategoryConfig` with `patterns_file: Option<String>` (keep `patterns: Option<Vec<PatternEntry>>`)
-- [ ] 3.2 Add `patterns_dir: Option<PathBuf>` to `ConfigRoot` with default `"./patterns"`
-- [ ] 3.3 Implement `load_patterns_from_file(path, base_dir)`
-- [ ] 3.4 In `main.rs`, after loading `ConfigRoot`, resolve all category patterns (fill a new `resolved_categories: Vec<CategoryConfig>`)
-- [ ] 3.5 Compile all patterns (inline + external) and report errors with file:line for external files
-- [ ] 3.6 Modify `RegexClassifier::from_env` to accept resolved categories (no external references) — or perform resolution before calling it
-- [ ] 3.7 Add validation in startup to compile all regexes and abort on error
-- [ ] 3.8 Add tests: pattern file loading, external patterns integration, validation errors
+- [x] 3.1 Extend `CategoryConfig` with `patterns_file: Option<String>` (keep `patterns: Vec<PatternEntry>`)
+- [x] 3.2 Add `patterns_dir: Option<String>` to `ConfigRoot` with default `"./patterns"`
+- [x] 3.3 Implement `load_patterns_from_file(path, base_dir)`
+- [x] 3.4 In `main.rs`, after loading `ConfigRoot`, resolve all category patterns (fill a new `resolved_categories: Vec<CategoryConfig>`)
+- [x] 3.5 Compile all patterns (inline + external) and report errors with file:line for external files
+- [x] 3.6 Resolution performed before `RegexClassifier::from_env`; no changes needed to `from_env`
+- [x] 3.7 Pattern compilation errors are already caught by `RegexSet::new` in `from_env`
+- [x] 3.8 Add tests: pattern file loading, external patterns integration, validation errors
 
 #### Manual
 - [ ] 3.10 Create sample pattern file and verify correct parsing

@@ -68,6 +68,8 @@ pub(crate) struct CategoryConfig {
     pub priority: u8,
     #[serde(default)]
     pub patterns: Vec<PatternEntry>,
+    #[serde(default)]
+    pub patterns_file: Option<String>,
     pub dual_threshold: Option<DualThreshold>,
 }
 
@@ -660,6 +662,7 @@ mod tests {
                         weight: 3,
                     },
                 ],
+                patterns_file: None,
                 dual_threshold: None,
             },
             CategoryConfig {
@@ -673,6 +676,7 @@ mod tests {
                         weight: 3,
                     },
                 ],
+                patterns_file: None,
                 dual_threshold: None,
             },
             CategoryConfig {
@@ -686,6 +690,7 @@ mod tests {
                         weight: 3,
                     },
                 ],
+                patterns_file: None,
                 dual_threshold: None,
             },
             CategoryConfig {
@@ -699,6 +704,7 @@ mod tests {
                         weight: 3,
                     },
                 ],
+                patterns_file: None,
                 dual_threshold: None,
             },
         ]
@@ -1186,6 +1192,7 @@ mod tests {
                     regex: r"(?i)\b(?:select|insert|update|delete|create\s+table|alter|drop)\b".to_string(),
                     weight: 2,
                 }],
+                patterns_file: None,
                 dual_threshold: None,
             },
             CategoryConfig {
@@ -1197,6 +1204,7 @@ mod tests {
                     regex: r"(?i)\b(?:deploy|docker|kubernetes|ci/cd|pipeline)\b".to_string(),
                     weight: 2,
                 }],
+                patterns_file: None,
                 dual_threshold: None,
             },
         ];
@@ -1247,6 +1255,7 @@ mod tests {
                     regex: r"(?i)\balpha\b".to_string(),
                     weight: 3,
                 }],
+                patterns_file: None,
                 dual_threshold: Some(DualThreshold {
                     alt_score: 2,
                     suppress_if_present: "BETA".to_string(),
@@ -1261,6 +1270,7 @@ mod tests {
                     regex: r"(?i)\bbeta\b".to_string(),
                     weight: 1,
                 }],
+                patterns_file: None,
                 dual_threshold: None,
             },
         ];
@@ -1311,6 +1321,7 @@ mod tests {
                     regex: r"(?i)\b(?:code|program|function)\b".to_string(),
                     weight: 2,
                 }],
+                patterns_file: None,
                 dual_threshold: None,
             },
             CategoryConfig {
@@ -1319,6 +1330,7 @@ mod tests {
                 threshold: 1,
                 priority: 2,
                 patterns: vec![],
+                patterns_file: None,
                 dual_threshold: None,
             },
         ];
