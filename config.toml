@@ -35,11 +35,22 @@ backend = "memory"
 
 [classifiers]
 enabled = true
-order = ["regex", "llm"]
+order = ["regex", "fewshot", "llm"]
 
 [regex_classifier]
 enabled = true
 short_prompt_len = 30
+
+# [fewshot_classifier] — uncomment to enable few-shot backend
+# enabled = true
+# confidence_threshold = 0.4
+# cold_start_threshold = 0.6
+# cold_start_feedback_count = 5
+# feature_dimensions = 1000
+# retraining_threshold = 5
+# data_path = "data/fewshot_training.yaml"
+# max_vocabulary_warn = 5000
+# max_training_examples = 10000
 
 # [llm_classifier] — uncomment to enable LLM backend
 # enabled = true
@@ -173,15 +184,15 @@ endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
+baseline_model = "meta/llama-3.3-70b-instruct"
+
+classify_db_log = false
+
 [model_costs]
 "claude-3.5-sonnet" = 3.00
 "gpt-4o" = 2.50
 "gpt-4o-mini" = 0.15
 "deepseek-chat" = 0.14
-
-baseline_model = "meta/llama-3.3-70b-instruct"
-
-classify_db_log = false
 
 [dashboard]
 default_hours = 24

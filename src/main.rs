@@ -11,7 +11,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use tokio::sync::RwLock;
 use tokio_stream::{Stream, StreamExt};
@@ -22,6 +22,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 mod auth;
 mod config;
 mod dashboard;
+mod fewshot_classifier;
 mod intent_classifier;
 mod persistence;
 mod routing;
@@ -34,6 +35,7 @@ use intent_classifier::IntentClassify;
 pub struct AppState {
     persistence: Option<persistence::PersistenceConfig>,
     classifier: Option<Arc<intent_classifier::ClassifierChain>>,
+    fewshot_classifier: Option<Arc<fewshot_classifier::FewShotClassifier>>,
     routing: Arc<tokio::sync::RwLock<std::collections::HashMap<String, intent_classifier::RouteEntry>>>,
     model_costs: Arc<tokio::sync::RwLock<intent_classifier::ModelCosts>>,
     baseline_model: Arc<tokio::sync::RwLock<String>>,
@@ -50,8 +52,43 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
-    // Parse config before tracing init to get server settings
+    // Parse CLI arguments
+    let args: Vec<String> = std::env::args().collect();
+    let mut enable_validate = false;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--validate" => {
+                enable_validate = true;
+                i += 1;
+            }
+            _ => {
+                eprintln!("unknown argument: {}", args[i]);
+                std::process::exit(2);
+            }
+        }
+    }
+
     let config_path_option = std::env::var("CONFIG_PATH").ok();
+
+    // ── Validation mode ──
+    if enable_validate {
+        let result = config::run_validation(config_path_option.as_deref());
+        match result {
+            Ok(()) => {
+                println!("Configuration valid");
+                std::process::exit(0);
+            }
+            Err(errors) => {
+                for err in &errors {
+                    eprintln!("{}", err);
+                }
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Parse config before tracing init to get server settings
     const DEFAULT_CONFIG_TOML: &str = include_str!("../config.toml");
     let mut config_root: config::ConfigRoot = match toml::from_str(DEFAULT_CONFIG_TOML) {
         Ok(root) => root,
@@ -114,7 +151,7 @@ async fn main() {
 
     let classify_db_log = config_root.classify_db_log.unwrap_or(false);
     let auth_providers = Arc::new(config::load_auth_providers_from_value(&config_root));
-      let (classifier, routing, model_costs, baseline_model) = {
+       let (classifier, routing, model_costs, baseline_model, fewshot_classifier) = {
                let categories_res = config::load_categories_from_value(&config_root);
                let categories_ok = categories_res.is_ok();
                let mut categories = match categories_res {
@@ -123,11 +160,10 @@ async fn main() {
                };
 
               // Resolve external pattern files for each category
-              let patterns_dir = config_root
-                  .patterns_dir
-                  .as_deref()
-                  .map(PathBuf::from)
-                  .unwrap_or_else(|| PathBuf::from("./patterns"));
+let patterns_dir = config_root
+                    .patterns_dir
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("./patterns"));
               for cat in &mut categories {
                   if let Some(ref pf) = cat.patterns_file.take() {
                       match config::load_patterns_from_file(pf, &patterns_dir) {
@@ -168,14 +204,15 @@ async fn main() {
                   }
               }
 
-              let model_costs = config::build_model_costs(&config_root, &routing_map);
-              let baseline_model = config_root.baseline_model
-                  .clone()
-                  .unwrap_or_else(|| intent_classifier::DEFAULT_MODEL_COMPLEX.to_string());
-             if !classifiers_config.enabled {
-                 info!("All classifiers disabled via config");
-                 (None, HashMap::new(), model_costs, baseline_model)
-             } else {
+               let model_costs = config::build_model_costs(&config_root, &routing_map);
+               let baseline_model = config_root.baseline_model
+                   .clone()
+                   .unwrap_or_else(|| intent_classifier::DEFAULT_MODEL_COMPLEX.to_string());
+              let mut fewshot_classifier: Option<Arc<fewshot_classifier::FewShotClassifier>> = None;
+              if !classifiers_config.enabled {
+                  info!("All classifiers disabled via config");
+                  (None, HashMap::new(), model_costs, baseline_model, None)
+              } else {
                  let mut backends: Vec<Arc<dyn intent_classifier::IntentClassify + Send + Sync>> =
                      Vec::new();
 
@@ -202,8 +239,20 @@ async fn main() {
                                  info!("Regex classifier disabled");
                              }
                          }
-                         "llm" => {
-                             if let Some(llm_config) = config::load_llm_classifier_config_from_value(&config_root) {
+                          "fewshot" => {
+                              if let Some(config) = config::load_fewshot_config_from_value(&config_root) {
+                                  let fewshot = Arc::new(fewshot_classifier::FewShotClassifier::new(
+                                      config,
+                                      routing_map.clone(),
+                                      fallback_entry.clone(),
+                                  ));
+                                  info!("Few-shot classifier enabled");
+                                  fewshot_classifier = Some(fewshot.clone());
+                                  backends.push(fewshot);
+                              }
+                          }
+                          "llm" => {
+                              if let Some(llm_config) = config::load_llm_classifier_config_from_value(&config_root) {
                                  let llm = intent_classifier::LLMClassifier::new(
                                      llm_config,
                                      http_client.clone(),
@@ -224,22 +273,22 @@ async fn main() {
                  }
 
                  if backends.is_empty() {
-                     warn!("no classifier backends enabled");
-                     (None, HashMap::new(), model_costs, baseline_model)
-                 } else {
-                     let chain = intent_classifier::ClassifierChain::new(backends);
-                     let mut merged_routing = HashMap::new();
-                     for backend in chain.backends().iter() {
-                         if let Some(r) = backend.get_routing() {
-                             merged_routing.extend(r.clone());
-                         }
-                     }
-                     (Some(Arc::new(chain)), merged_routing, model_costs, baseline_model)
-                 }
-             }
-    };
+                      warn!("no classifier backends enabled");
+                      (None, HashMap::new(), model_costs, baseline_model, None)
+                  } else {
+                      let chain = intent_classifier::ClassifierChain::new(backends);
+                      let mut merged_routing = HashMap::new();
+                      for backend in chain.backends().iter() {
+                          if let Some(r) = backend.get_routing() {
+                              merged_routing.extend(r.clone());
+                          }
+                      }
+                      (Some(Arc::new(chain)), merged_routing, model_costs, baseline_model, fewshot_classifier)
+                   }
+               }
+      };
 
-    let db_config = config::load_database_config_from_value(&config_root);
+     let db_config = config::load_database_config_from_value(&config_root);
     let persistence_settings = config::load_persistence_config_from_value(&config_root);
     let semaphore_limit = db_config.log_concurrency_limit as usize;
 
@@ -311,6 +360,7 @@ async fn main() {
     let app_state = Arc::new(AppState {
         persistence: persistence_state,
         classifier,
+        fewshot_classifier,
         routing: Arc::new(tokio::sync::RwLock::new(routing)),
         model_costs: Arc::new(tokio::sync::RwLock::new(model_costs)),
         baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
@@ -837,10 +887,64 @@ async fn classify_handler(
     classify_and_log(&headers, body_str, start, &state, log_status).await
 }
 
+#[derive(serde::Deserialize)]
+struct FeedbackRequest {
+    text: String,
+    #[serde(default)]
+    predicted_category: Option<String>,
+    actual_category: String,
+    #[serde(default = "default_satisfaction")]
+    satisfaction: f64,
+}
+
+fn default_satisfaction() -> f64 { 1.0 }
+
+async fn feedback_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<FeedbackRequest>,
+) -> impl IntoResponse {
+    let fewshot = match &state.fewshot_classifier {
+        Some(fs) => fs.clone(),
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
+                "error": "fewshot_classifier_not_configured",
+                "status": 503,
+                "message": "No few-shot classifier backend is configured"
+            })));
+        }
+    };
+
+    // Validate actual_category against known routing keys
+    let routing = state.routing.read().await;
+    if !routing.contains_key(&body.actual_category.to_uppercase()) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "invalid_category",
+            "status": 400,
+            "message": format!("Unknown category '{}'", body.actual_category)
+        })));
+    }
+    drop(routing);
+
+    // Clamp satisfaction to [0.0, 1.0] as per OpenAPI spec
+    let satisfaction = body.satisfaction.max(0.0).min(1.0);
+    fewshot.add_feedback(
+        body.text,
+        body.predicted_category,
+        body.actual_category,
+        satisfaction,
+    )
+    .await;
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "status": "accepted"
+    })))
+}
+
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
     let proxy_routes = Router::new()
         .route("/chat/completions", post(completion_handler))
         .route("/classify", post(classify_handler))
+        .route("/feedback", post(feedback_handler))
         .route_layer(auth::proxy_auth_layer(auth_config.clone()));
 
     let dashboard_routes = dashboard::routes(auth_config);
@@ -982,6 +1086,7 @@ mod tests {
         Arc::new(AppState {
             persistence: None,
             classifier: classifier_arc,
+            fewshot_classifier: None,
             routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
             model_costs: Arc::new(tokio::sync::RwLock::new(model_costs)),
             baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
@@ -1008,6 +1113,7 @@ mod tests {
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier: None,
+            fewshot_classifier: None,
             routing: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             model_costs: Arc::new(tokio::sync::RwLock::new(intent_classifier::ModelCosts::empty())),
             baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
@@ -1071,6 +1177,125 @@ mod tests {
             10_485_760,
         );
         build_app(auth_config, app_state)
+    }
+
+    #[tokio::test]
+    async fn test_feedback_requires_auth() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/feedback")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"text":"hello","actual_category":"CASUAL"}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_feedback_no_fewshot_returns_503() {
+        // test_app_with_classifier has no fewshot_classifier → 503
+        let app = test_app_with_classifier();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/feedback")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"text":"hello","actual_category":"SYNTAX_FIX"}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn test_chain_with_regex_and_fewshot() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        use std::collections::HashMap;
+        let cats = test_categories();
+        let mut routing = HashMap::new();
+        routing.insert(
+            cats[1].name.clone(),
+            intent_classifier::RouteEntry {
+                model: "sf-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
+        routing.insert(
+            cats[3].name.clone(),
+            intent_classifier::RouteEntry {
+                model: "ca-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
+        let fallback = intent_classifier::RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        let regex_classifier =
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let fewshot_config = config::FewShotConfig {
+            enabled: true,
+            confidence_threshold: 0.4,
+            cold_start_threshold: 0.6,
+            cold_start_feedback_count: 5,
+            feature_dimensions: 1000,
+            retraining_threshold: 5,
+            data_path: format!("/tmp/fewshot_int_{}.yaml", nanos),
+            max_vocabulary_warn: 5000,
+            max_training_examples: 10000,
+        };
+        let fewshot = fewshot_classifier::FewShotClassifier::new(
+            fewshot_config,
+            HashMap::new(),
+            intent_classifier::RouteEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
+
+        let chain = intent_classifier::ClassifierChain::new(vec![
+            Arc::new(regex_classifier),
+            Arc::new(fewshot),
+        ]);
+
+        // Regex should catch "fix this bug"
+        let result = chain.classify("fix this bug").await;
+        assert_eq!(result.category, "SYNTAX_FIX");
+        assert_eq!(result.tier, intent_classifier::ClassificationTier::Regex);
+
+        // Regex returns Fallback on non-matching prompt, few-shot catches bootstrap text
+        let result = chain.classify("can you explain what a hash map is").await;
+        assert_eq!(result.category, "CASUAL");
+        assert_eq!(result.tier, intent_classifier::ClassificationTier::FewShot);
     }
 
     #[tokio::test]
@@ -1938,6 +2163,7 @@ mod tests {
                 task_semaphore: semaphore,
             }),
             classifier: classifier_arc,
+            fewshot_classifier: None,
             routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
             model_costs: Arc::new(tokio::sync::RwLock::new(intent_classifier::ModelCosts::empty())),
             baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
@@ -2760,6 +2986,7 @@ mod slow_tests {
         let app_state = Arc::new(AppState {
             persistence: None,
             classifier,
+            fewshot_classifier: None,
             routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
             model_costs: Arc::new(tokio::sync::RwLock::new(model_costs)),
             baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),

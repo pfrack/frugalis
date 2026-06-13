@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 use serde::Deserialize;
@@ -40,11 +40,19 @@ fn default_page_limit_max() -> u32 { 100 }
 fn default_recent_count() -> u32 { 5 }
 fn default_short_prompt_len() -> usize { 30 }
 fn default_timeout_secs() -> u64 { 3 }
-fn default_classifier_order() -> Vec<String> { vec!["regex".to_string(), "llm".to_string()] }
+fn default_classifier_order() -> Vec<String> { vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()] }
 fn default_llm_model() -> String { "gpt-4o-mini".to_string() }
 fn default_llm_api_key_env() -> String { "OPENAI_API_KEY".to_string() }
 fn default_provider_type() -> String { "openai_compatible".to_string() }
 fn default_enabled_true() -> bool { true }
+fn default_confidence_threshold() -> f64 { 0.4 }
+fn default_cold_start_threshold() -> f64 { 0.6 }
+fn default_cold_start_feedback_count() -> usize { 5 }
+fn default_feature_dimensions() -> usize { 1000 }
+fn default_retraining_threshold() -> usize { 5 }
+fn default_fewshot_data_path() -> String { "data/fewshot_training.yaml".to_string() }
+fn default_max_vocabulary_warn() -> usize { 5000 }
+fn default_max_training_examples() -> usize { 10000 }
 
 /// Load dashboard configuration from a parsed ConfigRoot.
 /// Returns defaults if section is absent.
@@ -571,7 +579,13 @@ pub(crate) fn load_patterns_from_file(
     path: &str,
     base_dir: &Path,
 ) -> Result<Vec<crate::intent_classifier::PatternEntry>, String> {
-    let full_path = base_dir.join(path);
+    let full_path = base_dir.join(path).canonicalize()
+        .map_err(|e| format!("invalid pattern path {}: {}", path, e))?;
+    let base_dir = base_dir.canonicalize()
+        .map_err(|e| format!("invalid patterns_dir: {}", e))?;
+    if !full_path.starts_with(&base_dir) {
+        return Err(format!("pattern file path '{}' escapes patterns_dir", path));
+    }
     let content =
         std::fs::read_to_string(&full_path).map_err(|e| format!("cannot read pattern file {}: {}", full_path.display(), e))?;
 
@@ -594,6 +608,151 @@ pub(crate) fn load_patterns_from_file(
         });
     }
     Ok(entries)
+}
+
+/// Validate config schema and compile all regex patterns.
+/// Returns Ok(()) if everything is valid, or Err with a list of error messages.
+pub(crate) fn run_validation(config_path: Option<&str>) -> Result<(), Vec<String>> {
+    let mut errors: Vec<String> = Vec::new();
+
+    // Load config
+    let config_root: ConfigRoot = match config_path {
+        Some(path) => match load_config_from_path(path) {
+            Ok(root) => root,
+            Err(e) => {
+                errors.push(format!("config error: {e}"));
+                return Err(errors);
+            }
+        },
+        None => {
+            let default_content = include_str!("../config.toml");
+            match toml::from_str(default_content) {
+                Ok(root) => root,
+                Err(e) => {
+                    errors.push(format!("embedded config error: {e}"));
+                    return Err(errors);
+                }
+            }
+        }
+    };
+
+    // ── Server section validation ──
+    if let Some(ref server) = config_root.server {
+        if server.port == 0 {
+            errors.push(format!("server.port: invalid port {}", server.port));
+        }
+        match server.log_level.as_str() {
+            "trace" | "debug" | "info" | "warn" | "error" => {}
+            _ => errors.push(format!("server.log_level: unknown level '{}'", server.log_level)),
+        }
+        match server.log_format.as_str() {
+            "compact" | "full" | "json" | "pretty" => {}
+            _ => errors.push(format!("server.log_format: unknown format '{}'", server.log_format)),
+        }
+    }
+
+    // ── HTTP section validation ──
+    if let Some(ref http) = config_root.http {
+        if http.client_timeout_secs == 0 {
+            errors.push("http.client_timeout_secs: must be > 0".to_string());
+        }
+    }
+
+    // ── Categories validation ──
+    if let Some(ref cats) = config_root.categories {
+        for (name, cat) in cats {
+            if cat.threshold == 0 {
+                errors.push(format!("categories.{}.threshold: must be > 0", name));
+            }
+            if cat.priority == 0 {
+                errors.push(format!("categories.{}.priority: must be > 0", name));
+            }
+        }
+    } else {
+        errors.push("missing [categories] section".to_string());
+    }
+
+    // ── Routing validation: ensure all category references exist ──
+    if let Some(ref routing) = config_root.routing {
+        if let Some(ref cats) = config_root.categories {
+            for route_key in routing.keys() {
+                if route_key != "DEFAULT" && !cats.contains_key(route_key.as_str()) {
+                    errors.push(format!("routing.{}: references unknown category '{}'", route_key, route_key));
+                }
+            }
+        }
+    }
+
+    // ── Auth provider validation ──
+    if let Some(ref providers) = config_root.auth_providers {
+        for (i, p) in providers.iter().enumerate() {
+            if p.type_.is_empty() {
+                errors.push(format!("auth_provider[{}]: missing type", i));
+            }
+        }
+    }
+
+    // ── Model costs validation ──
+    if let Some(ref costs) = config_root.model_costs {
+        for (name, cost) in costs {
+            if *cost <= 0.0 {
+                errors.push(format!("model_costs.{}: must be > 0.0", name));
+            }
+        }
+    }
+
+    // ── Patterns directory validation ──
+    let patterns_dir = config_root
+        .patterns_dir
+        .unwrap_or_else(|| PathBuf::from("./patterns"));
+    if patterns_dir.exists() && !patterns_dir.is_dir() {
+        errors.push(format!("patterns_dir '{}': exists but is not a directory", patterns_dir.display()));
+    }
+
+    // ── Pattern file resolution & regex validation ──
+    if let Some(ref cats) = config_root.categories {
+        for (name, cat) in cats {
+            // Resolve patterns from external file or inline
+            let patterns: Vec<crate::intent_classifier::PatternEntry> =
+                if let Some(ref pf) = cat.patterns_file {
+                    match load_patterns_from_file(pf, &patterns_dir) {
+                        Ok(entries) => {
+                            // Validate each compiled regex with file:line context
+                            let mut has_error = false;
+                            for (idx, entry) in entries.iter().enumerate() {
+                                if let Err(e) = regex::Regex::new(&entry.regex) {
+                                    errors.push(format!("{}:{}: pattern {}: {}", pf, idx + 1, entry.regex, e));
+                                    has_error = true;
+                                }
+                            }
+                            if has_error {
+                                continue; // already recorded per-pattern errors
+                            }
+                            entries
+                        }
+                        Err(e) => {
+                            errors.push(format!("categories.{}.patterns_file '{}': {}", name, pf, e));
+                            continue;
+                        }
+                    }
+                } else {
+                    cat.patterns.clone()
+                };
+
+            // Validate inline patterns with category context
+            for (idx, entry) in patterns.iter().enumerate() {
+                if let Err(e) = regex::Regex::new(&entry.regex) {
+                    errors.push(format!("categories.{}.patterns[{}]: {}: {}", name, idx, entry.regex, e));
+                }
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 /// Merge overlay ConfigRoot into base, respecting override-key semantics.
@@ -673,6 +832,9 @@ pub(crate) fn merge_configs(base: &mut ConfigRoot, overlay: ConfigRoot) {
     if let Some(v) = overlay.llm_classifier {
         base.llm_classifier = Some(v);
     }
+    if let Some(v) = overlay.fewshot_classifier {
+        base.fewshot_classifier = Some(v);
+    }
     if let Some(v) = overlay.categories {
         base.categories = Some(v);
     }
@@ -696,6 +858,7 @@ pub(crate) fn merge_configs(base: &mut ConfigRoot, overlay: ConfigRoot) {
 /// Top-level configuration root, mirroring all sections in config.toml/config.yaml.
 /// Every field is `Option` so missing sections deserialize as `None`.
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) struct ConfigRoot {
     #[serde(default)]
     pub server: Option<ServerConfig>,
@@ -714,9 +877,11 @@ pub(crate) struct ConfigRoot {
     #[serde(default)]
     pub llm_classifier: Option<LlmClassifierConfig>,
     #[serde(default)]
+    pub fewshot_classifier: Option<FewShotConfig>,
+    #[serde(default)]
     pub categories: Option<HashMap<String, CategoryConfig>>,
     #[serde(default)]
-    pub patterns_dir: Option<String>,
+    pub patterns_dir: Option<PathBuf>,
     #[serde(default)]
     pub negative_patterns: Option<Vec<NegativePatternConfig>>,
     #[serde(default)]
@@ -746,7 +911,7 @@ impl Default for ClassifiersConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            order: vec!["regex".to_string(), "llm".to_string()],
+            order: vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()],
         }
     }
 }
@@ -844,6 +1009,39 @@ pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConf
         }
     };
     load_llm_classifier_config_from_value(&root)
+}
+
+/// Configuration for the few-shot classifier backend.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct FewShotConfig {
+    #[serde(default = "default_enabled_true")]
+    pub enabled: bool,
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f64,
+    #[serde(default = "default_cold_start_threshold")]
+    pub cold_start_threshold: f64,
+    #[serde(default = "default_cold_start_feedback_count")]
+    pub cold_start_feedback_count: usize,
+    #[serde(default = "default_feature_dimensions")]
+    pub feature_dimensions: usize,
+    #[serde(default = "default_retraining_threshold")]
+    pub retraining_threshold: usize,
+    #[serde(default = "default_fewshot_data_path")]
+    pub data_path: String,
+    #[serde(default = "default_max_vocabulary_warn")]
+    pub max_vocabulary_warn: usize,
+    #[serde(default = "default_max_training_examples")]
+    pub max_training_examples: usize,
+}
+
+/// Load few-shot classifier config from a parsed ConfigRoot.
+/// Returns None if section is absent or enabled = false.
+pub(crate) fn load_fewshot_config_from_value(root: &ConfigRoot) -> Option<FewShotConfig> {
+    let cfg = root.fewshot_classifier.as_ref()?;
+    if !cfg.enabled {
+        return None;
+    }
+    Some(cfg.clone())
 }
 
 /// Load LLM classifier config from a parsed ConfigRoot.
@@ -1268,7 +1466,7 @@ priority = 1
         let root: ConfigRoot = toml::from_str(toml_content).expect("valid TOML");
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
-        assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
+        assert_eq!(cfg.order, vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()]);
     }
 
     #[test]
@@ -1312,7 +1510,7 @@ priority = 1
         let root = ConfigRoot::default();
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
-        assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
+        assert_eq!(cfg.order, vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()]);
     }
 
     #[test]
@@ -1321,7 +1519,7 @@ priority = 1
         let root = ConfigRoot::default();
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
-        assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
+        assert_eq!(cfg.order, vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()]);
     }
 
     #[test]
@@ -1622,7 +1820,8 @@ port = 20000
         let tmp_dir = std::env::temp_dir();
         let result = load_patterns_from_file("nonexistent.patterns", &tmp_dir);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("cannot read pattern file"));
+        let err = result.unwrap_err();
+        assert!(err.contains("invalid pattern path"), "expected 'invalid pattern path', got: {}", err);
     }
 
     #[test]
@@ -1667,7 +1866,7 @@ threshold = 1
 priority = 4
 "#;
         let root: ConfigRoot = toml::from_str(toml).expect("valid TOML");
-        assert_eq!(root.patterns_dir.as_deref(), Some("./custom_patterns"));
+        assert_eq!(root.patterns_dir.as_ref().map(|p: &PathBuf| p.to_str()), Some(Some("./custom_patterns")));
     }
 
     #[test]
@@ -1682,5 +1881,169 @@ patterns_file = "casual.patterns"
         let root: ConfigRoot = toml::from_str(toml).expect("valid TOML");
         let cat = root.categories.as_ref().unwrap().get("CASUAL").unwrap();
         assert_eq!(cat.patterns_file.as_deref(), Some("casual.patterns"));
+    }
+
+    // ── Phase 4: Validation Tests ──
+
+    #[test]
+    fn validate_success_on_embedded_config() {
+        // Validates the embedded config.toml (should always be valid)
+        let result = run_validation(None);
+        assert!(result.is_ok(), "embedded config should be valid: {:?}", result.err());
+    }
+
+    #[test]
+    fn validate_invalid_regex_inline() {
+        let toml = r#"
+[categories.CASUAL]
+description = "Simple"
+threshold = 1
+priority = 4
+patterns = [{ regex = "[invalid", weight = 1 }]
+"#;
+        let tmp_dir = std::env::temp_dir();
+        let file_path = tmp_dir.join("test_validate_bad_regex.toml");
+        std::fs::write(&file_path, toml).unwrap();
+
+        let result = run_validation(Some(file_path.to_str().unwrap()));
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        let all = errors.join(" ");
+        assert!(all.contains("invalid"), "should report regex error: {all}");
+        assert!(all.contains("patterns[0]"), "should include pattern index: {all}");
+    }
+
+    #[test]
+    fn validate_schema_error_invalid_port() {
+        let toml = r#"
+[server]
+port = 0
+log_level = "info"
+log_format = "compact"
+[categories.CASUAL]
+description = "Simple"
+threshold = 1
+priority = 4
+"#;
+        let tmp_dir = std::env::temp_dir();
+        let file_path = tmp_dir.join("test_validate_bad_port.toml");
+        std::fs::write(&file_path, toml).unwrap();
+
+        let result = run_validation(Some(file_path.to_str().unwrap()));
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        let all = errors.join(" ");
+        assert!(all.contains("port"), "should report port error: {all}");
+    }
+
+    #[test]
+    fn validate_schema_error_invalid_log_level() {
+        let toml = r#"
+[server]
+port = 10000
+log_level = "bogus"
+log_format = "compact"
+[categories.CASUAL]
+description = "Simple"
+threshold = 1
+priority = 4
+"#;
+        let tmp_dir = std::env::temp_dir();
+        let file_path = tmp_dir.join("test_validate_bad_loglevel.toml");
+        std::fs::write(&file_path, toml).unwrap();
+
+        let result = run_validation(Some(file_path.to_str().unwrap()));
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        let all = errors.join(" ");
+        assert!(all.contains("log_level"), "should report log_level error: {all}");
+    }
+
+    #[test]
+    fn validate_schema_error_missing_categories() {
+        let toml = r#"
+[server]
+port = 10000
+log_level = "info"
+log_format = "compact"
+"#;
+        let tmp_dir = std::env::temp_dir();
+        let file_path = tmp_dir.join("test_validate_no_cats.toml");
+        std::fs::write(&file_path, toml).unwrap();
+
+        let result = run_validation(Some(file_path.to_str().unwrap()));
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        let all = errors.join(" ");
+        assert!(all.contains("categories"), "should report missing categories: {all}");
+    }
+
+    #[test]
+    fn validate_schema_error_zero_threshold() {
+        let toml = r#"
+[categories.CASUAL]
+description = "Simple"
+threshold = 0
+priority = 4
+"#;
+        let tmp_dir = std::env::temp_dir();
+        let file_path = tmp_dir.join("test_validate_zero_thresh.toml");
+        std::fs::write(&file_path, toml).unwrap();
+
+        let result = run_validation(Some(file_path.to_str().unwrap()));
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        let all = errors.join(" ");
+        assert!(all.contains("threshold"), "should report threshold error: {all}");
+    }
+
+    #[test]
+    fn validate_collects_multiple_errors() {
+        let toml = r#"
+[server]
+port = 0
+log_level = "nope"
+log_format = "compact"
+[categories.CASUAL]
+description = "Simple"
+threshold = 1
+priority = 4
+"#;
+        let tmp_dir = std::env::temp_dir();
+        let file_path = tmp_dir.join("test_validate_multi.toml");
+        std::fs::write(&file_path, toml).unwrap();
+
+        let result = run_validation(Some(file_path.to_str().unwrap()));
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        // Should have at least 2 errors: port + log_level
+        assert!(errors.len() >= 2, "should collect multiple errors, got {}: {:?}", errors.len(), errors);
+    }
+
+    #[test]
+    fn validate_external_pattern_file_not_found() {
+        use std::io::Write;
+        let tmp_dir = std::env::temp_dir();
+        let config_path = tmp_dir.join("test_validate_missing_patterns.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+[categories.CASUAL]
+description = "Simple"
+threshold = 1
+priority = 4
+patterns_file = "nonexistent.patterns"
+"#
+        )
+        .unwrap();
+        drop(file);
+
+        let result = run_validation(Some(config_path.to_str().unwrap()));
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        let all = errors.join(" ");
+        // Should mention the missing file
+        assert!(all.contains("nonexistent.patterns") || all.contains("cannot read"), "should report missing pattern file: {all}");
     }
 }

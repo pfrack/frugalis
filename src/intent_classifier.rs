@@ -3,7 +3,7 @@ use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use regex::Regex;
 use regex::RegexSet;
@@ -89,12 +89,13 @@ pub struct ClassificationResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassificationTier {
     Regex,
+    FewShot,
     Fallback,
 }
 
 /// Trait for intent classification backends.
 #[async_trait]
-pub trait IntentClassify: Send + Sync {
+pub trait IntentClassify: Send + Sync + 'static {
     async fn classify(&self, prompt: &str) -> ClassificationResult;
 
     /// Returns a reference to this backend's routing table, if it has one.
@@ -397,6 +398,13 @@ pub struct PatternMeta {
     pub weight: u8,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct FewShotExample {
+    pub text: String,
+    pub category: String,
+    pub confidence: f64,
+}
+
 
 
 // ── Auth Header Lookup ──
@@ -422,7 +430,7 @@ pub fn auth_headers_for(providers: &[AuthProviderConfig], provider_type: &str, a
 
 // ── Code-block regex (lazily compiled once) ──
 
-fn code_block_re() -> &'static Regex {
+pub(crate) fn code_block_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?s)```[^`]*```").expect("code_block_re regex must be valid"))
 }

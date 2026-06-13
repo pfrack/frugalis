@@ -100,6 +100,8 @@ stop_server() {
 cleanup() {
     stop_server
     rm -f /tmp/cerebrum-config-*.toml
+    rm -f /tmp/cerebrum-config-*.yaml
+    rm -rf /tmp/cerebrum-patterns
     if [ $FAIL -eq 0 ]; then
         rm -f /tmp/cerebrum-test-$$.log
     else
