@@ -2169,6 +2169,203 @@ mod tests {
         );
     }
 
+    // ── In-memory snippet path tests (Risk #2 F1 — runs in default CI) ──
+    // The 3 tests below exercise the F1 invariants end-to-end via the real
+    // axum stack (proxy → completion_handler → log_classification →
+    // log_inference → MemoryBackend::insert_inference) without requiring
+    // DATABASE_URL. They read from MemoryBackend::records directly to prove
+    // the data flowed through `log_classification` end-to-end.
+
+    #[tokio::test]
+    #[serial]
+    async fn test_snippet_path_truncates_to_200_chars() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let _guard = EnvGuard("MOCK_API_KEY");
+        std::env::set_var("MOCK_API_KEY", "sk-test");
+        let memory_backend = persistence::MemoryBackend::new();
+        let records_handle = memory_backend.records.clone();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
+        let backend = Arc::new(persistence::DbBackend::Memory(memory_backend));
+        let (app, server) = build_app_with_persistence_backend(backend, semaphore, None);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"hello"}}]}"#);
+        });
+
+        let long_message = format!("fix this bug {}", "x".repeat(487)); // 500 chars total
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"messages":[{{"role":"user","content":"{}"}}]}}"#,
+                        long_message
+                    )))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+
+        // Wait for the fire-and-forget log task to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let records = records_handle.read().await;
+        assert_eq!(records.len(), 1, "expected exactly one persisted record");
+        let snippet = &records[0].prompt_snippet;
+        assert!(
+            snippet.chars().count() <= 200,
+            "snippet should be <= 200 chars (got {})",
+            snippet.chars().count()
+        );
+        assert_eq!(
+            records[0].prompt_char_count,
+            Some(500),
+            "prompt_char_count should preserve the full message length"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_snippet_path_does_not_contain_full_prompt() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let _guard = EnvGuard("MOCK_API_KEY");
+        std::env::set_var("MOCK_API_KEY", "sk-test");
+        let memory_backend = persistence::MemoryBackend::new();
+        let records_handle = memory_backend.records.clone();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
+        let backend = Arc::new(persistence::DbBackend::Memory(memory_backend));
+        let (app, server) = build_app_with_persistence_backend(backend, semaphore, None);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"hello"}}]}"#);
+        });
+
+        // Build a message where the marker sits PAST the 200-char truncation
+        // point. The 200-char snippet must contain the prefix but NOT the
+        // marker, proving that the full prompt body is not persisted.
+        // Prefix = "fix this bug " (13) + 167 'a' = 180 chars. Total message
+        // = 180 + 26 (marker) + 100 ('x') = 306 chars. The marker starts at
+        // position 180, so the 200-char snippet (positions 0-199) only
+        // includes the first 20 chars of the 26-char marker.
+        // `snippet.contains(marker)` is therefore false.
+        let prefix = format!("fix this bug {}", "a".repeat(167));
+        let marker = "UNIQUE_MARKER_XYZ_9876543210";
+        let message = format!("{prefix}{marker}{}", "x".repeat(100));
+        let full_message_len = message.chars().count();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"messages":[{{"role":"user","content":"{}"}}]}}"#,
+                        message
+                    )))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let records = records_handle.read().await;
+        assert_eq!(records.len(), 1);
+        let snippet = &records[0].prompt_snippet;
+        assert!(
+            snippet.contains(&prefix),
+            "snippet should contain the 200-char prefix, got: {snippet}"
+        );
+        assert!(
+            !snippet.contains(marker),
+            "snippet should NOT contain the marker (which sits past the 200-char truncation point), got: {snippet}"
+        );
+        assert!(
+            snippet.chars().count() <= 200,
+            "snippet should be <= 200 chars (got {})",
+            snippet.chars().count()
+        );
+        assert_eq!(
+            records[0].prompt_char_count,
+            Some(full_message_len as i32),
+            "prompt_char_count should preserve the full message length"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_log_classification_failure_does_not_block_response() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let _guard = EnvGuard("MOCK_API_KEY");
+        std::env::set_var("MOCK_API_KEY", "sk-test");
+        let memory_backend = persistence::MemoryBackend::new();
+        // Inject one failure into the next insert. The flag auto-resets to
+        // false after the first call (see MemoryBackend::insert_inference).
+        memory_backend
+            .fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let records_handle = memory_backend.records.clone();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
+        let backend = Arc::new(persistence::DbBackend::Memory(memory_backend));
+        let (app, server) = build_app_with_persistence_backend(backend, semaphore, None);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"hello"}}]}"#);
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion request should succeed even when log_inference fails");
+
+        // (a) Response status is 200 — the proxy succeeds even though the
+        // background log task will fail.
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+
+        // Wait for the fire-and-forget log task to attempt + fail.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // (b) The failed insert means the record was NOT persisted.
+        // (The flag auto-resets, so a follow-up request would succeed.)
+        let records = records_handle.read().await;
+        assert_eq!(
+            records.len(),
+            0,
+            "the injected failure should prevent the record from being persisted"
+        );
+    }
+
     #[tokio::test]
     async fn test_dashboard_authenticated_returns_html() {
         let response = test_app()
@@ -2405,9 +2602,13 @@ mod tests {
         (app, server)
     }
 
-    /// Build app state and router with a real database pool for integration tests.
-    pub(crate) fn build_app_with_persistence(
-        pool: Arc<sqlx::PgPool>,
+    /// Build app state and router with an arbitrary `DbBackend` for integration tests.
+    /// The in-memory variant (`DbBackend::Memory`) runs in default CI without
+    /// `DATABASE_URL`; the Postgres variant requires `DATABASE_URL` and is used
+    /// by the existing `persistence_integration_*` tests (which skip cleanly
+    /// when the env var is not set).
+    pub(crate) fn build_app_with_persistence_backend(
+        backend: Arc<persistence::DbBackend>,
         semaphore: Arc<tokio::sync::Semaphore>,
         http_client: Option<reqwest::Client>,
     ) -> (Router, httpmock::MockServer) {
@@ -2473,13 +2674,9 @@ mod tests {
                 }
             }
         }
-        let pool_owned = pool;
-        let pg_backend = persistence::PostgresBackend {
-            pool: (*pool_owned).clone(),
-        };
         let app_state = Arc::new(AppState {
             persistence: Some(persistence::PersistenceConfig {
-                backend: Arc::new(persistence::DbBackend::Postgres(pg_backend)),
+                backend,
                 task_semaphore: semaphore,
             }),
             classifier: classifier_arc,
@@ -2503,6 +2700,23 @@ mod tests {
         });
         let app = build_app(auth_config, app_state);
         (app, server)
+    }
+
+    /// Build app state and router with a real Postgres pool for integration tests.
+    /// Thin wrapper around `build_app_with_persistence_backend` that constructs
+    /// a `PostgresBackend` from the pool. Kept for the 2 existing
+    /// `persistence_integration_sse_streaming_*` tests that still want a
+    /// real Postgres backend.
+    pub(crate) fn build_app_with_persistence(
+        pool: Arc<sqlx::PgPool>,
+        semaphore: Arc<tokio::sync::Semaphore>,
+        http_client: Option<reqwest::Client>,
+    ) -> (Router, httpmock::MockServer) {
+        let pg_backend = persistence::PostgresBackend {
+            pool: (*pool).clone(),
+        };
+        let backend = Arc::new(persistence::DbBackend::Postgres(pg_backend));
+        build_app_with_persistence_backend(backend, semaphore, http_client)
     }
 
     fn test_app_with_dead_endpoint(env_var_name: &str) -> Router {

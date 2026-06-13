@@ -39,12 +39,17 @@ pub trait PersistenceBackend: Send + Sync {
 /// ⚠️ Ephemeral: Data is lost when the process exits. Not suitable for production.
 pub struct MemoryBackend {
     pub records: Arc<tokio::sync::RwLock<Vec<InferenceRecord>>>,
+    /// Test-only failure injection. When true, the next call to
+    /// `insert_inference` returns an error and atomically resets this flag
+    /// to false. Production code leaves this at its default `false`.
+    pub(crate) fail_next: std::sync::atomic::AtomicBool,
 }
 
 impl MemoryBackend {
     pub fn new() -> Self {
         MemoryBackend {
             records: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            fail_next: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -203,6 +208,12 @@ fn percentile_99(durations: &[i32]) -> Option<i32> {
 #[async_trait]
 impl PersistenceBackend for MemoryBackend {
     async fn insert_inference(&self, record: &InferenceRecord) -> Result<(), String> {
+        if self
+            .fail_next
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("test-injected failure".to_string());
+        }
         let mut records = self.records.write().await;
         if records.len() >= 10_000 {
             records.remove(0);

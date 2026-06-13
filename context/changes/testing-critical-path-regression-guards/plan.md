@@ -1051,24 +1051,24 @@ The `format_sse_error_event` helper is `pub(crate)` or
 
 #### Automated
 
-- [x] 1.1 `cargo test chain_` (3 new stub-based scenarios + 1 extended test pass)
-- [x] 1.2 `cargo test test_chain_3_backend` (3-backend integration test passes)
-- [x] 1.3 `cargo build --release` succeeds
-- [x] 1.4 `cargo clippy --all-targets` reports no new warnings
-- [x] 1.5 `cargo fmt --check` passes
+- [x] 1.1 `cargo test chain_` (3 new stub-based scenarios + 1 extended test pass) — 9c2626d
+- [x] 1.2 `cargo test test_chain_3_backend` (3-backend integration test passes) — 9c2626d
+- [x] 1.3 `cargo build --release` succeeds — 9c2626d
+- [x] 1.4 `cargo clippy --all-targets` reports no new warnings — 9c2626d
+- [x] 1.5 `cargo fmt --check` passes — 9c2626d
 
 #### Manual
 
-- [ ] 1.6 Production code in `completion_handler` (`src/main.rs:790-976`) is unchanged
+- [x] 1.6 Production code in `completion_handler` (`src/main.rs:790-976`) is unchanged — 9c2626d
 
 ### Phase 2: Risk #2 F1 — Snippet path coverage
 
 #### Automated
 
-- [ ] 2.1 `cargo test snippet_path_` (3 new tests pass in default CI)
-- [ ] 2.2 `cargo test persistence_integration_` (2 existing tests pass with their `DATABASE_URL` skip behavior preserved)
-- [ ] 2.3 `cargo build --release` succeeds
-- [ ] 2.4 `cargo clippy --all-targets` reports no new warnings
+- [x] 2.1 `cargo test snippet_path_` (3 new tests pass in default CI)
+- [x] 2.2 `cargo test persistence_integration_` (2 existing tests pass with their `DATABASE_URL` skip behavior preserved)
+- [x] 2.3 `cargo build --release` succeeds
+- [x] 2.4 `cargo clippy --all-targets` reports no new warnings
 
 #### Manual
 
