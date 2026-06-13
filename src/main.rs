@@ -21,6 +21,53 @@ use tracing_subscriber::{fmt, layer::Layer, prelude::*, EnvFilter, Registry};
 
 #[cfg(feature = "otel")]
 mod telemetry;
+#[cfg(feature = "otel")]
+use opentelemetry::KeyValue;
+
+#[cfg(feature = "otel")]
+struct RequestMetrics {
+    metrics: Option<telemetry::Metrics>,
+    method: &'static str,
+    route: &'static str,
+    start: std::time::Instant,
+    status: StatusCode,
+}
+
+#[cfg(feature = "otel")]
+impl RequestMetrics {
+    fn new(
+        metrics: Option<telemetry::Metrics>,
+        method: &'static str,
+        route: &'static str,
+    ) -> Self {
+        Self {
+            metrics,
+            method,
+            route,
+            start: std::time::Instant::now(),
+            status: StatusCode::OK,
+        }
+    }
+    fn set_status(&mut self, status: StatusCode) {
+        self.status = status;
+    }
+}
+
+#[cfg(feature = "otel")]
+impl Drop for RequestMetrics {
+    fn drop(&mut self) {
+        if let Some(ref m) = self.metrics {
+            let attrs = [
+                KeyValue::new("method", self.method),
+                KeyValue::new("route", self.route),
+                KeyValue::new("status", self.status.as_u16().to_string()),
+            ];
+            m.requests_total.add(1, &attrs);
+            m.request_duration_seconds
+                .record(self.start.elapsed().as_secs_f64(), &attrs);
+        }
+    }
+}
 
 mod auth;
 mod config;
@@ -142,7 +189,7 @@ async fn main() {
             Some((guard, _)) => Box::new(
                 tracing_subscriber::registry()
                     .with(make_fmt_layer(log_filter))
-                    .with(guard.trace_layer("cerebrum"))
+                    .with(guard.trace_layer())
                     .with(guard.log_layer()),
             ),
             None => Box::new(tracing_subscriber::registry().with(make_fmt_layer(log_filter))),
@@ -154,9 +201,11 @@ async fn main() {
     tracing::subscriber::set_global_default(subscriber)
         .expect("global default subscriber should be set");
 
-    // Ensure any panic is logged, not silent.
+    // Ensure any panic is logged through the active tracing subscriber so it
+    // reaches both the fmt layer and the OTel log bridge (when the otel
+    // feature is enabled).
     panic::set_hook(Box::new(|info| {
-        eprintln!("Panic in Cerebrum: {info}");
+        tracing::error!("Panic in Cerebrum: {info}");
     }));
 
     let auth_config = auth::AuthConfig::from_env().unwrap_or_else(|err| {
@@ -453,7 +502,16 @@ async fn main() {
 
     #[cfg(feature = "otel")]
     if let Some((guard, _)) = otel {
-        guard.shutdown();
+        let shutdown_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || guard.shutdown()),
+        )
+        .await;
+        match shutdown_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!("OTel shutdown task panicked: {e}"),
+            Err(_) => warn!("OTel shutdown timed out after 5s; exiting with telemetry possibly unflushed"),
+        }
     }
 }
 
@@ -524,15 +582,15 @@ async fn classify_and_log(
     log_status: Option<&str>,
 ) -> impl IntoResponse {
     #[cfg(feature = "otel")]
-    if let Some(ref metrics) = state.metrics {
-        metrics.requests_total.add(1, &[]);
-    }
+    let mut rm = RequestMetrics::new(state.metrics.clone(), "POST", "/v1/classify");
 
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !content_type.starts_with("application/json") {
+        #[cfg(feature = "otel")]
+        rm.set_status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
         return json_response(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             r#"{"error":"bad_request","status":415,"message":"expected application/json"}"#
@@ -549,7 +607,13 @@ async fn classify_and_log(
 
     #[cfg(feature = "otel")]
     if let Some(ref metrics) = state.metrics {
-        metrics.classification_total.add(1, &[]);
+        metrics.classification_total.add(
+            1,
+            &[
+                KeyValue::new("category", classification.category.clone()),
+                KeyValue::new("tier", format!("{:?}", classification.tier)),
+            ],
+        );
     }
 
     let response_body = serde_json::json!({
@@ -561,13 +625,6 @@ async fn classify_and_log(
     .to_string();
     if let Some(log_status) = log_status {
         log_classification(state, &classification, body_str, start, log_status);
-    }
-
-    #[cfg(feature = "otel")]
-    if let Some(ref metrics) = state.metrics {
-        metrics
-            .request_duration_seconds
-            .record(start.elapsed().as_secs_f64(), &[]);
     }
 
     json_response(StatusCode::OK, response_body)
@@ -873,15 +930,15 @@ async fn completion_handler(
     let start = std::time::Instant::now();
 
     #[cfg(feature = "otel")]
-    if let Some(ref metrics) = state.metrics {
-        metrics.requests_total.add(1, &[]);
-    }
+    let mut rm = RequestMetrics::new(state.metrics.clone(), "POST", "/v1/chat/completions");
 
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !content_type.starts_with("application/json") {
+        #[cfg(feature = "otel")]
+        rm.set_status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
         return json_response(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             r#"{"error":"bad_request","status":415,"message":"expected application/json"}"#
@@ -892,6 +949,8 @@ async fn completion_handler(
     let body_str: String = match std::str::from_utf8(&body) {
         Ok(s) => s.to_string(),
         Err(_) => {
+            #[cfg(feature = "otel")]
+            rm.set_status(StatusCode::BAD_REQUEST);
             return json_response(
                 StatusCode::BAD_REQUEST,
                 r#"{"error":"bad_request","message":"invalid UTF-8 body"}"#.to_string(),
@@ -944,7 +1003,13 @@ async fn completion_handler(
 
     #[cfg(feature = "otel")]
     if let Some(ref metrics) = state.metrics {
-        metrics.classification_total.add(1, &[]);
+        metrics.classification_total.add(
+            1,
+            &[
+                KeyValue::new("category", classification.category.clone()),
+                KeyValue::new("tier", format!("{:?}", classification.tier)),
+            ],
+        );
     }
 
     let client = match &state.http_client {
@@ -975,6 +1040,8 @@ async fn completion_handler(
 
     if classification.endpoint.is_empty() {
         log_classification(&state, &classification, &body_str, start, "upstream_error");
+        #[cfg(feature = "otel")]
+        rm.set_status(StatusCode::BAD_GATEWAY);
         return json_response(
             StatusCode::BAD_GATEWAY,
             upstream_error_json(502, "no endpoint configured"),
@@ -990,6 +1057,8 @@ async fn completion_handler(
     ) {
         Err(msg) => {
             log_classification(&state, &classification, &body_str, start, "bad_request");
+            #[cfg(feature = "otel")]
+            rm.set_status(StatusCode::BAD_REQUEST);
             return json_response(StatusCode::BAD_REQUEST, upstream_error_json(400, &msg));
         }
         Ok(r) => r,
@@ -1004,9 +1073,18 @@ async fn completion_handler(
             if let Some(ref metrics) = state.metrics {
                 metrics
                     .upstream_duration_seconds
-                    .record(upstream_start.elapsed().as_secs_f64(), &[]);
+                    .record(
+                        upstream_start.elapsed().as_secs_f64(),
+                        &[
+                            KeyValue::new("provider", classification.provider_type.clone()),
+                            KeyValue::new("model", classification.model.clone()),
+                            KeyValue::new("status", "502"),
+                        ],
+                    );
             }
             log_classification(&state, &classification, &body_str, start, "upstream_error");
+            #[cfg(feature = "otel")]
+            rm.set_status(StatusCode::BAD_GATEWAY);
             return json_response(
                 StatusCode::BAD_GATEWAY,
                 upstream_error_json(502, &e.to_string()),
@@ -1018,24 +1096,26 @@ async fn completion_handler(
     if let Some(ref metrics) = state.metrics {
         metrics
             .upstream_duration_seconds
-            .record(upstream_start.elapsed().as_secs_f64(), &[]);
+            .record(
+                upstream_start.elapsed().as_secs_f64(),
+                &[
+                    KeyValue::new("provider", classification.provider_type.clone()),
+                    KeyValue::new("model", classification.model.clone()),
+                    KeyValue::new("status", upstream_response.status().as_u16().to_string()),
+                ],
+            );
     }
 
     if client_wants_stream {
         if !upstream_response.status().is_success() {
             let resp = handle_streaming_error(upstream_response).await;
             log_classification(&state, &classification, &body_str, start, "upstream_error");
+            #[cfg(feature = "otel")]
+            rm.set_status(resp.status());
             return resp;
         }
 
         let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
-
-        #[cfg(feature = "otel")]
-        if let Some(ref metrics) = state.metrics {
-            metrics
-                .request_duration_seconds
-                .record(start.elapsed().as_secs_f64(), &[]);
-        }
 
         return handle_streaming_response(
             state,
@@ -1055,13 +1135,6 @@ async fn completion_handler(
         "upstream_error"
     };
     log_classification(&state, &classification, &body_str, start, log_status);
-
-    #[cfg(feature = "otel")]
-    if let Some(ref metrics) = state.metrics {
-        metrics
-            .request_duration_seconds
-            .record(start.elapsed().as_secs_f64(), &[]);
-    }
 
     json_response(status, body)
 }

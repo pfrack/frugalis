@@ -1110,18 +1110,18 @@ The `format_sse_error_event` helper is `pub(crate)` or
 
 #### Automated
 
-- [x] 5.1 `cargo test completion_handler_returns_classification_json` (and 6 other refactored tests pass with JSON parsing) — pending
-- [x] 5.2 `cargo test classification_only_json_contract_has_4_keys` — pending
-- [x] 5.3 `cargo test upstream_error_json_contract_has_3_keys` — pending
-- [x] 5.4 `cargo test json_response_sets_application_json_content_type` — pending
-- [x] 5.5 `cargo test classification_only_json_serializes_all_3_tiers` — pending
-- [x] 5.6 `cargo build --release` succeeds — pending
-- [x] 5.7 `cargo clippy --all-targets` reports no new warnings — pending
+- [x] 5.1 `cargo test completion_handler_returns_classification_json` (and 6 other refactored tests pass with JSON parsing) — 4445c9d
+- [x] 5.2 `cargo test classification_only_json_contract_has_4_keys` — 4445c9d
+- [x] 5.3 `cargo test upstream_error_json_contract_has_3_keys` — 4445c9d
+- [x] 5.4 `cargo test json_response_sets_application_json_content_type` — 4445c9d
+- [x] 5.5 `cargo test classification_only_json_serializes_all_3_tiers` — 4445c9d
+- [x] 5.6 `cargo build --release` succeeds — 4445c9d
+- [x] 5.7 `cargo clippy --all-targets` reports no new warnings — 4445c9d
 
 #### Manual
 
-- [x] 5.8 Refactored tests assert on parsed `Value` shape (not on a substring) — pending
-- [x] 5.9 `tier` field test covers the 3 real variants (`Regex | FewShot | Fallback`) and does not claim `"LLM"` as a valid value — pending
+- [x] 5.8 Refactored tests assert on parsed `Value` shape (not on a substring) — 4445c9d
+- [x] 5.9 `tier` field test covers the 3 real variants (`Regex | FewShot | Fallback`) and does not claim `"LLM"` as a valid value — 4445c9d
 
 ### Phase 6: Documentation + cookbook + verification
 
