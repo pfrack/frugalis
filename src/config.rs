@@ -40,7 +40,7 @@ fn default_page_limit_max() -> u32 { 100 }
 fn default_recent_count() -> u32 { 5 }
 fn default_short_prompt_len() -> usize { 30 }
 fn default_timeout_secs() -> u64 { 3 }
-fn default_classifier_order() -> Vec<String> { vec!["regex".to_string(), "llm".to_string()] }
+fn default_classifier_order() -> Vec<String> { vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()] }
 fn default_llm_model() -> String { "gpt-4o-mini".to_string() }
 fn default_llm_api_key_env() -> String { "OPENAI_API_KEY".to_string() }
 fn default_provider_type() -> String { "openai_compatible".to_string() }

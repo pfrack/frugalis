@@ -613,8 +613,8 @@ Add training data save/load to YAML, vocabulary size operator warning, and `.git
 
 #### Automated
 
-- [x] 2.1 Project compiles: `cargo build`
-- [x] 2.2 All tests pass: `cargo test`
+- [x] 2.1 Project compiles: `cargo build` — 3e7145f
+- [x] 2.2 All tests pass: `cargo test` — 3e7145f
 
 #### Manual
 

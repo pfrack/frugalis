@@ -89,9 +89,8 @@ impl FewShotClassifier {
         scores
     }
 
-    fn exact_match(&self, preprocessed: &str) -> Option<(String, f64)> {
-        let td = self.training_data.blocking_read();
-        for example in td.iter() {
+    fn exact_match_in(&self, preprocessed: &str, td: &[FewShotExample]) -> Option<(String, f64)> {
+        for example in td {
             let example_preprocessed = Self::preprocess(&example.text);
             if example_preprocessed == preprocessed {
                 return Some((example.category.clone(), example.confidence));
@@ -100,16 +99,15 @@ impl FewShotClassifier {
         None
     }
 
-    fn feedback_count(&self) -> usize {
-        let td = self.training_data.blocking_read();
+    fn feedback_count_in(td: &[FewShotExample]) -> usize {
         td.iter().filter(|e| e.confidence < 0.99).count()
     }
 
-    fn effective_threshold(&self) -> f64 {
-        if self.feedback_count() < self.config.cold_start_feedback_count {
-            self.config.cold_start_threshold
+    fn effective_threshold_for(td: &[FewShotExample], config: &FewShotConfig) -> f64 {
+        if Self::feedback_count_in(td) < config.cold_start_feedback_count {
+            config.cold_start_threshold
         } else {
-            self.config.confidence_threshold
+            config.confidence_threshold
         }
     }
 
@@ -234,8 +232,9 @@ fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
 impl IntentClassify for FewShotClassifier {
     async fn classify(&self, prompt: &str) -> ClassificationResult {
         let preprocessed = Self::preprocess(prompt);
+        let td = self.training_data.read().await;
 
-        if let Some((category, confidence)) = self.exact_match(&preprocessed) {
+        if let Some((category, _confidence)) = self.exact_match_in(&preprocessed, &td) {
             let route = self
                 .routing
                 .get(&category)
@@ -253,7 +252,7 @@ impl IntentClassify for FewShotClassifier {
         let features = self.extract_features(&preprocessed, &self.vocabulary);
         let scores = self.score_categories(&features);
 
-        let threshold = self.effective_threshold();
+        let threshold = Self::effective_threshold_for(&td, &self.config);
         let best = scores
             .into_iter()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -292,7 +291,6 @@ impl IntentClassify for FewShotClassifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intent_classifier::FewShotExample;
 
     fn make_config() -> FewShotConfig {
         FewShotConfig {
@@ -418,14 +416,15 @@ mod tests {
     #[tokio::test]
     async fn cold_start_threshold_enforced_when_no_feedback() {
         let classifier = make_classifier();
-        assert_eq!(classifier.feedback_count(), 0);
-        assert!((classifier.effective_threshold() - 0.6).abs() < 1e-10);
+        let td = classifier.training_data.read().await;
+        assert_eq!(FewShotClassifier::feedback_count_in(&td), 0);
+        assert!((FewShotClassifier::effective_threshold_for(&td, &classifier.config) - 0.6).abs() < 1e-10);
     }
 
     #[tokio::test]
     async fn add_feedback_increments_training_data() {
         let classifier = make_classifier();
-        let initial_len = classifier.training_data.blocking_read().len();
+        let initial_len = classifier.training_data.read().await.len();
         classifier
             .add_feedback(
                 "custom text".to_string(),
@@ -434,7 +433,7 @@ mod tests {
                 0.8,
             )
             .await;
-        let new_len = classifier.training_data.blocking_read().len();
+        let new_len = classifier.training_data.read().await.len();
         assert_eq!(new_len, initial_len + 1);
     }
 

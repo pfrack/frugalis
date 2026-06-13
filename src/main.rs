@@ -22,6 +22,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 mod auth;
 mod config;
 mod dashboard;
+mod fewshot_classifier;
 mod intent_classifier;
 mod persistence;
 mod routing;
@@ -236,8 +237,19 @@ let patterns_dir = config_root
                                  info!("Regex classifier disabled");
                              }
                          }
-                         "llm" => {
-                             if let Some(llm_config) = config::load_llm_classifier_config_from_value(&config_root) {
+                          "fewshot" => {
+                              if let Some(config) = config::load_fewshot_config_from_value(&config_root) {
+                                  let fewshot = fewshot_classifier::FewShotClassifier::new(
+                                      config,
+                                      routing_map.clone(),
+                                      fallback_entry.clone(),
+                                  );
+                                  info!("Few-shot classifier enabled");
+                                  backends.push(Arc::new(fewshot));
+                              }
+                          }
+                          "llm" => {
+                              if let Some(llm_config) = config::load_llm_classifier_config_from_value(&config_root) {
                                  let llm = intent_classifier::LLMClassifier::new(
                                      llm_config,
                                      http_client.clone(),
@@ -1105,6 +1117,80 @@ mod tests {
             10_485_760,
         );
         build_app(auth_config, app_state)
+    }
+
+    #[tokio::test]
+    async fn test_chain_with_regex_and_fewshot() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        use std::collections::HashMap;
+        let cats = test_categories();
+        let mut routing = HashMap::new();
+        routing.insert(
+            cats[1].name.clone(),
+            intent_classifier::RouteEntry {
+                model: "sf-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
+        routing.insert(
+            cats[3].name.clone(),
+            intent_classifier::RouteEntry {
+                model: "ca-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
+        let fallback = intent_classifier::RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        let regex_classifier =
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
+
+        let fewshot_config = config::FewShotConfig {
+            enabled: true,
+            confidence_threshold: 0.4,
+            cold_start_threshold: 0.6,
+            cold_start_feedback_count: 5,
+            feature_dimensions: 1000,
+            retraining_threshold: 5,
+            data_path: "/tmp/test_fewshot_integration.yaml".to_string(),
+            max_vocabulary_warn: 5000,
+        };
+        let fewshot = fewshot_classifier::FewShotClassifier::new(
+            fewshot_config,
+            HashMap::new(),
+            intent_classifier::RouteEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
+
+        let chain = intent_classifier::ClassifierChain::new(vec![
+            Arc::new(regex_classifier),
+            Arc::new(fewshot),
+        ]);
+
+        // Regex should catch "fix this bug"
+        let result = chain.classify("fix this bug").await;
+        assert_eq!(result.category, "SYNTAX_FIX");
+        assert_eq!(result.tier, intent_classifier::ClassificationTier::Regex);
+
+        // Regex returns Fallback on non-matching prompt, few-shot catches bootstrap text
+        let result = chain.classify("can you explain what a hash map is").await;
+        assert_eq!(result.category, "CASUAL");
+        assert_eq!(result.tier, intent_classifier::ClassificationTier::FewShot);
     }
 
     #[tokio::test]
