@@ -16,11 +16,58 @@ use axum::{
 use tokio::sync::RwLock;
 use tokio_stream::{Stream, StreamExt};
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
-use tracing::{debug, info, Subscriber, warn};
-use tracing_subscriber::{fmt, layer::Layer, prelude::*, Registry, EnvFilter};
+use tracing::{debug, info, warn, Subscriber};
+use tracing_subscriber::{fmt, layer::Layer, prelude::*, EnvFilter, Registry};
 
 #[cfg(feature = "otel")]
 mod telemetry;
+#[cfg(feature = "otel")]
+use opentelemetry::KeyValue;
+
+#[cfg(feature = "otel")]
+struct RequestMetrics {
+    metrics: Option<telemetry::Metrics>,
+    method: &'static str,
+    route: &'static str,
+    start: std::time::Instant,
+    status: StatusCode,
+}
+
+#[cfg(feature = "otel")]
+impl RequestMetrics {
+    fn new(
+        metrics: Option<telemetry::Metrics>,
+        method: &'static str,
+        route: &'static str,
+    ) -> Self {
+        Self {
+            metrics,
+            method,
+            route,
+            start: std::time::Instant::now(),
+            status: StatusCode::OK,
+        }
+    }
+    fn set_status(&mut self, status: StatusCode) {
+        self.status = status;
+    }
+}
+
+#[cfg(feature = "otel")]
+impl Drop for RequestMetrics {
+    fn drop(&mut self) {
+        if let Some(ref m) = self.metrics {
+            let attrs = [
+                KeyValue::new("method", self.method),
+                KeyValue::new("route", self.route),
+                KeyValue::new("status", self.status.as_u16().to_string()),
+            ];
+            m.requests_total.add(1, &attrs);
+            m.request_duration_seconds
+                .record(self.start.elapsed().as_secs_f64(), &attrs);
+        }
+    }
+}
 
 mod auth;
 mod config;
@@ -39,7 +86,8 @@ pub struct AppState {
     persistence: Option<persistence::PersistenceConfig>,
     classifier: Option<Arc<intent_classifier::ClassifierChain>>,
     fewshot_classifier: Option<Arc<fewshot_classifier::FewShotClassifier>>,
-    routing: Arc<tokio::sync::RwLock<std::collections::HashMap<String, intent_classifier::RouteEntry>>>,
+    routing:
+        Arc<tokio::sync::RwLock<std::collections::HashMap<String, intent_classifier::RouteEntry>>>,
     model_costs: Arc<tokio::sync::RwLock<intent_classifier::ModelCosts>>,
     baseline_model: Arc<tokio::sync::RwLock<String>>,
     classify_db_log: Arc<std::sync::atomic::AtomicBool>,
@@ -109,7 +157,10 @@ async fn main() {
                 config::merge_configs(&mut config_root, overlay);
             }
             Err(e) => {
-                eprintln!("failed to parse config file at {}: {}; using embedded defaults", config_path, e);
+                eprintln!(
+                    "failed to parse config file at {}: {}; using embedded defaults",
+                    config_path, e
+                );
             }
         }
     }
@@ -138,28 +189,23 @@ async fn main() {
             Some((guard, _)) => Box::new(
                 tracing_subscriber::registry()
                     .with(make_fmt_layer(log_filter))
-                    .with(guard.trace_layer("cerebrum"))
+                    .with(guard.trace_layer())
                     .with(guard.log_layer()),
             ),
-            None => Box::new(
-                tracing_subscriber::registry()
-                    .with(make_fmt_layer(log_filter)),
-            ),
+            None => Box::new(tracing_subscriber::registry().with(make_fmt_layer(log_filter))),
         }
         #[cfg(not(feature = "otel"))]
-        Box::new(
-            tracing_subscriber::registry()
-                .with(make_fmt_layer(log_filter)),
-        )
+        Box::new(tracing_subscriber::registry().with(make_fmt_layer(log_filter)))
     };
 
     tracing::subscriber::set_global_default(subscriber)
         .expect("global default subscriber should be set");
 
-
-    // Ensure any panic is logged, not silent.
+    // Ensure any panic is logged through the active tracing subscriber so it
+    // reaches both the fmt layer and the OTel log bridge (when the otel
+    // feature is enabled).
     panic::set_hook(Box::new(|info| {
-        eprintln!("Panic in Cerebrum: {info}");
+        tracing::error!("Panic in Cerebrum: {info}");
     }));
 
     let auth_config = auth::AuthConfig::from_env().unwrap_or_else(|err| {
@@ -179,151 +225,167 @@ async fn main() {
     let keepalive_interval_secs = http_config.keepalive_interval_secs;
 
     let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(http_config.client_timeout_secs))
-        .connect_timeout(std::time::Duration::from_secs(http_config.client_connect_timeout_secs))
+        .timeout(std::time::Duration::from_secs(
+            http_config.client_timeout_secs,
+        ))
+        .connect_timeout(std::time::Duration::from_secs(
+            http_config.client_connect_timeout_secs,
+        ))
         .build()
         .expect("reqwest client should build");
 
     let classify_db_log = config_root.classify_db_log.unwrap_or(false);
     let auth_providers = Arc::new(config::load_auth_providers_from_value(&config_root));
-       let (classifier, routing, model_costs, baseline_model, fewshot_classifier) = {
-               let categories_res = config::load_categories_from_value(&config_root);
-               let categories_ok = categories_res.is_ok();
-               let mut categories = match categories_res {
-                   Ok(c) => c,
-                   Err(_) => vec![],
-               };
+    let (classifier, routing, model_costs, baseline_model, fewshot_classifier) = {
+        let categories_res = config::load_categories_from_value(&config_root);
+        let categories_ok = categories_res.is_ok();
+        let mut categories = match categories_res {
+            Ok(c) => c,
+            Err(_) => vec![],
+        };
 
-              // Resolve external pattern files for each category
-let patterns_dir = config_root
-                    .patterns_dir
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from("./patterns"));
-              for cat in &mut categories {
-                  if let Some(ref pf) = cat.patterns_file.take() {
-                      match config::load_patterns_from_file(pf, &patterns_dir) {
-                          Ok(entries) => {
-                              cat.patterns = entries;
-                          }
-                          Err(e) => {
-                              warn!("Failed to load pattern file '{}': {}; using empty patterns for category '{}'", pf, e, cat.name);
-                              cat.patterns = vec![];
-                          }
-                      }
-                  }
-              }
+        // Resolve external pattern files for each category
+        let patterns_dir = config_root
+            .patterns_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("./patterns"));
+        for cat in &mut categories {
+            if let Some(ref pf) = cat.patterns_file.take() {
+                match config::load_patterns_from_file(pf, &patterns_dir) {
+                    Ok(entries) => {
+                        cat.patterns = entries;
+                    }
+                    Err(e) => {
+                        warn!("Failed to load pattern file '{}': {}; using empty patterns for category '{}'", pf, e, cat.name);
+                        cat.patterns = vec![];
+                    }
+                }
+            }
+        }
 
-             let (mut routing_map, mut fallback_entry) = match config::routing_from_value(&config_root) {
-                 Ok((map, fallback)) => (map, fallback),
-                 Err(e) => {
-                     warn!("routing config parsing failed: {}; using hardcoded routing defaults", e);
-                     config::hardcoded_routing(&categories)
-                 }
-             };
+        let (mut routing_map, mut fallback_entry) = match config::routing_from_value(&config_root) {
+            Ok((map, fallback)) => (map, fallback),
+            Err(e) => {
+                warn!(
+                    "routing config parsing failed: {}; using hardcoded routing defaults",
+                    e
+                );
+                config::hardcoded_routing(&categories)
+            }
+        };
 
-             // Validate that all custom categories have corresponding routing entries.
-             // If any category missing, fall back to hardcoded categories and matching routing.
-             if categories_ok {
-                 let mut missing = Vec::new();
-                 for cat in &categories {
-                     if !routing_map.contains_key(&cat.name.to_uppercase()) {
-                         missing.push(cat.name.clone());
-                     }
-                 }
-                  if !missing.is_empty() {
-                      warn!("Categories {:?} missing routing entries; falling back to empty categories and hardcoded routing", missing);
-                      categories = vec![];
-                      let (new_map, new_fallback) = config::hardcoded_routing(&categories);
-                      routing_map = new_map;
-                      fallback_entry = new_fallback;
-                  }
-              }
+        // Validate that all custom categories have corresponding routing entries.
+        // If any category missing, fall back to hardcoded categories and matching routing.
+        if categories_ok {
+            let mut missing = Vec::new();
+            for cat in &categories {
+                if !routing_map.contains_key(&cat.name.to_uppercase()) {
+                    missing.push(cat.name.clone());
+                }
+            }
+            if !missing.is_empty() {
+                warn!("Categories {:?} missing routing entries; falling back to empty categories and hardcoded routing", missing);
+                categories = vec![];
+                let (new_map, new_fallback) = config::hardcoded_routing(&categories);
+                routing_map = new_map;
+                fallback_entry = new_fallback;
+            }
+        }
 
-               let model_costs = config::build_model_costs(&config_root, &routing_map);
-               let baseline_model = config_root.baseline_model
-                   .clone()
-                   .unwrap_or_else(|| intent_classifier::DEFAULT_MODEL_COMPLEX.to_string());
-              let mut fewshot_classifier: Option<Arc<fewshot_classifier::FewShotClassifier>> = None;
-              if !classifiers_config.enabled {
-                  info!("All classifiers disabled via config");
-                  (None, HashMap::new(), model_costs, baseline_model, None)
-              } else {
-                 let mut backends: Vec<Arc<dyn intent_classifier::IntentClassify + Send + Sync>> =
-                     Vec::new();
+        let model_costs = config::build_model_costs(&config_root, &routing_map);
+        let baseline_model = config_root
+            .baseline_model
+            .clone()
+            .unwrap_or_else(|| intent_classifier::DEFAULT_MODEL_COMPLEX.to_string());
+        let mut fewshot_classifier: Option<Arc<fewshot_classifier::FewShotClassifier>> = None;
+        if !classifiers_config.enabled {
+            info!("All classifiers disabled via config");
+            (None, HashMap::new(), model_costs, baseline_model, None)
+        } else {
+            let mut backends: Vec<Arc<dyn intent_classifier::IntentClassify + Send + Sync>> =
+                Vec::new();
 
-                 for name in &classifiers_config.order {
-                     match name.as_str() {
-                         "regex" => {
-                              if regex_config.enabled {
-                                  match intent_classifier::RegexClassifier::from_env(
-                                      routing_map.clone(),
-                                      fallback_entry.clone(),
-                                      regex_config.short_prompt_len,
-                                      categories.clone(),
-                                      &negative_patterns,
-                                  ) {
-                                     Ok(c) => {
-                                         info!("Regex classifier initialized");
-                                         backends.push(Arc::new(c));
-                                     }
-                                     Err(e) => {
-                                         warn!("RegexClassifier disabled: {e}");
-                                     }
-                                 }
-                             } else {
-                                 info!("Regex classifier disabled");
-                             }
-                         }
-                          "fewshot" => {
-                              if let Some(config) = config::load_fewshot_config_from_value(&config_root) {
-                                  let fewshot = Arc::new(fewshot_classifier::FewShotClassifier::new(
-                                      config,
-                                      routing_map.clone(),
-                                      fallback_entry.clone(),
-                                  ));
-                                  info!("Few-shot classifier enabled");
-                                  fewshot_classifier = Some(fewshot.clone());
-                                  backends.push(fewshot);
-                              }
-                          }
-                          "llm" => {
-                              if let Some(llm_config) = config::load_llm_classifier_config_from_value(&config_root) {
-                                 let llm = intent_classifier::LLMClassifier::new(
-                                     llm_config,
-                                     http_client.clone(),
-                                     categories.clone(),
-                                     auth_providers.clone(),
-                                 );
-                                 info!(
-                                     "LLM classifier enabled: model={}, endpoint={}",
-                                     llm.model, llm.endpoint
-                                 );
-                                 backends.push(Arc::new(llm));
-                             }
-                         }
-                         unknown => {
-                             warn!("unknown classifier in order: '{unknown}'");
-                         }
-                     }
-                 }
+            for name in &classifiers_config.order {
+                match name.as_str() {
+                    "regex" => {
+                        if regex_config.enabled {
+                            match intent_classifier::RegexClassifier::from_env(
+                                routing_map.clone(),
+                                fallback_entry.clone(),
+                                regex_config.short_prompt_len,
+                                categories.clone(),
+                                &negative_patterns,
+                            ) {
+                                Ok(c) => {
+                                    info!("Regex classifier initialized");
+                                    backends.push(Arc::new(c));
+                                }
+                                Err(e) => {
+                                    warn!("RegexClassifier disabled: {e}");
+                                }
+                            }
+                        } else {
+                            info!("Regex classifier disabled");
+                        }
+                    }
+                    "fewshot" => {
+                        if let Some(config) = config::load_fewshot_config_from_value(&config_root) {
+                            let fewshot = Arc::new(fewshot_classifier::FewShotClassifier::new(
+                                config,
+                                routing_map.clone(),
+                                fallback_entry.clone(),
+                            ));
+                            info!("Few-shot classifier enabled");
+                            fewshot_classifier = Some(fewshot.clone());
+                            backends.push(fewshot);
+                        }
+                    }
+                    "llm" => {
+                        if let Some(llm_config) =
+                            config::load_llm_classifier_config_from_value(&config_root)
+                        {
+                            let llm = intent_classifier::LLMClassifier::new(
+                                llm_config,
+                                http_client.clone(),
+                                categories.clone(),
+                                auth_providers.clone(),
+                            );
+                            info!(
+                                "LLM classifier enabled: model={}, endpoint={}",
+                                llm.model, llm.endpoint
+                            );
+                            backends.push(Arc::new(llm));
+                        }
+                    }
+                    unknown => {
+                        warn!("unknown classifier in order: '{unknown}'");
+                    }
+                }
+            }
 
-                 if backends.is_empty() {
-                      warn!("no classifier backends enabled");
-                      (None, HashMap::new(), model_costs, baseline_model, None)
-                  } else {
-                      let chain = intent_classifier::ClassifierChain::new(backends);
-                      let mut merged_routing = HashMap::new();
-                      for backend in chain.backends().iter() {
-                          if let Some(r) = backend.get_routing() {
-                              merged_routing.extend(r.clone());
-                          }
-                      }
-                      (Some(Arc::new(chain)), merged_routing, model_costs, baseline_model, fewshot_classifier)
-                   }
-               }
-      };
+            if backends.is_empty() {
+                warn!("no classifier backends enabled");
+                (None, HashMap::new(), model_costs, baseline_model, None)
+            } else {
+                let chain = intent_classifier::ClassifierChain::new(backends);
+                let mut merged_routing = HashMap::new();
+                for backend in chain.backends().iter() {
+                    if let Some(r) = backend.get_routing() {
+                        merged_routing.extend(r.clone());
+                    }
+                }
+                (
+                    Some(Arc::new(chain)),
+                    merged_routing,
+                    model_costs,
+                    baseline_model,
+                    fewshot_classifier,
+                )
+            }
+        }
+    };
 
-     let db_config = config::load_database_config_from_value(&config_root);
+    let db_config = config::load_database_config_from_value(&config_root);
     let persistence_settings = config::load_persistence_config_from_value(&config_root);
     let semaphore_limit = db_config.log_concurrency_limit as usize;
 
@@ -358,12 +420,19 @@ let patterns_dir = config_root
                     })
                 }
                 "sqlite" => {
-                    match persistence::SqliteBackend::from_path(&persistence_settings.sqlite_path).await {
+                    match persistence::SqliteBackend::from_path(&persistence_settings.sqlite_path)
+                        .await
+                    {
                         Ok(backend) => {
-                            info!("Persistence backend: sqlite (path={})", persistence_settings.sqlite_path);
+                            info!(
+                                "Persistence backend: sqlite (path={})",
+                                persistence_settings.sqlite_path
+                            );
                             Some(persistence::PersistenceConfig {
                                 backend: Arc::new(persistence::DbBackend::Sqlite(backend)),
-                                task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
+                                task_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                                    semaphore_limit,
+                                )),
                             })
                         }
                         Err(e) => {
@@ -371,7 +440,9 @@ let patterns_dir = config_root
                             let backend = persistence::MemoryBackend::new();
                             Some(persistence::PersistenceConfig {
                                 backend: Arc::new(persistence::DbBackend::Memory(backend)),
-                                task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
+                                task_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                                    semaphore_limit,
+                                )),
                             })
                         }
                     }
@@ -390,7 +461,7 @@ let patterns_dir = config_root
     };
 
     let cors_config = config::load_cors_config_from_value(&config_root);
-     let allowed_origins = Arc::new(RwLock::new(cors_config.allowed_origins));
+    let allowed_origins = Arc::new(RwLock::new(cors_config.allowed_origins));
 
     let app_state = Arc::new(AppState {
         persistence: persistence_state,
@@ -401,7 +472,9 @@ let patterns_dir = config_root
         baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
         classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(classify_db_log)),
         http_client: Some(http_client),
-        max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(max_upstream_body_bytes as usize)),
+        max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(
+            max_upstream_body_bytes as usize,
+        )),
         keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(keepalive_interval_secs as u64)),
         request_body_limit_bytes: http_config.request_body_limit_bytes,
         streaming_channel_capacity: http_config.streaming_channel_capacity,
@@ -429,7 +502,16 @@ let patterns_dir = config_root
 
     #[cfg(feature = "otel")]
     if let Some((guard, _)) = otel {
-        guard.shutdown();
+        let shutdown_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || guard.shutdown()),
+        )
+        .await;
+        match shutdown_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!("OTel shutdown task panicked: {e}"),
+            Err(_) => warn!("OTel shutdown timed out after 5s; exiting with telemetry possibly unflushed"),
+        }
     }
 }
 
@@ -500,15 +582,15 @@ async fn classify_and_log(
     log_status: Option<&str>,
 ) -> impl IntoResponse {
     #[cfg(feature = "otel")]
-    if let Some(ref metrics) = state.metrics {
-        metrics.requests_total.add(1, &[]);
-    }
+    let mut rm = RequestMetrics::new(state.metrics.clone(), "POST", "/v1/classify");
 
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !content_type.starts_with("application/json") {
+        #[cfg(feature = "otel")]
+        rm.set_status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
         return json_response(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             r#"{"error":"bad_request","status":415,"message":"expected application/json"}"#
@@ -525,7 +607,13 @@ async fn classify_and_log(
 
     #[cfg(feature = "otel")]
     if let Some(ref metrics) = state.metrics {
-        metrics.classification_total.add(1, &[]);
+        metrics.classification_total.add(
+            1,
+            &[
+                KeyValue::new("category", classification.category.clone()),
+                KeyValue::new("tier", format!("{:?}", classification.tier)),
+            ],
+        );
     }
 
     let response_body = serde_json::json!({
@@ -537,11 +625,6 @@ async fn classify_and_log(
     .to_string();
     if let Some(log_status) = log_status {
         log_classification(state, &classification, body_str, start, log_status);
-    }
-
-    #[cfg(feature = "otel")]
-    if let Some(ref metrics) = state.metrics {
-        metrics.request_duration_seconds.record(start.elapsed().as_secs_f64(), &[]);
     }
 
     json_response(StatusCode::OK, response_body)
@@ -602,7 +685,8 @@ fn build_upstream_request(
 
     let modified_body = serde_json::to_vec(&req_body).unwrap_or_else(|_| body.to_vec());
 
-    let auth_headers = intent_classifier::auth_headers_for(auth_providers, &classification.provider_type, api_key);
+    let auth_headers =
+        intent_classifier::auth_headers_for(auth_providers, &classification.provider_type, api_key);
 
     let mut req = client
         .post(&classification.endpoint)
@@ -711,11 +795,12 @@ fn handle_streaming_response(
                         Some(Ok(bytes)) => { if tx.send(bytes).await.is_err() { break; } }
                         Some(Err(_e)) => {
                             stream_status = "stream_error";
-                            let error_msg = _e.to_string();
-                            let json_payload = serde_json::json!({"error": error_msg}).to_string();
-                            let _ = tx.send(Bytes::from(
-                                format!("event: error\ndata: {}\n\n", json_payload)
-                            )).await;
+                            // Use the same SSE error event format as
+                            // `handle_streaming_error` (non-2xx upstream) so
+                            // the two error paths produce byte-compatible
+                            // frames — a single SSE error contract.
+                            let sse_error = format_sse_error_event(&_e.to_string());
+                            let _ = tx.send(Bytes::from(sse_error)).await;
                             break;
                         }
                         None => break,
@@ -746,7 +831,54 @@ fn handle_streaming_response(
     resp
 }
 
+/// Build the SSE error event body for an upstream error message:
+/// `event: error\ndata: {"error":"<msg>"}\n\n`.
+///
+/// Applies the JSON-escape rule (`\\` → `\\\\`, `"` → `\\"`, `\n`/`\r`
+/// → space) to the embedded message. The 2 KB body cap and 512-char
+/// truncate (upstream on `handle_streaming_error`) and the status
+/// passthrough + `Content-Type: text/event-stream` + `Cache-Control:
+/// no-cache` (downstream on the response) are NOT this helper's concern.
+/// Helper invariants: (a) JSON-escape correctness of the embedded
+/// message, (b) SSE event format. Both call sites — `handle_streaming_error`
+/// (non-2xx upstream) and the inline mid-stream error branch in
+/// `handle_streaming_response` (chunk stream error) — call this helper
+/// with the raw upstream error string.
+pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
+    let escaped = error_msg
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\n', '\r'], " ");
+    format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", escaped)
+}
+
+/// Convert a non-2xx upstream response into an SSE error event for the client.
+///
+/// 5 invariants protect this code path (the F2 review fixes; see
+/// `context/foundation/lessons.md` for the review history):
+/// 1. **Body cap (2 KB)** — upstream error bodies are bounded to 2 KB.
+///    Large upstream bodies would amplify latency and memory pressure
+///    on the proxy, and SSE clients don't need the full body to surface
+///    an error.
+/// 2. **JSON escape** — `\`, `"`, `\n`, `\r` in the upstream error text
+///    are replaced with safe equivalents before serialization. Without
+///    this, a malicious upstream could inject SSE frames or break the
+///    JSON parse that downstream consumers use to detect error events.
+/// 3. **SSE event format** — the body is `event: error\ndata: {"error":"…"}\n\n`.
+///    A valid SSE event with the `error` event name lets clients using
+///    `EventSource`-style subscribe to error events distinctly from data
+///    events.
+/// 4. **Status passthrough** — the upstream's status code is forwarded
+///    to the client (e.g., 503 → 503). This preserves the upstream's
+///    classification of the failure (rate limit vs. server error vs.
+///    auth failure) so clients can react correctly.
+/// 5. **`Content-Type: text/event-stream` + `Cache-Control: no-cache`**
+///    — the client must parse the body as SSE and must not cache error
+///    events (caching would replay a transient error long after it has
+///    been resolved).
 async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Response {
+    // Invariant 1: bound the upstream error body to 2 KB to cap latency
+    // and memory on large error payloads.
     const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
     let mut error_bytes = Vec::new();
     loop {
@@ -761,16 +893,19 @@ async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Res
             Err(_) => break,
         }
     }
+    // Truncate to 512 chars before passing to the helper. The helper
+    // applies the JSON-escape rule (Invariant 2) and emits the SSE event
+    // body (Invariant 3).
     let error_text = String::from_utf8_lossy(&error_bytes)
         .chars()
         .take(512)
-        .collect::<String>()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace(['\n', '\r'], " ");
-    let sse_error = format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", error_text);
+        .collect::<String>();
+    let sse_error = format_sse_error_event(&error_text);
     let mut resp = Response::new(Body::from(sse_error));
+    // Invariant 4: forward the upstream's status code to the client so
+    // it can react to the specific failure class.
     *resp.status_mut() = upstream_response.status();
+    // Invariant 5: mark the response as an uncacheable SSE stream.
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("text/event-stream"),
@@ -795,15 +930,15 @@ async fn completion_handler(
     let start = std::time::Instant::now();
 
     #[cfg(feature = "otel")]
-    if let Some(ref metrics) = state.metrics {
-        metrics.requests_total.add(1, &[]);
-    }
+    let mut rm = RequestMetrics::new(state.metrics.clone(), "POST", "/v1/chat/completions");
 
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !content_type.starts_with("application/json") {
+        #[cfg(feature = "otel")]
+        rm.set_status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
         return json_response(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             r#"{"error":"bad_request","status":415,"message":"expected application/json"}"#
@@ -814,6 +949,8 @@ async fn completion_handler(
     let body_str: String = match std::str::from_utf8(&body) {
         Ok(s) => s.to_string(),
         Err(_) => {
+            #[cfg(feature = "otel")]
+            rm.set_status(StatusCode::BAD_REQUEST);
             return json_response(
                 StatusCode::BAD_REQUEST,
                 r#"{"error":"bad_request","message":"invalid UTF-8 body"}"#.to_string(),
@@ -866,7 +1003,13 @@ async fn completion_handler(
 
     #[cfg(feature = "otel")]
     if let Some(ref metrics) = state.metrics {
-        metrics.classification_total.add(1, &[]);
+        metrics.classification_total.add(
+            1,
+            &[
+                KeyValue::new("category", classification.category.clone()),
+                KeyValue::new("tier", format!("{:?}", classification.tier)),
+            ],
+        );
     }
 
     let client = match &state.http_client {
@@ -897,20 +1040,29 @@ async fn completion_handler(
 
     if classification.endpoint.is_empty() {
         log_classification(&state, &classification, &body_str, start, "upstream_error");
+        #[cfg(feature = "otel")]
+        rm.set_status(StatusCode::BAD_GATEWAY);
         return json_response(
             StatusCode::BAD_GATEWAY,
             upstream_error_json(502, "no endpoint configured"),
         );
     }
 
-    let (client_wants_stream, upstream_req) =
-        match build_upstream_request(client, &classification, &body, &api_key, &state.auth_providers) {
-            Err(msg) => {
-                log_classification(&state, &classification, &body_str, start, "bad_request");
-                return json_response(StatusCode::BAD_REQUEST, upstream_error_json(400, &msg));
-            }
-            Ok(r) => r,
-        };
+    let (client_wants_stream, upstream_req) = match build_upstream_request(
+        client,
+        &classification,
+        &body,
+        &api_key,
+        &state.auth_providers,
+    ) {
+        Err(msg) => {
+            log_classification(&state, &classification, &body_str, start, "bad_request");
+            #[cfg(feature = "otel")]
+            rm.set_status(StatusCode::BAD_REQUEST);
+            return json_response(StatusCode::BAD_REQUEST, upstream_error_json(400, &msg));
+        }
+        Ok(r) => r,
+    };
 
     #[cfg_attr(not(feature = "otel"), allow(unused_variables))]
     let upstream_start = std::time::Instant::now();
@@ -919,9 +1071,20 @@ async fn completion_handler(
         Err(e) => {
             #[cfg(feature = "otel")]
             if let Some(ref metrics) = state.metrics {
-                metrics.upstream_duration_seconds.record(upstream_start.elapsed().as_secs_f64(), &[]);
+                metrics
+                    .upstream_duration_seconds
+                    .record(
+                        upstream_start.elapsed().as_secs_f64(),
+                        &[
+                            KeyValue::new("provider", classification.provider_type.clone()),
+                            KeyValue::new("model", classification.model.clone()),
+                            KeyValue::new("status", "502"),
+                        ],
+                    );
             }
             log_classification(&state, &classification, &body_str, start, "upstream_error");
+            #[cfg(feature = "otel")]
+            rm.set_status(StatusCode::BAD_GATEWAY);
             return json_response(
                 StatusCode::BAD_GATEWAY,
                 upstream_error_json(502, &e.to_string()),
@@ -931,22 +1094,28 @@ async fn completion_handler(
 
     #[cfg(feature = "otel")]
     if let Some(ref metrics) = state.metrics {
-        metrics.upstream_duration_seconds.record(upstream_start.elapsed().as_secs_f64(), &[]);
+        metrics
+            .upstream_duration_seconds
+            .record(
+                upstream_start.elapsed().as_secs_f64(),
+                &[
+                    KeyValue::new("provider", classification.provider_type.clone()),
+                    KeyValue::new("model", classification.model.clone()),
+                    KeyValue::new("status", upstream_response.status().as_u16().to_string()),
+                ],
+            );
     }
 
     if client_wants_stream {
         if !upstream_response.status().is_success() {
             let resp = handle_streaming_error(upstream_response).await;
             log_classification(&state, &classification, &body_str, start, "upstream_error");
+            #[cfg(feature = "otel")]
+            rm.set_status(resp.status());
             return resp;
         }
 
         let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
-
-        #[cfg(feature = "otel")]
-        if let Some(ref metrics) = state.metrics {
-            metrics.request_duration_seconds.record(start.elapsed().as_secs_f64(), &[]);
-        }
 
         return handle_streaming_response(
             state,
@@ -967,11 +1136,6 @@ async fn completion_handler(
     };
     log_classification(&state, &classification, &body_str, start, log_status);
 
-    #[cfg(feature = "otel")]
-    if let Some(ref metrics) = state.metrics {
-        metrics.request_duration_seconds.record(start.elapsed().as_secs_f64(), &[]);
-    }
-
     json_response(status, body)
 }
 
@@ -985,7 +1149,10 @@ async fn classify_handler(
 ) -> impl IntoResponse {
     let start = std::time::Instant::now();
     let body_str = std::str::from_utf8(&body).unwrap_or("");
-    let log_status = if state.classify_db_log.load(std::sync::atomic::Ordering::Relaxed) {
+    let log_status = if state
+        .classify_db_log
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
         Some("classified")
     } else {
         None
@@ -1003,7 +1170,9 @@ struct FeedbackRequest {
     satisfaction: f64,
 }
 
-fn default_satisfaction() -> f64 { 1.0 }
+fn default_satisfaction() -> f64 {
+    1.0
+}
 
 async fn feedback_handler(
     State(state): State<Arc<AppState>>,
@@ -1012,38 +1181,48 @@ async fn feedback_handler(
     let fewshot = match &state.fewshot_classifier {
         Some(fs) => fs.clone(),
         None => {
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
-                "error": "fewshot_classifier_not_configured",
-                "status": 503,
-                "message": "No few-shot classifier backend is configured"
-            })));
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "fewshot_classifier_not_configured",
+                    "status": 503,
+                    "message": "No few-shot classifier backend is configured"
+                })),
+            );
         }
     };
 
     // Validate actual_category against known routing keys
     let routing = state.routing.read().await;
     if !routing.contains_key(&body.actual_category.to_uppercase()) {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "invalid_category",
-            "status": 400,
-            "message": format!("Unknown category '{}'", body.actual_category)
-        })));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_category",
+                "status": 400,
+                "message": format!("Unknown category '{}'", body.actual_category)
+            })),
+        );
     }
     drop(routing);
 
     // Clamp satisfaction to [0.0, 1.0] as per OpenAPI spec
     let satisfaction = body.satisfaction.max(0.0).min(1.0);
-    fewshot.add_feedback(
-        body.text,
-        body.predicted_category,
-        body.actual_category,
-        satisfaction,
-    )
-    .await;
+    fewshot
+        .add_feedback(
+            body.text,
+            body.predicted_category,
+            body.actual_category,
+            satisfaction,
+        )
+        .await;
 
-    (StatusCode::OK, Json(serde_json::json!({
-        "status": "accepted"
-    })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "accepted"
+        })),
+    )
 }
 
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
@@ -1056,13 +1235,13 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
     let dashboard_routes = dashboard::routes(auth_config);
 
     // Build CORS layer from [cors].allowed_origins in config.toml. If empty, no CORS headers (secure default).
-     let allowed_origin_headers: Vec<HeaderValue> = app_state
-         .allowed_origins
-         .try_read()
-         .expect("allowed_origins RwLock written at init; poisoning impossible")
-         .iter()
-         .filter_map(|s| header::HeaderValue::from_str(s).ok())
-         .collect();
+    let allowed_origin_headers: Vec<HeaderValue> = app_state
+        .allowed_origins
+        .try_read()
+        .expect("allowed_origins RwLock written at init; poisoning impossible")
+        .iter()
+        .filter_map(|s| header::HeaderValue::from_str(s).ok())
+        .collect();
 
     let cors_layer = if allowed_origin_headers.is_empty() {
         CorsLayer::new()
@@ -1081,7 +1260,9 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
         .nest("/dashboard", dashboard_routes)
         .layer(cors_layer)
         .layer(TraceLayer::new_for_http())
-        .layer(RequestBodyLimitLayer::new(app_state.request_body_limit_bytes))
+        .layer(RequestBodyLimitLayer::new(
+            app_state.request_body_limit_bytes,
+        ))
         .with_state(app_state)
 }
 
@@ -1170,6 +1351,18 @@ mod tests {
         }
     }
 
+    /// Read a response body as a `serde_json::Value` so assertions can target
+    /// the parsed structure instead of brittle substring matches. Refusing to
+    /// return `Option` here means a non-JSON body fails the test loudly,
+    /// which is the right behavior for shape contracts.
+    async fn parse_json_body(response: axum::response::Response) -> serde_json::Value {
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        serde_json::from_slice(&body_bytes)
+            .unwrap_or_else(|e| panic!("response body should be JSON: {e}; body={:?}", body_bytes))
+    }
+
     /// Build an `AppState` from a `RegexClassifier` and optional HTTP client.
     /// Mergeroutes from all classifier backends.
     fn make_test_app_state(
@@ -1223,7 +1416,9 @@ mod tests {
             classifier: None,
             fewshot_classifier: None,
             routing: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            model_costs: Arc::new(tokio::sync::RwLock::new(intent_classifier::ModelCosts::empty())),
+            model_costs: Arc::new(tokio::sync::RwLock::new(
+                intent_classifier::ModelCosts::empty(),
+            )),
             baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
             classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client: None,
@@ -1277,8 +1472,13 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
+        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
         let app_state = make_test_app_state(
             regex_classifier,
             None,
@@ -1298,9 +1498,7 @@ mod tests {
                     .method("POST")
                     .uri("/v1/feedback")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"text":"hello","actual_category":"CASUAL"}"#,
-                    ))
+                    .body(Body::from(r#"{"text":"hello","actual_category":"CASUAL"}"#))
                     .expect("request should be valid"),
             )
             .await
@@ -1362,8 +1560,13 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
+        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
 
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1408,6 +1611,127 @@ mod tests {
         assert_eq!(result.tier, intent_classifier::ClassificationTier::FewShot);
     }
 
+    // ── 3-backend chain integration test (Risk #1 — production data path floor) ──
+    // Proves the chain escalates regex → fewshot → LLM when both regex and
+    // fewshot return Fallback. Uses CountingClassifier for fewshot side-effect
+    // observation (tier inspection cannot distinguish regex-tier from LLM-tier
+    // matches because LLMClassifier returns tier: Regex on success) and
+    // httpmock to assert the LLM was called exactly once.
+    #[tokio::test]
+    #[serial]
+    async fn test_chain_3_backend_escalates_to_llm() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        use httpmock::prelude::*;
+        use intent_classifier::test_util::CountingClassifier;
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _guard = EnvGuard("OPENAI_API_KEY");
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+
+        let server = MockServer::start();
+        let llm_mock = server.mock(|when, then| {
+            when.method(POST).path("/v1/chat/completions");
+            then.status(200).json_body(serde_json::json!({
+                "choices": [
+                    {
+                        "message": {
+                            "content": "SYNTAX_FIX"
+                        }
+                    }
+                ]
+            }));
+        });
+
+        let cats = test_categories();
+        let cats_for_llm = cats.clone();
+        let mut routing = HashMap::new();
+        routing.insert(
+            "SYNTAX_FIX".to_string(),
+            intent_classifier::RouteEntry {
+                model: "sf-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
+        routing.insert(
+            "CASUAL".to_string(),
+            intent_classifier::RouteEntry {
+                model: "ca-model".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
+        let fallback = intent_classifier::RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
+
+        // CountingClassifier for the fewshot tier — always returns Fallback.
+        // Forces the chain to escalate past fewshot into the LLM tier.
+        let fewshot_counter = Arc::new(AtomicUsize::new(0));
+        let fewshot_stub = CountingClassifier {
+            counter: fewshot_counter.clone(),
+            result: intent_classifier::ClassificationResult::fallback(),
+        };
+
+        let llm_config = config::LlmClassifierConfig {
+            enabled: true,
+            model: "gpt-4o-mini".to_string(),
+            endpoint: server.url("/v1/chat/completions"),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            provider_type: "openai_compatible".to_string(),
+            prompt_template_path: None,
+            timeout_secs: 3,
+        };
+        let llm = intent_classifier::LLMClassifier::new(
+            llm_config,
+            reqwest::Client::new(),
+            cats_for_llm,
+            Arc::new(vec![]),
+        );
+
+        let chain = intent_classifier::ClassifierChain::new(vec![
+            Arc::new(regex_classifier),
+            Arc::new(fewshot_stub),
+            Arc::new(llm),
+        ]);
+
+        // A prompt that matches no regex pattern (>30 chars to avoid the
+        // short-prompt → CASUAL routing) and that the fewshot stub returns
+        // Fallback for. Forces escalation to the LLM tier.
+        let result = chain
+            .classify("this is a long prompt that exercises the chain's escalation path from regex through fewshot to the llm tier")
+            .await;
+
+        // LLMClassifier sets tier: Regex on a successful match (architectural
+        // detail: ClassificationTier has no Llm variant). The chain sees
+        // tier != Fallback and returns this result. We verify the escalation
+        // happened via side-effect counters, not via tier inspection.
+        assert_eq!(result.category, "SYNTAX_FIX");
+        assert_eq!(result.tier, intent_classifier::ClassificationTier::Regex);
+        assert_eq!(
+            fewshot_counter.load(Ordering::SeqCst),
+            1,
+            "fewshot backend should be called exactly once (and return Fallback)"
+        );
+        llm_mock.assert_hits(1);
+    }
+
     #[tokio::test]
     async fn test_completion_handler_returns_classification_json() {
         let response = test_app_with_classifier()
@@ -1427,19 +1751,22 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(
-            body.contains(r#""category":"SYNTAX_FIX""#),
-            "expected SYNTAX_FIX category, got: {body}"
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("category").and_then(|v| v.as_str()),
+            Some("SYNTAX_FIX"),
+            "expected SYNTAX_FIX category, got: {json}"
         );
-        assert!(
-            body.contains(r#""status":"classified""#),
+        assert_eq!(
+            json.get("status").and_then(|v| v.as_str()),
+            Some("classified"),
             "expected classified status"
         );
-        assert!(body.contains(r#""tier":"Regex""#), "expected Regex tier");
+        assert_eq!(
+            json.get("tier").and_then(|v| v.as_str()),
+            Some("Regex"),
+            "expected Regex tier"
+        );
     }
 
     #[tokio::test]
@@ -1461,23 +1788,27 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(
-            body.contains(r#""category":"SYNTAX_FIX""#),
-            "expected SYNTAX_FIX category, got: {body}"
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("category").and_then(|v| v.as_str()),
+            Some("SYNTAX_FIX"),
+            "expected SYNTAX_FIX category, got: {json}"
         );
-        assert!(
-            body.contains(r#""model":"sf-model""#),
-            "expected sf-model, got: {body}"
+        assert_eq!(
+            json.get("model").and_then(|v| v.as_str()),
+            Some("sf-model"),
+            "expected sf-model, got: {json}"
         );
-        assert!(
-            body.contains(r#""status":"classified""#),
+        assert_eq!(
+            json.get("status").and_then(|v| v.as_str()),
+            Some("classified"),
             "expected classified status"
         );
-        assert!(body.contains(r#""tier":"Regex""#), "expected Regex tier");
+        assert_eq!(
+            json.get("tier").and_then(|v| v.as_str()),
+            Some("Regex"),
+            "expected Regex tier"
+        );
     }
 
     #[tokio::test]
@@ -1511,11 +1842,17 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body_str = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(body_str.contains("upstream response too large"));
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("error").and_then(|v| v.as_str()),
+            Some("upstream_error"),
+            "expected upstream_error contract, got: {json}"
+        );
+        assert_eq!(
+            json.get("message").and_then(|v| v.as_str()),
+            Some("upstream response too large"),
+            "expected truncation message, got: {json}"
+        );
         mock.assert();
     }
 
@@ -1559,8 +1896,13 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
+        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
         let app_state = make_test_app_state(
             regex_classifier,
             None,
@@ -1593,26 +1935,18 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(
-            body.contains(r#""category":"SYNTAX_FIX""#),
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("category").and_then(|v| v.as_str()),
+            Some("SYNTAX_FIX"),
             "expected SYNTAX_FIX category"
         );
-        assert!(
-            !body.contains(r#""provider_type""#),
-            "response should NOT contain provider_type"
-        );
-        assert!(
-            !body.contains(r#""endpoint""#),
-            "response should NOT contain endpoint"
-        );
-        assert!(
-            !body.contains(r#""api_key""#),
-            "response should NOT contain api_key"
-        );
+        for forbidden in ["provider_type", "endpoint", "api_key"] {
+            assert!(
+                json.get(forbidden).is_none(),
+                "response should NOT contain {forbidden}, got: {json}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1634,13 +1968,10 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        let json = parse_json_body(response).await;
         assert!(
-            !body.contains(r#""api_key""#),
-            "response should NOT contain api_key"
+            json.get("api_key").is_none(),
+            "response should NOT contain api_key, got: {json}"
         );
     }
 
@@ -1663,18 +1994,13 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(
-            !body.contains(r#""provider_type""#),
-            "classify response should not contain provider_type"
-        );
-        assert!(
-            !body.contains(r#""api_key""#),
-            "classify response should not contain api_key"
-        );
+        let json = parse_json_body(response).await;
+        for forbidden in ["provider_type", "api_key"] {
+            assert!(
+                json.get(forbidden).is_none(),
+                "classify response should not contain {forbidden}, got: {json}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1793,7 +2119,9 @@ mod tests {
             }
         };
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
-        let backend = persistence::PostgresBackend { pool: (*pool).clone() };
+        let backend = persistence::PostgresBackend {
+            pool: (*pool).clone(),
+        };
         let db_backend = Arc::new(persistence::DbBackend::Postgres(backend));
 
         let request_id = uuid::Uuid::new_v4();
@@ -1974,6 +2302,203 @@ mod tests {
         );
     }
 
+    // ── In-memory snippet path tests (Risk #2 F1 — runs in default CI) ──
+    // The 3 tests below exercise the F1 invariants end-to-end via the real
+    // axum stack (proxy → completion_handler → log_classification →
+    // log_inference → MemoryBackend::insert_inference) without requiring
+    // DATABASE_URL. They read from MemoryBackend::records directly to prove
+    // the data flowed through `log_classification` end-to-end.
+
+    #[tokio::test]
+    #[serial]
+    async fn test_snippet_path_truncates_to_200_chars() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let _guard = EnvGuard("MOCK_API_KEY");
+        std::env::set_var("MOCK_API_KEY", "sk-test");
+        let memory_backend = persistence::MemoryBackend::new();
+        let records_handle = memory_backend.records.clone();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
+        let backend = Arc::new(persistence::DbBackend::Memory(memory_backend));
+        let (app, server) = build_app_with_persistence_backend(backend, semaphore, None);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"hello"}}]}"#);
+        });
+
+        let long_message = format!("fix this bug {}", "x".repeat(487)); // 500 chars total
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"messages":[{{"role":"user","content":"{}"}}]}}"#,
+                        long_message
+                    )))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+
+        // Wait for the fire-and-forget log task to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let records = records_handle.read().await;
+        assert_eq!(records.len(), 1, "expected exactly one persisted record");
+        let snippet = &records[0].prompt_snippet;
+        assert!(
+            snippet.chars().count() <= 200,
+            "snippet should be <= 200 chars (got {})",
+            snippet.chars().count()
+        );
+        assert_eq!(
+            records[0].prompt_char_count,
+            Some(500),
+            "prompt_char_count should preserve the full message length"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_snippet_path_does_not_contain_full_prompt() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let _guard = EnvGuard("MOCK_API_KEY");
+        std::env::set_var("MOCK_API_KEY", "sk-test");
+        let memory_backend = persistence::MemoryBackend::new();
+        let records_handle = memory_backend.records.clone();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
+        let backend = Arc::new(persistence::DbBackend::Memory(memory_backend));
+        let (app, server) = build_app_with_persistence_backend(backend, semaphore, None);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"hello"}}]}"#);
+        });
+
+        // Build a message where the marker sits PAST the 200-char truncation
+        // point. The 200-char snippet must contain the prefix but NOT the
+        // marker, proving that the full prompt body is not persisted.
+        // Prefix = "fix this bug " (13) + 167 'a' = 180 chars. Total message
+        // = 180 + 26 (marker) + 100 ('x') = 306 chars. The marker starts at
+        // position 180, so the 200-char snippet (positions 0-199) only
+        // includes the first 20 chars of the 26-char marker.
+        // `snippet.contains(marker)` is therefore false.
+        let prefix = format!("fix this bug {}", "a".repeat(167));
+        let marker = "UNIQUE_MARKER_XYZ_9876543210";
+        let message = format!("{prefix}{marker}{}", "x".repeat(100));
+        let full_message_len = message.chars().count();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"messages":[{{"role":"user","content":"{}"}}]}}"#,
+                        message
+                    )))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let records = records_handle.read().await;
+        assert_eq!(records.len(), 1);
+        let snippet = &records[0].prompt_snippet;
+        assert!(
+            snippet.contains(&prefix),
+            "snippet should contain the 200-char prefix, got: {snippet}"
+        );
+        assert!(
+            !snippet.contains(marker),
+            "snippet should NOT contain the marker (which sits past the 200-char truncation point), got: {snippet}"
+        );
+        assert!(
+            snippet.chars().count() <= 200,
+            "snippet should be <= 200 chars (got {})",
+            snippet.chars().count()
+        );
+        assert_eq!(
+            records[0].prompt_char_count,
+            Some(full_message_len as i32),
+            "prompt_char_count should preserve the full message length"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_log_classification_failure_does_not_block_response() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let _guard = EnvGuard("MOCK_API_KEY");
+        std::env::set_var("MOCK_API_KEY", "sk-test");
+        let memory_backend = persistence::MemoryBackend::new();
+        // Inject one failure into the next insert. The flag auto-resets to
+        // false after the first call (see MemoryBackend::insert_inference).
+        memory_backend
+            .fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let records_handle = memory_backend.records.clone();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
+        let backend = Arc::new(persistence::DbBackend::Memory(memory_backend));
+        let (app, server) = build_app_with_persistence_backend(backend, semaphore, None);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"hello"}}]}"#);
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion request should succeed even when log_inference fails");
+
+        // (a) Response status is 200 — the proxy succeeds even though the
+        // background log task will fail.
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+
+        // Wait for the fire-and-forget log task to attempt + fail.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // (b) The failed insert means the record was NOT persisted.
+        // (The flag auto-resets, so a follow-up request would succeed.)
+        let records = records_handle.read().await;
+        assert_eq!(
+            records.len(),
+            0,
+            "the injected failure should prevent the record from being persisted"
+        );
+    }
+
     #[tokio::test]
     async fn test_dashboard_authenticated_returns_html() {
         let response = test_app()
@@ -2146,7 +2671,10 @@ mod tests {
 
     // ── Upstream routing tests ────────────────────────────────────────────────
 
-    pub(crate) fn test_app_with_http_client(env_var_name: &str, max_upstream_body_bytes: usize) -> (Router, httpmock::MockServer) {
+    pub(crate) fn test_app_with_http_client(
+        env_var_name: &str,
+        max_upstream_body_bytes: usize,
+    ) -> (Router, httpmock::MockServer) {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
         let cats = test_categories();
@@ -2189,8 +2717,13 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
+        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
@@ -2202,9 +2735,13 @@ mod tests {
         (app, server)
     }
 
-    /// Build app state and router with a real database pool for integration tests.
-    pub(crate) fn build_app_with_persistence(
-        pool: Arc<sqlx::PgPool>,
+    /// Build app state and router with an arbitrary `DbBackend` for integration tests.
+    /// The in-memory variant (`DbBackend::Memory`) runs in default CI without
+    /// `DATABASE_URL`; the Postgres variant requires `DATABASE_URL` and is used
+    /// by the existing `persistence_integration_*` tests (which skip cleanly
+    /// when the env var is not set).
+    pub(crate) fn build_app_with_persistence_backend(
+        backend: Arc<persistence::DbBackend>,
         semaphore: Arc<tokio::sync::Semaphore>,
         http_client: Option<reqwest::Client>,
     ) -> (Router, httpmock::MockServer) {
@@ -2252,8 +2789,13 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
+        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
         let classifier_chain =
             intent_classifier::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
         let classifier_arc = Some(Arc::new(classifier_chain));
@@ -2265,17 +2807,17 @@ mod tests {
                 }
             }
         }
-        let pool_owned = pool;
-        let pg_backend = persistence::PostgresBackend { pool: (*pool_owned).clone() };
         let app_state = Arc::new(AppState {
             persistence: Some(persistence::PersistenceConfig {
-                backend: Arc::new(persistence::DbBackend::Postgres(pg_backend)),
+                backend,
                 task_semaphore: semaphore,
             }),
             classifier: classifier_arc,
             fewshot_classifier: None,
             routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
-            model_costs: Arc::new(tokio::sync::RwLock::new(intent_classifier::ModelCosts::empty())),
+            model_costs: Arc::new(tokio::sync::RwLock::new(
+                intent_classifier::ModelCosts::empty(),
+            )),
             baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
             classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             http_client: Some(client),
@@ -2291,6 +2833,23 @@ mod tests {
         });
         let app = build_app(auth_config, app_state);
         (app, server)
+    }
+
+    /// Build app state and router with a real Postgres pool for integration tests.
+    /// Thin wrapper around `build_app_with_persistence_backend` that constructs
+    /// a `PostgresBackend` from the pool. Kept for the 2 existing
+    /// `persistence_integration_sse_streaming_*` tests that still want a
+    /// real Postgres backend.
+    pub(crate) fn build_app_with_persistence(
+        pool: Arc<sqlx::PgPool>,
+        semaphore: Arc<tokio::sync::Semaphore>,
+        http_client: Option<reqwest::Client>,
+    ) -> (Router, httpmock::MockServer) {
+        let pg_backend = persistence::PostgresBackend {
+            pool: (*pool).clone(),
+        };
+        let backend = Arc::new(persistence::DbBackend::Postgres(pg_backend));
+        build_app_with_persistence_backend(backend, semaphore, http_client)
     }
 
     fn test_app_with_dead_endpoint(env_var_name: &str) -> Router {
@@ -2334,8 +2893,13 @@ mod tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
+        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
@@ -2476,13 +3040,11 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(
-            body.contains(r#""error":"upstream_error""#),
-            "expected upstream_error in body, got: {body}"
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("error").and_then(|v| v.as_str()),
+            Some("upstream_error"),
+            "expected upstream_error contract, got: {json}"
         );
         // cleanup handled by EnvGuard
     }
@@ -2671,6 +3233,272 @@ mod tests {
         );
         mock.assert();
         // cleanup handled by EnvGuard
+    }
+
+    // ── format_sse_error_event helper tests (Phase 3 — F2 helper invariants) ──
+    // The helper applies the JSON-escape rule and emits the SSE event body.
+    // These 6 unit tests cover plain text, each escape rule, and a combined
+    // injection attempt that must still produce a valid JSON `data:` payload.
+
+    #[test]
+    fn test_format_sse_error_event_plain_text() {
+        let s = format_sse_error_event("hello");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"hello\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_escapes_backslash() {
+        let s = format_sse_error_event(r"a\b");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a\\\\b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_escapes_double_quote() {
+        let s = format_sse_error_event("a\"b");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a\\\"b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_newline_with_space() {
+        let s = format_sse_error_event("a\nb");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_carriage_return_with_space() {
+        let s = format_sse_error_event("a\rb");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_combined_injection_produces_valid_json() {
+        // Combined injection: ";\n}\nattack\n\r{ would break the SSE event
+        // framing and the JSON payload if the escape rule were skipped.
+        // The escape rule replaces \n and \r with single spaces.
+        let s = format_sse_error_event("\";\n}\nattack\n\r{");
+        let json_str = s
+            .strip_prefix("event: error\ndata: ")
+            .and_then(|s| s.strip_suffix("\n\n"))
+            .expect("SSE event should have `event: error\\ndata: <json>\\n\\n` framing");
+        let parsed: serde_json::Value = serde_json::from_str(json_str)
+            .expect("data: payload should be valid JSON even with injection chars");
+        // " → \", \n → space, \r → space. After escape the string is
+        // `"; ` + ` ` + `}` + ` ` + `attack` + ` ` + ` ` + `{`.
+        // = `"; } attack  {` (one space after `}`, one space after `;`,
+        // two spaces between `attack` and `{` from \n and \r).
+        assert_eq!(parsed, serde_json::json!({"error": "\"; } attack  {"}));
+    }
+
+    // ── F2 integration tests (Phase 3 — handle_streaming_error 5 invariants) ──
+    // These tests lock each of the 5 F2 invariants at the HTTP level. They
+    // exercise the full axum stack via test_app_with_http_client and assert
+    // on the response status, body, and headers.
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_truncates_oversized_body() {
+        let env = "TEST_STREAM_TRUNC";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        // 3 KB body, > the 2 KB cap.
+        let large_body = "x".repeat(3_000);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(large_body);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // The SSE event body is bounded: at most 2 KB of upstream body +
+        // ~50 bytes of format overhead (`event: error\ndata: {"error":"..."}\n\n`).
+        assert!(
+            body.len() <= 2 * 1024 + 64,
+            "SSE error body should be bounded to ~2 KB + format overhead, got {} bytes",
+            body.len()
+        );
+        assert!(
+            body.starts_with("event: error"),
+            "expected SSE error framing, got: {body}"
+        );
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_escapes_json_injection() {
+        let env = "TEST_STREAM_ESC";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        // Upstream body with all 4 JSON-unsafe chars: \, ", \n, \r.
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"a\"b\\c\nd"}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        let json_str = body
+            .strip_prefix("event: error\ndata: ")
+            .and_then(|s| s.strip_suffix("\n\n"))
+            .expect("SSE event should have `event: error\\ndata: <json>\\n\\n` framing");
+        let parsed: serde_json::Value = serde_json::from_str(json_str).expect(
+            "data: payload should be valid JSON even when upstream body has JSON-unsafe chars",
+        );
+        // The proxy embeds the raw upstream body in the SSE event (it
+        // does NOT parse the body as JSON). The escape rule replaces
+        // literal `\` with `\\` and `"` with `\"` so the data: payload
+        // is valid JSON. The parsed `error` field is the JSON-decoded
+        // value of the embedded raw body, which is the original raw
+        // upstream body.
+        let error_value = parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("error field should be a string");
+        assert_eq!(
+            error_value, r#"{"error":"a\"b\\c\nd"}"#,
+            "raw upstream body should round-trip through the SSE escape rule"
+        );
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_content_type_and_cache_control() {
+        let env = "TEST_STREAM_CT";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"overloaded"}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(
+            content_type, "text/event-stream",
+            "expected SSE content type"
+        );
+        let cache_control = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(cache_control, "no-cache", "expected no-cache control");
+        mock.assert();
+    }
+
+    async fn assert_status_passthrough(status: u16) {
+        let env = "TEST_STREAM_ST";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(status)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"upstream"}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        let response_status = response.status().as_u16();
+        assert_eq!(
+            response_status, status,
+            "expected upstream status {status} to be forwarded to client"
+        );
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_status_passthrough_429() {
+        assert_status_passthrough(429).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_status_passthrough_500() {
+        assert_status_passthrough(500).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_status_passthrough_502() {
+        assert_status_passthrough(502).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_status_passthrough_503() {
+        assert_status_passthrough(503).await;
     }
 
     #[tokio::test]
@@ -2997,6 +3825,120 @@ mod tests {
             "expected 'Database not configured' in response, got: {body}"
         );
     }
+
+    // ── JSON contract shape tests (Phase 5, F4) ─────────────────────────────
+    //
+    // The endpoint tests above verify "what happens for a given request".
+    // These tests verify the SHAPE of the JSON contract itself so that any
+    // accidental change to a key name or value type — even one that would
+    // happen to pass a substring assertion — is caught loudly.
+
+    /// `classification_only_json` must emit exactly 4 keys with the right types.
+    #[test]
+    fn test_classification_only_json_contract_has_4_keys() {
+        let result = intent_classifier::ClassificationResult {
+            category: "SYNTAX_FIX".to_string(),
+            model: "sf-model".to_string(),
+            endpoint: "https://test.endpoint".to_string(),
+            tier: intent_classifier::ClassificationTier::Regex,
+            provider_type: "test_provider".to_string(),
+            api_key_env: Some("TEST_API_KEY".to_string()),
+        };
+        let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result))
+            .expect("classification_only_json output should be valid JSON");
+
+        let obj = json
+            .as_object()
+            .expect("classification_only_json output should be a JSON object");
+        assert_eq!(
+            obj.len(),
+            4,
+            "classification_only_json must emit exactly 4 keys, got: {obj:?}"
+        );
+        assert_eq!(obj.get("status"), Some(&serde_json::json!("classified")));
+        assert_eq!(obj.get("category"), Some(&serde_json::json!("SYNTAX_FIX")));
+        assert_eq!(obj.get("model"), Some(&serde_json::json!("sf-model")));
+        assert_eq!(obj.get("tier"), Some(&serde_json::json!("Regex")));
+    }
+
+    /// `upstream_error_json` must emit exactly 3 keys with `status` as a number.
+    /// This guards against an accidental change like `status: status.to_string()`
+    /// turning the status code into a string.
+    #[test]
+    fn test_upstream_error_json_contract_has_3_keys() {
+        let json: serde_json::Value =
+            serde_json::from_str(&upstream_error_json(502_u16, "upstream response too large"))
+                .expect("upstream_error_json output should be valid JSON");
+
+        let obj = json
+            .as_object()
+            .expect("upstream_error_json output should be a JSON object");
+        assert_eq!(
+            obj.len(),
+            3,
+            "upstream_error_json must emit exactly 3 keys, got: {obj:?}"
+        );
+        assert_eq!(obj.get("error"), Some(&serde_json::json!("upstream_error")));
+        // Crucial: status must be a number, not a string. If a future refactor
+        // does `status: status.to_string()` the contract regresses silently.
+        assert_eq!(
+            obj.get("status"),
+            Some(&serde_json::json!(502)),
+            "status must be a JSON number (not a string) so clients can branch on the code"
+        );
+        assert_eq!(
+            obj.get("message"),
+            Some(&serde_json::json!("upstream response too large"))
+        );
+    }
+
+    /// `json_response` must set `Content-Type: application/json` so clients
+    /// can use `response.json()` without sniffing the body.
+    #[test]
+    fn test_json_response_sets_application_json_content_type() {
+        let resp = json_response(StatusCode::CREATED, "{}".to_string());
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .expect("json_response must set Content-Type");
+        assert_eq!(
+            ct, "application/json",
+            "json_response must advertise application/json so fetch().json() works"
+        );
+    }
+
+    /// `classification_only_json` must serialize every real `ClassificationTier`
+    /// variant. The current production code uses `format!("{:?}", tier)` for the
+    /// value, which couples the JSON contract to the Rust Debug output. This
+    /// test pins the exact strings so a rename of any variant breaks the test
+    /// loudly.
+    #[test]
+    fn test_classification_only_json_serializes_all_3_tiers() {
+        let tiers = [
+            (intent_classifier::ClassificationTier::Regex, "Regex"),
+            (intent_classifier::ClassificationTier::FewShot, "FewShot"),
+            (intent_classifier::ClassificationTier::Fallback, "Fallback"),
+        ];
+        for (tier, expected_label) in tiers {
+            let result = intent_classifier::ClassificationResult {
+                category: "SYNTAX_FIX".to_string(),
+                model: "sf-model".to_string(),
+                endpoint: "https://test.endpoint".to_string(),
+                tier,
+                provider_type: "test_provider".to_string(),
+                api_key_env: Some("TEST_API_KEY".to_string()),
+            };
+            let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result))
+                .expect("classification_only_json output should be valid JSON");
+            assert_eq!(
+                json.get("tier").and_then(|v| v.as_str()),
+                Some(expected_label),
+                "tier {tier:?} should serialize as {expected_label:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3042,15 +3984,12 @@ mod slow_tests {
         (url, handle)
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn test_streaming_keepalive_injected() {
+    /// Build an axum test app that routes the SYNTAX_FIX category to the
+    /// given upstream URL, with a 1s keepalive interval. Used by all 4
+    /// keepalive slow tests (1 existing + 3 new) so the app wiring is
+    /// defined in one place.
+    fn build_keepalive_app(url: String, env_var: &'static str) -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        let (url, server_handle) = spawn_slow_sse_server().await;
-        let env = "TEST_STREAM_KA_SLOW";
-        let _guard = EnvGuard(env);
-        std::env::set_var(env, "sk-test");
-
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -3064,7 +4003,7 @@ mod slow_tests {
                 endpoint: url,
                 cost_per_1m_input_tokens: None,
                 provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env.to_string()),
+                api_key_env: Some(env_var.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
@@ -3074,14 +4013,18 @@ mod slow_tests {
             provider_type: String::new(),
             api_key_env: None,
         };
-        let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
+        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
         let model_costs = intent_classifier::ModelCosts::empty();
         let baseline_model = String::new();
         let classifier_chain =
             intent_classifier::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
         let classifier = Some(Arc::new(classifier_chain));
-        // Merge routing from all backends in the chain
         let mut merged_routing = HashMap::new();
         if let Some(cls) = classifier.as_ref() {
             for backend in cls.backends().iter() {
@@ -3114,7 +4057,104 @@ mod slow_tests {
             #[cfg(feature = "otel")]
             metrics: None,
         });
-        let app = build_app(auth_config, app_state);
+        build_app(auth_config, app_state)
+    }
+
+    /// Count SSE keepalive comments in a body, anchored to line start.
+    /// A regression to `data: keepalive\n\n` (a regular SSE event) would
+    /// not match because the substring `data:` precedes `: keepalive`.
+    /// The body may also start with `: keepalive\n\n` (no preceding
+    /// newline), so we count start-of-body matches separately. We split
+    /// on `\n` and count lines that are exactly `: keepalive` — this
+    /// correctly handles consecutive keepalives (which would otherwise
+    /// be missed by `str::matches` due to its non-overlapping behavior).
+    fn count_anchored_keepalives(body: &str) -> usize {
+        body.split('\n')
+            .filter(|line| *line == ": keepalive")
+            .count()
+    }
+
+    /// Fast upstream: sends `data: hello\n\n` within 100ms of headers
+    /// (well below the 1s keepalive interval). The proxy must NOT inject
+    /// a keepalive because the upstream data arrives first.
+    async fn spawn_fast_sse_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/v1/chat/completions");
+        let handle = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let headers = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+            let _ = sock.write_all(headers.as_bytes()).await;
+            let _ = sock.flush().await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let body = "data: hello\n\n";
+            let _ = sock.write_all(body.as_bytes()).await;
+            let _ = sock.flush().await;
+        });
+        (url, handle)
+    }
+
+    /// Chunk-then-idle upstream: sends `data: chunk1\n\n`, idles 1500ms
+    /// (longer than the 1s keepalive interval), then sends
+    /// `data: chunk2\n\n`. The proxy must emit at least one keepalive
+    /// between the two chunks.
+    async fn spawn_chunk_then_idle_sse_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/v1/chat/completions");
+        let handle = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let headers = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+            let _ = sock.write_all(headers.as_bytes()).await;
+            let _ = sock.flush().await;
+            // First chunk
+            let _ = sock.write_all(b"data: chunk1\n\n").await;
+            let _ = sock.flush().await;
+            // Idle 1500ms — keepalive should fire at 1s
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            // Second chunk
+            let _ = sock.write_all(b"data: chunk2\n\n").await;
+            let _ = sock.flush().await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+        (url, handle)
+    }
+
+    /// Long-stall upstream: idles 3500ms (≥ 3 keepalive intervals at 1s)
+    /// then sends `data: hello\n\n`. The proxy must emit ≥ 3 keepalives
+    /// to prove the keepalive loop is sustained over multiple intervals.
+    async fn spawn_long_stall_sse_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/v1/chat/completions");
+        let handle = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let headers = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+            let _ = sock.write_all(headers.as_bytes()).await;
+            let _ = sock.flush().await;
+            // Idle 3500ms — should produce 3 keepalives at 1s, 2s, 3s.
+            tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
+            let body = "data: hello\n\n";
+            let _ = sock.write_all(body.as_bytes()).await;
+            let _ = sock.flush().await;
+        });
+        (url, handle)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_keepalive_injected() {
+        let (url, server_handle) = spawn_slow_sse_server().await;
+        let env = "TEST_STREAM_KA_SLOW";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let app = build_keepalive_app(url, env);
 
         let response = app
             .oneshot(
@@ -3144,9 +4184,12 @@ mod slow_tests {
             .await
             .expect("body should be readable");
         let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // Tightened assertion: anchor the keepalive substring to line start.
+        // A regression to `data: keepalive\n\n` (a regular SSE event with
+        // name "keepalive") would NOT match because `data:` precedes `: keepalive`.
         assert!(
-            body.contains(": keepalive\n\n"),
-            "expected keepalive comment in stream, got: {body}"
+            count_anchored_keepalives(body) >= 1,
+            "expected ≥ 1 anchored keepalive comment, got: {body}"
         );
         assert!(
             body.contains("data: hello"),
@@ -3157,13 +4200,144 @@ mod slow_tests {
 
     #[tokio::test]
     #[serial]
+    async fn test_streaming_keepalive_not_injected_when_upstream_fast() {
+        let (url, server_handle) = spawn_fast_sse_server().await;
+        let env = "TEST_STREAM_KA_FAST";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let app = build_keepalive_app(url, env);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // Fast upstream (< 100ms, well under the 1s keepalive interval) must
+        // NOT trigger a keepalive. The proxy forwards the data immediately.
+        assert_eq!(
+            count_anchored_keepalives(body),
+            0,
+            "fast upstream should NOT inject keepalive, got: {body}"
+        );
+        assert!(
+            body.contains("data: hello"),
+            "expected upstream data to be forwarded, got: {body}"
+        );
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_keepalive_injected_alongside_chunk() {
+        let (url, server_handle) = spawn_chunk_then_idle_sse_server().await;
+        let env = "TEST_STREAM_KA_CHUNK";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let app = build_keepalive_app(url, env);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // Both chunks must be forwarded, AND at least one keepalive must
+        // have fired between them (1500ms idle > 1s interval).
+        assert!(
+            body.contains("data: chunk1"),
+            "expected first chunk, got: {body}"
+        );
+        assert!(
+            body.contains("data: chunk2"),
+            "expected second chunk, got: {body}"
+        );
+        assert!(
+            count_anchored_keepalives(body) >= 1,
+            "expected ≥ 1 keepalive between chunks, got: {body}"
+        );
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_keepalive_multiple_consecutive() {
+        let (url, server_handle) = spawn_long_stall_sse_server().await;
+        let env = "TEST_STREAM_KA_LONG";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let app = build_keepalive_app(url, env);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // 3500ms idle ≥ 3 keepalive intervals at 1s. The keepalive loop
+        // is sustained across multiple intervals.
+        assert!(
+            count_anchored_keepalives(body) >= 3,
+            "expected ≥ 3 keepalives during 3.5s stall, got: {body}"
+        );
+        assert!(
+            body.contains("data: hello"),
+            "expected upstream data after keepalives, got: {body}"
+        );
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn test_graceful_shutdown() {
         use std::time::Duration;
         use tokio::sync::oneshot;
-        let app = Router::new().route("/slow", get(|| async {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            "OK"
-        }));
+        let app = Router::new().route(
+            "/slow",
+            get(|| async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                "OK"
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -3175,11 +4349,14 @@ mod slow_tests {
         });
         tokio::time::sleep(Duration::from_millis(100)).await;
         let client = reqwest::Client::new();
-        let resp = client.get(format!("http://{}/slow", addr)).send().await.unwrap();
+        let resp = client
+            .get(format!("http://{}/slow", addr))
+            .send()
+            .await
+            .unwrap();
         shutdown_tx.send(()).unwrap();
         let body = resp.text().await.unwrap();
         assert_eq!(body, "OK");
         server_task.await.unwrap();
     }
-
 }

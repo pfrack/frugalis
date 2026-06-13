@@ -4,9 +4,7 @@ use tracing::{debug, warn};
 
 use serde::Deserialize;
 
-use crate::intent_classifier::{
-    CategoryConfig, NegativePatternConfig,
-};
+use crate::intent_classifier::{CategoryConfig, NegativePatternConfig};
 use crate::routing::*;
 
 #[cfg(test)]
@@ -16,43 +14,121 @@ pub(crate) const ROUTING_CONFIG_LEGACY: &str = "routing.toml";
 
 // ── Serde default-value helpers ──
 
-fn default_port() -> u16 { 10000 }
-fn default_log_level() -> String { "info".to_string() }
-fn default_log_format() -> String { "compact".to_string() }
-fn default_max_body_bytes() -> usize { 10_485_760 }
-fn default_keepalive_interval() -> u64 { 15 }
-fn default_client_timeout() -> u64 { 120 }
-fn default_client_connect_timeout() -> u64 { 30 }
-fn default_streaming_chan_cap() -> usize { 32 }
-fn default_connection_retries() -> u32 { 3 }
-fn default_retry_base_ms() -> u64 { 1000 }
-fn default_max_connections() -> u32 { 10 }
-fn default_acquire_timeout() -> u64 { 30 }
-fn default_idle_timeout() -> u64 { 1800 }
-fn default_log_concurrency() -> u32 { 100 }
-fn default_backend() -> String { "memory".to_string() }
-fn default_db_path() -> String { "./cerebrum.db".to_string() }
-fn default_dashboard_hours() -> u32 { 24 }
-fn default_hours_min() -> u32 { 1 }
-fn default_hours_max() -> u32 { 720 }
-fn default_page_limit() -> u32 { 20 }
-fn default_page_limit_max() -> u32 { 100 }
-fn default_recent_count() -> u32 { 5 }
-fn default_short_prompt_len() -> usize { 30 }
-fn default_timeout_secs() -> u64 { 3 }
-fn default_classifier_order() -> Vec<String> { vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()] }
-fn default_llm_model() -> String { "gpt-4o-mini".to_string() }
-fn default_llm_api_key_env() -> String { "OPENAI_API_KEY".to_string() }
-fn default_provider_type() -> String { "openai_compatible".to_string() }
-fn default_enabled_true() -> bool { true }
-fn default_confidence_threshold() -> f64 { 0.4 }
-fn default_cold_start_threshold() -> f64 { 0.6 }
-fn default_cold_start_feedback_count() -> usize { 5 }
-fn default_feature_dimensions() -> usize { 1000 }
-fn default_retraining_threshold() -> usize { 5 }
-fn default_fewshot_data_path() -> String { "data/fewshot_training.yaml".to_string() }
-fn default_max_vocabulary_warn() -> usize { 5000 }
-fn default_max_training_examples() -> usize { 10000 }
+fn default_port() -> u16 {
+    10000
+}
+fn default_log_level() -> String {
+    "info".to_string()
+}
+fn default_log_format() -> String {
+    "compact".to_string()
+}
+fn default_max_body_bytes() -> usize {
+    10_485_760
+}
+fn default_keepalive_interval() -> u64 {
+    15
+}
+fn default_client_timeout() -> u64 {
+    120
+}
+fn default_client_connect_timeout() -> u64 {
+    30
+}
+fn default_streaming_chan_cap() -> usize {
+    32
+}
+fn default_connection_retries() -> u32 {
+    3
+}
+fn default_retry_base_ms() -> u64 {
+    1000
+}
+fn default_max_connections() -> u32 {
+    10
+}
+fn default_acquire_timeout() -> u64 {
+    30
+}
+fn default_idle_timeout() -> u64 {
+    1800
+}
+fn default_log_concurrency() -> u32 {
+    100
+}
+fn default_backend() -> String {
+    "memory".to_string()
+}
+fn default_db_path() -> String {
+    "./cerebrum.db".to_string()
+}
+fn default_dashboard_hours() -> u32 {
+    24
+}
+fn default_hours_min() -> u32 {
+    1
+}
+fn default_hours_max() -> u32 {
+    720
+}
+fn default_page_limit() -> u32 {
+    20
+}
+fn default_page_limit_max() -> u32 {
+    100
+}
+fn default_recent_count() -> u32 {
+    5
+}
+fn default_short_prompt_len() -> usize {
+    30
+}
+fn default_timeout_secs() -> u64 {
+    3
+}
+fn default_classifier_order() -> Vec<String> {
+    vec![
+        "regex".to_string(),
+        "fewshot".to_string(),
+        "llm".to_string(),
+    ]
+}
+fn default_llm_model() -> String {
+    "gpt-4o-mini".to_string()
+}
+fn default_llm_api_key_env() -> String {
+    "OPENAI_API_KEY".to_string()
+}
+fn default_provider_type() -> String {
+    "openai_compatible".to_string()
+}
+fn default_enabled_true() -> bool {
+    true
+}
+fn default_confidence_threshold() -> f64 {
+    0.4
+}
+fn default_cold_start_threshold() -> f64 {
+    0.6
+}
+fn default_cold_start_feedback_count() -> usize {
+    5
+}
+fn default_feature_dimensions() -> usize {
+    1000
+}
+fn default_retraining_threshold() -> usize {
+    5
+}
+fn default_fewshot_data_path() -> String {
+    "data/fewshot_training.yaml".to_string()
+}
+fn default_max_vocabulary_warn() -> usize {
+    5000
+}
+fn default_max_training_examples() -> usize {
+    10000
+}
 
 /// Load dashboard configuration from a parsed ConfigRoot.
 /// Returns defaults if section is absent.
@@ -262,18 +338,11 @@ pub struct AuthProviderConfig {
     pub value_template: Option<String>,
 }
 
-
-
 /// Parse an integer environment variable with optional min/max validation.
 /// Returns `default` if the variable is unset, empty, invalid, or out of range.
 /// Logs a warning on invalid or out-of-range values.
 #[cfg(test)]
-pub(crate) fn parse_env_int(
-    var: &str,
-    default: i32,
-    min: Option<i32>,
-    max: Option<i32>,
-) -> i32 {
+pub(crate) fn parse_env_int(var: &str, default: i32, min: Option<i32>, max: Option<i32>) -> i32 {
     let val_str = match std::env::var(var) {
         Ok(s) => s,
         Err(_) => return default,
@@ -284,19 +353,28 @@ pub(crate) fn parse_env_int(
     let val: i32 = match val_str.trim().parse() {
         Ok(v) => v,
         Err(_) => {
-            warn!("Invalid integer value for {}: '{:?}'; using default {}", var, val_str, default);
+            warn!(
+                "Invalid integer value for {}: '{:?}'; using default {}",
+                var, val_str, default
+            );
             return default;
         }
     };
     if let Some(min) = min {
         if val < min {
-            warn!("{} value {} below minimum {}; using default {}", var, val, min, default);
+            warn!(
+                "{} value {} below minimum {}; using default {}",
+                var, val, min, default
+            );
             return default;
         }
     }
     if let Some(max) = max {
         if val > max {
-            warn!("{} value {} above maximum {}; using default {}", var, val, max, default);
+            warn!(
+                "{} value {} above maximum {}; using default {}",
+                var, val, max, default
+            );
             return default;
         }
     }
@@ -389,8 +467,7 @@ pub(crate) fn load_routing_from_file(path: &str) -> Result<HashMap<String, Route
 
 #[cfg(test)]
 pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
-    let config_path = std::env::var("CONFIG_PATH")
-        .unwrap_or_else(|_| CONFIG_DEFAULT.to_string());
+    let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| CONFIG_DEFAULT.to_string());
 
     // Try config.toml first, then routing.toml for backward compat
     let path = if std::path::Path::new(&config_path).exists() {
@@ -528,7 +605,10 @@ pub(crate) fn load_negative_patterns_from_value(root: &ConfigRoot) -> Vec<Negati
     })
 }
 
-pub(crate) fn build_model_costs(config_root: &ConfigRoot, routing: &HashMap<String, RouteEntry>) -> ModelCosts {
+pub(crate) fn build_model_costs(
+    config_root: &ConfigRoot,
+    routing: &HashMap<String, RouteEntry>,
+) -> ModelCosts {
     let mut costs = HashMap::new();
 
     if let Some(model_costs_table) = &config_root.model_costs {
@@ -579,15 +659,18 @@ pub(crate) fn load_patterns_from_file(
     path: &str,
     base_dir: &Path,
 ) -> Result<Vec<crate::intent_classifier::PatternEntry>, String> {
-    let full_path = base_dir.join(path).canonicalize()
+    let full_path = base_dir
+        .join(path)
+        .canonicalize()
         .map_err(|e| format!("invalid pattern path {}: {}", path, e))?;
-    let base_dir = base_dir.canonicalize()
+    let base_dir = base_dir
+        .canonicalize()
         .map_err(|e| format!("invalid patterns_dir: {}", e))?;
     if !full_path.starts_with(&base_dir) {
         return Err(format!("pattern file path '{}' escapes patterns_dir", path));
     }
-    let content =
-        std::fs::read_to_string(&full_path).map_err(|e| format!("cannot read pattern file {}: {}", full_path.display(), e))?;
+    let content = std::fs::read_to_string(&full_path)
+        .map_err(|e| format!("cannot read pattern file {}: {}", full_path.display(), e))?;
 
     let mut entries = Vec::new();
     for (line_num, line) in content.lines().enumerate() {
@@ -595,9 +678,13 @@ pub(crate) fn load_patterns_from_file(
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let (weight_str, regex) = trimmed
-            .split_once(" | ")
-            .ok_or_else(|| format!("{}:{}: invalid format, expected '<weight> | <regex>'", path, line_num + 1))?;
+        let (weight_str, regex) = trimmed.split_once(" | ").ok_or_else(|| {
+            format!(
+                "{}:{}: invalid format, expected '<weight> | <regex>'",
+                path,
+                line_num + 1
+            )
+        })?;
         let weight = weight_str
             .trim()
             .parse::<u8>()
@@ -643,11 +730,17 @@ pub(crate) fn run_validation(config_path: Option<&str>) -> Result<(), Vec<String
         }
         match server.log_level.as_str() {
             "trace" | "debug" | "info" | "warn" | "error" => {}
-            _ => errors.push(format!("server.log_level: unknown level '{}'", server.log_level)),
+            _ => errors.push(format!(
+                "server.log_level: unknown level '{}'",
+                server.log_level
+            )),
         }
         match server.log_format.as_str() {
             "compact" | "full" | "json" | "pretty" => {}
-            _ => errors.push(format!("server.log_format: unknown format '{}'", server.log_format)),
+            _ => errors.push(format!(
+                "server.log_format: unknown format '{}'",
+                server.log_format
+            )),
         }
     }
 
@@ -677,7 +770,10 @@ pub(crate) fn run_validation(config_path: Option<&str>) -> Result<(), Vec<String
         if let Some(ref cats) = config_root.categories {
             for route_key in routing.keys() {
                 if route_key != "DEFAULT" && !cats.contains_key(route_key.as_str()) {
-                    errors.push(format!("routing.{}: references unknown category '{}'", route_key, route_key));
+                    errors.push(format!(
+                        "routing.{}: references unknown category '{}'",
+                        route_key, route_key
+                    ));
                 }
             }
         }
@@ -706,43 +802,56 @@ pub(crate) fn run_validation(config_path: Option<&str>) -> Result<(), Vec<String
         .patterns_dir
         .unwrap_or_else(|| PathBuf::from("./patterns"));
     if patterns_dir.exists() && !patterns_dir.is_dir() {
-        errors.push(format!("patterns_dir '{}': exists but is not a directory", patterns_dir.display()));
+        errors.push(format!(
+            "patterns_dir '{}': exists but is not a directory",
+            patterns_dir.display()
+        ));
     }
 
     // ── Pattern file resolution & regex validation ──
     if let Some(ref cats) = config_root.categories {
         for (name, cat) in cats {
             // Resolve patterns from external file or inline
-            let patterns: Vec<crate::intent_classifier::PatternEntry> =
-                if let Some(ref pf) = cat.patterns_file {
-                    match load_patterns_from_file(pf, &patterns_dir) {
-                        Ok(entries) => {
-                            // Validate each compiled regex with file:line context
-                            let mut has_error = false;
-                            for (idx, entry) in entries.iter().enumerate() {
-                                if let Err(e) = regex::Regex::new(&entry.regex) {
-                                    errors.push(format!("{}:{}: pattern {}: {}", pf, idx + 1, entry.regex, e));
-                                    has_error = true;
-                                }
+            let patterns: Vec<crate::intent_classifier::PatternEntry> = if let Some(ref pf) =
+                cat.patterns_file
+            {
+                match load_patterns_from_file(pf, &patterns_dir) {
+                    Ok(entries) => {
+                        // Validate each compiled regex with file:line context
+                        let mut has_error = false;
+                        for (idx, entry) in entries.iter().enumerate() {
+                            if let Err(e) = regex::Regex::new(&entry.regex) {
+                                errors.push(format!(
+                                    "{}:{}: pattern {}: {}",
+                                    pf,
+                                    idx + 1,
+                                    entry.regex,
+                                    e
+                                ));
+                                has_error = true;
                             }
-                            if has_error {
-                                continue; // already recorded per-pattern errors
-                            }
-                            entries
                         }
-                        Err(e) => {
-                            errors.push(format!("categories.{}.patterns_file '{}': {}", name, pf, e));
-                            continue;
+                        if has_error {
+                            continue; // already recorded per-pattern errors
                         }
+                        entries
                     }
-                } else {
-                    cat.patterns.clone()
-                };
+                    Err(e) => {
+                        errors.push(format!("categories.{}.patterns_file '{}': {}", name, pf, e));
+                        continue;
+                    }
+                }
+            } else {
+                cat.patterns.clone()
+            };
 
             // Validate inline patterns with category context
             for (idx, entry) in patterns.iter().enumerate() {
                 if let Err(e) = regex::Regex::new(&entry.regex) {
-                    errors.push(format!("categories.{}.patterns[{}]: {}: {}", name, idx, entry.regex, e));
+                    errors.push(format!(
+                        "categories.{}.patterns[{}]: {}: {}",
+                        name, idx, entry.regex, e
+                    ));
                 }
             }
         }
@@ -911,7 +1020,11 @@ impl Default for ClassifiersConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            order: vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()],
+            order: vec![
+                "regex".to_string(),
+                "fewshot".to_string(),
+                "llm".to_string(),
+            ],
         }
     }
 }
@@ -1466,7 +1579,14 @@ priority = 1
         let root: ConfigRoot = toml::from_str(toml_content).expect("valid TOML");
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
-        assert_eq!(cfg.order, vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()]);
+        assert_eq!(
+            cfg.order,
+            vec![
+                "regex".to_string(),
+                "fewshot".to_string(),
+                "llm".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1510,7 +1630,14 @@ priority = 1
         let root = ConfigRoot::default();
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
-        assert_eq!(cfg.order, vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()]);
+        assert_eq!(
+            cfg.order,
+            vec![
+                "regex".to_string(),
+                "fewshot".to_string(),
+                "llm".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1519,7 +1646,14 @@ priority = 1
         let root = ConfigRoot::default();
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
-        assert_eq!(cfg.order, vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()]);
+        assert_eq!(
+            cfg.order,
+            vec![
+                "regex".to_string(),
+                "fewshot".to_string(),
+                "llm".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1627,8 +1761,16 @@ categories:
             yaml_root.http.as_ref().map(|h| h.client_timeout_secs)
         );
         assert_eq!(
-            toml_root.categories.as_ref().and_then(|c| c.get("CASUAL")).map(|c| c.threshold),
-            yaml_root.categories.as_ref().and_then(|c| c.get("CASUAL")).map(|c| c.threshold)
+            toml_root
+                .categories
+                .as_ref()
+                .and_then(|c| c.get("CASUAL"))
+                .map(|c| c.threshold),
+            yaml_root
+                .categories
+                .as_ref()
+                .and_then(|c| c.get("CASUAL"))
+                .map(|c| c.threshold)
         );
     }
 
@@ -1651,7 +1793,9 @@ categories:
     priority: 4
 "#;
         let root: ConfigRoot = serde_yaml::from_str(yaml).expect("valid YAML");
-        let providers = root.auth_providers.expect("auth_providers should be present");
+        let providers = root
+            .auth_providers
+            .expect("auth_providers should be present");
         assert_eq!(providers.len(), 2);
         assert_eq!(providers[0].type_, "openai_compatible");
         assert_eq!(providers[1].type_, "anthropic");
@@ -1667,7 +1811,11 @@ categories:
         drop(file);
 
         let result = load_config_from_path(file_path.to_str().unwrap());
-        assert!(result.is_ok(), "TOML load should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "TOML load should succeed: {:?}",
+            result.err()
+        );
         let root = result.unwrap();
         assert_eq!(root.server.unwrap().port, 8888);
     }
@@ -1682,7 +1830,11 @@ categories:
         drop(file);
 
         let result = load_config_from_path(file_path.to_str().unwrap());
-        assert!(result.is_ok(), "YAML load should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "YAML load should succeed: {:?}",
+            result.err()
+        );
         let root = result.unwrap();
         assert_eq!(root.server.unwrap().port, 7777);
     }
@@ -1718,19 +1870,25 @@ categories:
 
     #[test]
     fn merge_configs_overrides_categories() {
-        let mut base: ConfigRoot = toml::from_str(r#"
+        let mut base: ConfigRoot = toml::from_str(
+            r#"
 [categories.CASUAL]
 description = "Original"
 threshold = 1
 priority = 4
-"#).expect("valid TOML");
+"#,
+        )
+        .expect("valid TOML");
 
-        let overlay: ConfigRoot = toml::from_str(r#"
+        let overlay: ConfigRoot = toml::from_str(
+            r#"
 [categories.FILE_READING]
 description = "Override"
 threshold = 3
 priority = 1
-"#).expect("valid TOML");
+"#,
+        )
+        .expect("valid TOML");
 
         merge_configs(&mut base, overlay);
         // Categories is an override key → complete replacement
@@ -1741,17 +1899,23 @@ priority = 1
 
     #[test]
     fn merge_configs_shallow_merge_server() {
-        let mut base: ConfigRoot = toml::from_str(r#"
+        let mut base: ConfigRoot = toml::from_str(
+            r#"
 [server]
 port = 10000
 log_level = "info"
 log_format = "compact"
-"#).expect("valid TOML");
+"#,
+        )
+        .expect("valid TOML");
 
-        let overlay: ConfigRoot = toml::from_str(r#"
+        let overlay: ConfigRoot = toml::from_str(
+            r#"
 [server]
 port = 20000
-"#).expect("valid TOML");
+"#,
+        )
+        .expect("valid TOML");
 
         merge_configs(&mut base, overlay);
         let server = base.server.unwrap();
@@ -1821,7 +1985,11 @@ port = 20000
         let result = load_patterns_from_file("nonexistent.patterns", &tmp_dir);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("invalid pattern path"), "expected 'invalid pattern path', got: {}", err);
+        assert!(
+            err.contains("invalid pattern path"),
+            "expected 'invalid pattern path', got: {}",
+            err
+        );
     }
 
     #[test]
@@ -1841,11 +2009,7 @@ port = 20000
     fn load_patterns_from_file_compiles_regex() {
         let tmp_dir = std::env::temp_dir();
         let pattern_file = tmp_dir.join("test_compile.patterns");
-        std::fs::write(
-            &pattern_file,
-            "3 | (?i)\\b(?:read|show)\\s+file\\b\n",
-        )
-        .unwrap();
+        std::fs::write(&pattern_file, "3 | (?i)\\b(?:read|show)\\s+file\\b\n").unwrap();
 
         let patterns = load_patterns_from_file("test_compile.patterns", &tmp_dir).unwrap();
         assert_eq!(patterns.len(), 1);
@@ -1866,7 +2030,10 @@ threshold = 1
 priority = 4
 "#;
         let root: ConfigRoot = toml::from_str(toml).expect("valid TOML");
-        assert_eq!(root.patterns_dir.as_ref().map(|p: &PathBuf| p.to_str()), Some(Some("./custom_patterns")));
+        assert_eq!(
+            root.patterns_dir.as_ref().map(|p: &PathBuf| p.to_str()),
+            Some(Some("./custom_patterns"))
+        );
     }
 
     #[test]
@@ -1889,7 +2056,11 @@ patterns_file = "casual.patterns"
     fn validate_success_on_embedded_config() {
         // Validates the embedded config.toml (should always be valid)
         let result = run_validation(None);
-        assert!(result.is_ok(), "embedded config should be valid: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "embedded config should be valid: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -1910,7 +2081,10 @@ patterns = [{ regex = "[invalid", weight = 1 }]
         let errors = result.unwrap_err();
         let all = errors.join(" ");
         assert!(all.contains("invalid"), "should report regex error: {all}");
-        assert!(all.contains("patterns[0]"), "should include pattern index: {all}");
+        assert!(
+            all.contains("patterns[0]"),
+            "should include pattern index: {all}"
+        );
     }
 
     #[test]
@@ -1956,7 +2130,10 @@ priority = 4
         assert!(result.is_err());
         let errors = result.unwrap_err();
         let all = errors.join(" ");
-        assert!(all.contains("log_level"), "should report log_level error: {all}");
+        assert!(
+            all.contains("log_level"),
+            "should report log_level error: {all}"
+        );
     }
 
     #[test]
@@ -1975,7 +2152,10 @@ log_format = "compact"
         assert!(result.is_err());
         let errors = result.unwrap_err();
         let all = errors.join(" ");
-        assert!(all.contains("categories"), "should report missing categories: {all}");
+        assert!(
+            all.contains("categories"),
+            "should report missing categories: {all}"
+        );
     }
 
     #[test]
@@ -1994,7 +2174,10 @@ priority = 4
         assert!(result.is_err());
         let errors = result.unwrap_err();
         let all = errors.join(" ");
-        assert!(all.contains("threshold"), "should report threshold error: {all}");
+        assert!(
+            all.contains("threshold"),
+            "should report threshold error: {all}"
+        );
     }
 
     #[test]
@@ -2017,7 +2200,12 @@ priority = 4
         assert!(result.is_err());
         let errors = result.unwrap_err();
         // Should have at least 2 errors: port + log_level
-        assert!(errors.len() >= 2, "should collect multiple errors, got {}: {:?}", errors.len(), errors);
+        assert!(
+            errors.len() >= 2,
+            "should collect multiple errors, got {}: {:?}",
+            errors.len(),
+            errors
+        );
     }
 
     #[test]
@@ -2044,6 +2232,9 @@ patterns_file = "nonexistent.patterns"
         let errors = result.unwrap_err();
         let all = errors.join(" ");
         // Should mention the missing file
-        assert!(all.contains("nonexistent.patterns") || all.contains("cannot read"), "should report missing pattern file: {all}");
+        assert!(
+            all.contains("nonexistent.patterns") || all.contains("cannot read"),
+            "should report missing pattern file: {all}"
+        );
     }
 }

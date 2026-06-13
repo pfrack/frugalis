@@ -8,9 +8,7 @@ use serde::{Deserialize, Serialize};
 use regex::Regex;
 use regex::RegexSet;
 
-pub use crate::routing::{
-    ModelCosts, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX,
-};
+pub use crate::routing::{ModelCosts, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX};
 
 /// A single regex pattern entry with its weight for intent classification.
 #[derive(Clone, Debug, Deserialize)]
@@ -20,7 +18,9 @@ pub(crate) struct PatternEntry {
     pub weight: u8,
 }
 
-fn default_weight() -> u8 { 1 }
+fn default_weight() -> u8 {
+    1
+}
 
 /// Dual-threshold configuration for a category.
 #[derive(Clone, Debug, Deserialize)]
@@ -30,7 +30,9 @@ pub(crate) struct DualThreshold {
     pub suppress_if_present: String,
 }
 
-fn default_alt_score() -> u32 { 1 }
+fn default_alt_score() -> u32 {
+    1
+}
 
 /// A negative suppression pattern configuration.
 #[derive(Clone, Debug, Deserialize)]
@@ -41,7 +43,9 @@ pub(crate) struct NegativePatternConfig {
     pub penalty: u8,
 }
 
-fn default_penalty() -> u8 { 2 }
+fn default_penalty() -> u8 {
+    2
+}
 
 /// Single source of truth for intent category definitions.
 /// Consumed by RegexClassifier (patterns, thresholds, routing) and
@@ -73,8 +77,12 @@ pub(crate) struct CategoryConfig {
     pub dual_threshold: Option<DualThreshold>,
 }
 
-fn default_threshold() -> u32 { 1 }
-fn default_priority() -> u8 { 99 }
+fn default_threshold() -> u32 {
+    1
+}
+fn default_priority() -> u8 {
+    99
+}
 
 #[derive(Clone)]
 pub struct ClassificationResult {
@@ -213,7 +221,10 @@ impl LLMClassifier {
         let api_key = match std::env::var(&config.api_key_env) {
             Ok(k) => k,
             Err(_) => {
-                tracing::warn!("LLM API key env {} not set; classifier will degrade", config.api_key_env);
+                tracing::warn!(
+                    "LLM API key env {} not set; classifier will degrade",
+                    config.api_key_env
+                );
                 String::new()
             }
         };
@@ -236,7 +247,8 @@ impl LLMClassifier {
                     }
                 }
             }
-        }).abort_handle();
+        })
+        .abort_handle();
 
         let classifier = Self {
             client,
@@ -384,7 +396,11 @@ pub fn build_llm_classifier_prompt(categories: &[CategoryConfig]) -> String {
 
     prompt.push_str("\nReturn ONLY the category name, nothing else. Examples:\n");
     for cat in categories {
-        let example_hint = cat.description.split(',').next().unwrap_or(&cat.description);
+        let example_hint = cat
+            .description
+            .split(',')
+            .next()
+            .unwrap_or(&cat.description);
         prompt.push_str(&format!("- \"{}\" -> {}\n", example_hint.trim(), cat.name));
     }
 
@@ -405,15 +421,21 @@ pub(crate) struct FewShotExample {
     pub confidence: f64,
 }
 
-
-
 // ── Auth Header Lookup ──
 
 /// Maps a provider_type string and resolved API key to HTTP auth header tuples
 /// using the configured auth provider list.
 /// Falls back to Bearer Authorization for unknown or unconfigured provider types.
-pub fn auth_headers_for(providers: &[AuthProviderConfig], provider_type: &str, api_key: &str) -> Vec<(String, String)> {
-    let pt = if provider_type.is_empty() { "openai_compatible" } else { provider_type };
+pub fn auth_headers_for(
+    providers: &[AuthProviderConfig],
+    provider_type: &str,
+    api_key: &str,
+) -> Vec<(String, String)> {
+    let pt = if provider_type.is_empty() {
+        "openai_compatible"
+    } else {
+        provider_type
+    };
     for provider in providers {
         if provider.type_ == pt {
             return match (&provider.header, &provider.value_template) {
@@ -596,16 +618,17 @@ impl RegexClassifier {
             })
             .collect();
 
-         // Apply dual_threshold overrides from config
-         for (config, met_flag) in met.iter_mut() {
-             if let Some(dt) = &config.dual_threshold {
-                 let score = *scores.get(config.name.as_str()).unwrap_or(&0);
-                 let suppress_score = *scores.get(dt.suppress_if_present.as_str()).unwrap_or(&0);
-                 *met_flag = score >= dt.alt_score || (score >= config.threshold && suppress_score == 0);
-             }
-         }
+        // Apply dual_threshold overrides from config
+        for (config, met_flag) in met.iter_mut() {
+            if let Some(dt) = &config.dual_threshold {
+                let score = *scores.get(config.name.as_str()).unwrap_or(&0);
+                let suppress_score = *scores.get(dt.suppress_if_present.as_str()).unwrap_or(&0);
+                *met_flag =
+                    score >= dt.alt_score || (score >= config.threshold && suppress_score == 0);
+            }
+        }
 
-         let met_count = met.iter().filter(|(_, m)| *m).count();
+        let met_count = met.iter().filter(|(_, m)| *m).count();
 
         if met_count == 0 {
             return self.route_fallback(fallback_category(&self.categories));
@@ -648,6 +671,41 @@ impl RegexClassifier {
             tier: ClassificationTier::Fallback,
             provider_type: self.fallback_entry.provider_type.clone(),
             api_key_env: self.fallback_entry.api_key_env.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_util {
+    //! Shared test utilities for the classifier subsystem.
+    //!
+    //! Exposed to `#[cfg(test)]` modules in other files of this crate
+    //! (e.g. `src/main.rs` integration tests) via `pub(crate)`.
+    //! Production code never sees this module.
+
+    use std::sync::Arc;
+
+    use super::*;
+
+    /// Test-only `IntentClassify` impl that records how many times
+    /// `classify()` is invoked and returns a configurable
+    /// `ClassificationResult`. The chain tests use this to prove
+    /// which backend fired, because `LLMClassifier` returns
+    /// `tier: ClassificationTier::Regex` on success and the
+    /// `ClassificationTier` enum has only `Regex | FewShot | Fallback`
+    /// (no `Llm` variant) — tier inspection cannot distinguish
+    /// "regex matched" from "LLM matched".
+    pub struct CountingClassifier {
+        pub counter: Arc<std::sync::atomic::AtomicUsize>,
+        pub result: ClassificationResult,
+    }
+
+    #[async_trait]
+    impl IntentClassify for CountingClassifier {
+        async fn classify(&self, _prompt: &str) -> ClassificationResult {
+            self.counter
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.result.clone()
         }
     }
 }
@@ -972,13 +1030,191 @@ mod tests {
         assert_eq!(result.category, "STUB");
     }
 
+    // ── 3-backend chain tests (Risk #1 contract) ────────────────────────────
+    // These tests prove the chain's "first-non-Fallback wins, later backends
+    // not called" and "last-Fallback returned when all fail" contracts with
+    // three backends, using CountingClassifier for side-effect observation
+    // (tier inspection cannot distinguish regex-tier from LLM-tier matches).
+
+    #[tokio::test]
+    async fn chain_3_backend_short_circuits_when_first_matches() {
+        use crate::intent_classifier::test_util::CountingClassifier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let counter1 = Arc::new(AtomicUsize::new(0));
+        let counter2 = Arc::new(AtomicUsize::new(0));
+        let counter3 = Arc::new(AtomicUsize::new(0));
+
+        let stub1 = CountingClassifier {
+            counter: counter1.clone(),
+            result: ClassificationResult {
+                category: "FIRST".to_string(),
+                model: "first-model".to_string(),
+                endpoint: String::new(),
+                tier: ClassificationTier::Regex,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        };
+        let stub2 = CountingClassifier {
+            counter: counter2.clone(),
+            result: ClassificationResult::fallback(),
+        };
+        let stub3 = CountingClassifier {
+            counter: counter3.clone(),
+            result: ClassificationResult::fallback(),
+        };
+
+        let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2), Arc::new(stub3)]);
+        let result = chain.classify("any prompt").await;
+
+        assert_eq!(result.category, "FIRST");
+        assert_eq!(result.tier, ClassificationTier::Regex);
+        assert_eq!(
+            counter1.load(Ordering::SeqCst),
+            1,
+            "first backend should be called once"
+        );
+        assert_eq!(
+            counter2.load(Ordering::SeqCst),
+            0,
+            "second backend should NOT be called when first matches"
+        );
+        assert_eq!(
+            counter3.load(Ordering::SeqCst),
+            0,
+            "third backend should NOT be called when first matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn chain_3_backend_short_circuits_when_middle_matches() {
+        use crate::intent_classifier::test_util::CountingClassifier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let counter1 = Arc::new(AtomicUsize::new(0));
+        let counter2 = Arc::new(AtomicUsize::new(0));
+        let counter3 = Arc::new(AtomicUsize::new(0));
+
+        let stub1 = CountingClassifier {
+            counter: counter1.clone(),
+            result: ClassificationResult::fallback(),
+        };
+        let stub2 = CountingClassifier {
+            counter: counter2.clone(),
+            result: ClassificationResult {
+                category: "MIDDLE".to_string(),
+                model: "middle-model".to_string(),
+                endpoint: String::new(),
+                tier: ClassificationTier::FewShot,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        };
+        let stub3 = CountingClassifier {
+            counter: counter3.clone(),
+            result: ClassificationResult {
+                category: "LAST".to_string(),
+                model: "last-model".to_string(),
+                endpoint: String::new(),
+                tier: ClassificationTier::Regex,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        };
+
+        let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2), Arc::new(stub3)]);
+        let result = chain.classify("any prompt").await;
+
+        assert_eq!(result.category, "MIDDLE");
+        assert_eq!(result.tier, ClassificationTier::FewShot);
+        assert_eq!(
+            counter1.load(Ordering::SeqCst),
+            1,
+            "first backend should be called (returns Fallback)"
+        );
+        assert_eq!(
+            counter2.load(Ordering::SeqCst),
+            1,
+            "middle backend should be called once"
+        );
+        assert_eq!(
+            counter3.load(Ordering::SeqCst),
+            0,
+            "third backend should NOT be called when middle matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn chain_3_backend_returns_last_on_all_fallback() {
+        use crate::intent_classifier::test_util::CountingClassifier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let counter1 = Arc::new(AtomicUsize::new(0));
+        let counter2 = Arc::new(AtomicUsize::new(0));
+        let counter3 = Arc::new(AtomicUsize::new(0));
+
+        let stub1 = CountingClassifier {
+            counter: counter1.clone(),
+            result: ClassificationResult::fallback(),
+        };
+        let stub2 = CountingClassifier {
+            counter: counter2.clone(),
+            result: ClassificationResult::fallback(),
+        };
+        let stub3 = CountingClassifier {
+            counter: counter3.clone(),
+            result: ClassificationResult {
+                category: "LAST_FALLBACK".to_string(),
+                model: "last-fb-model".to_string(),
+                endpoint: String::new(),
+                tier: ClassificationTier::Fallback,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        };
+
+        let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2), Arc::new(stub3)]);
+        let result = chain.classify("any prompt").await;
+
+        assert_eq!(result.category, "LAST_FALLBACK");
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+        assert_eq!(
+            counter1.load(Ordering::SeqCst),
+            1,
+            "all backends should be called when all return Fallback"
+        );
+        assert_eq!(counter2.load(Ordering::SeqCst), 1);
+        assert_eq!(counter3.load(Ordering::SeqCst), 1);
+    }
+
     fn default_auth_providers() -> Vec<AuthProviderConfig> {
         vec![
-            AuthProviderConfig { type_: "openai_compatible".into(), header: Some("authorization".into()), value_template: Some("Bearer {api_key}".into()) },
-            AuthProviderConfig { type_: "anthropic".into(), header: Some("x-api-key".into()), value_template: Some("{api_key}".into()) },
-            AuthProviderConfig { type_: "ollama".into(), header: None, value_template: None },
-            AuthProviderConfig { type_: "local".into(), header: None, value_template: None },
-            AuthProviderConfig { type_: "nvidia_nim".into(), header: Some("authorization".into()), value_template: Some("Bearer {api_key}".into()) },
+            AuthProviderConfig {
+                type_: "openai_compatible".into(),
+                header: Some("authorization".into()),
+                value_template: Some("Bearer {api_key}".into()),
+            },
+            AuthProviderConfig {
+                type_: "anthropic".into(),
+                header: Some("x-api-key".into()),
+                value_template: Some("{api_key}".into()),
+            },
+            AuthProviderConfig {
+                type_: "ollama".into(),
+                header: None,
+                value_template: None,
+            },
+            AuthProviderConfig {
+                type_: "local".into(),
+                header: None,
+                value_template: None,
+            },
+            AuthProviderConfig {
+                type_: "nvidia_nim".into(),
+                header: Some("authorization".into()),
+                value_template: Some("Bearer {api_key}".into()),
+            },
         ]
     }
 
@@ -1197,7 +1433,8 @@ mod tests {
                 threshold: 2,
                 priority: 1,
                 patterns: vec![PatternEntry {
-                    regex: r"(?i)\b(?:select|insert|update|delete|create\s+table|alter|drop)\b".to_string(),
+                    regex: r"(?i)\b(?:select|insert|update|delete|create\s+table|alter|drop)\b"
+                        .to_string(),
                     weight: 2,
                 }],
                 patterns_file: None,
@@ -1284,14 +1521,32 @@ mod tests {
         ];
         let neg = vec![];
         let mut routing = HashMap::new();
-        routing.insert("ALPHA".to_string(), RouteEntry {
-            model: "a".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None,
-        });
-        routing.insert("BETA".to_string(), RouteEntry {
-            model: "b".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None,
-        });
+        routing.insert(
+            "ALPHA".to_string(),
+            RouteEntry {
+                model: "a".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
+        routing.insert(
+            "BETA".to_string(),
+            RouteEntry {
+                model: "b".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
         let fallback = RouteEntry {
-            model: "fb".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None,
+            model: "fb".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
         };
         let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
         // "alpha beta" gives ALPHA score=3 (meets threshold=3), BETA score=1 (meets threshold=1)
@@ -1310,7 +1565,11 @@ mod tests {
         let neg = vec![];
         let routing = HashMap::new();
         let fallback = RouteEntry {
-            model: "fb".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None,
+            model: "fb".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
         };
         let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
         let result = c.classify("anything").await;
@@ -1342,19 +1601,28 @@ mod tests {
                 dual_threshold: None,
             },
         ];
-        let neg = vec![
-            NegativePatternConfig {
-                regex: r"(?i)\bcode\b".to_string(),
-                suppressed: "CODING".to_string(),
-                penalty: 3,
-            },
-        ];
+        let neg = vec![NegativePatternConfig {
+            regex: r"(?i)\bcode\b".to_string(),
+            suppressed: "CODING".to_string(),
+            penalty: 3,
+        }];
         let mut routing = HashMap::new();
-        routing.insert("CODING".to_string(), RouteEntry {
-            model: "c".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None,
-        });
+        routing.insert(
+            "CODING".to_string(),
+            RouteEntry {
+                model: "c".to_string(),
+                endpoint: String::new(),
+                cost_per_1m_input_tokens: None,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        );
         let fallback = RouteEntry {
-            model: "fb".to_string(), endpoint: String::new(), cost_per_1m_input_tokens: None, provider_type: String::new(), api_key_env: None,
+            model: "fb".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
         };
         let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
         // "code" matches CODING pattern (score=2), but negative pattern penalizes CODING by 3 → score=0

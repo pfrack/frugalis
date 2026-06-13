@@ -6,7 +6,7 @@
 >
 > Refresh: re-run `/10x-test-plan --refresh` when stale (see §8).
 >
-> Last updated: 2026-06-13 (Phase 1 → change opened)
+> Last updated: 2026-06-13 (Phase 1 → planned)
 
 ## 1. Strategy
 
@@ -67,7 +67,7 @@ orchestrator updates Status as artifacts appear on disk.
 
 | # | Phase name | Goal (one line) | Risks covered | Test types | Status | Change folder |
 |---|------------|------------------|----------------|------------|--------|----------------|
-| 1 | Critical-path regression guards | Defend Risk #1 + #2 at the cheapest layer; lock the chain-handoff contract and the F1–F4 invariants | #1, #2 | integration (chain escalation with mock backends), regression (invariant assertions on `completion_handler`) | change opened | `testing-critical-path-regression-guards` |
+| 1 | Critical-path regression guards | Defend Risk #1 + #2 at the cheapest layer; lock the chain-handoff contract and the F1–F4 invariants | #1, #2 | integration (chain escalation with mock backends), regression (invariant assertions on `completion_handler`) | planned | `testing-critical-path-regression-guards` |
 | 2 | Persistence + snippet guardrails | Make the NFR ("async logging failure does not block response") observable, and prove snippet extraction holds across all three backends + adversarial PII inputs | #3, #5, #6 | integration (`log_inference` against unreachable backend), testcontainers cross-backend, property tests on snippet extraction | not started | — |
 | 3 | Dashboard + auth coverage | Close the 0-test gap on `src/dashboard.rs` (4 routes + macro) and prove the constant-time compare invariant holds at every call site | #4, #7 | HTTP integration (dashboard routes via `test_app()`), unit (constant-time compare), grep-based guard | not started | — |
 | 4 | CI floor + cookbook | Wire `slow_tests` into a scheduled CI job, add a coverage-fail threshold, and update §6 cookbook with the patterns the rollout just shipped | cross-cutting | gates + cookbook (no new test code) | not started | — |

@@ -1,13 +1,14 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::fs;
 
 use crate::config::FewShotConfig;
 use crate::intent_classifier::{
-    code_block_re, ClassificationResult, ClassificationTier, FewShotExample, IntentClassify, RouteEntry,
+    code_block_re, ClassificationResult, ClassificationTier, FewShotExample, IntentClassify,
+    RouteEntry,
 };
 use crate::routing::DEFAULT_MODEL;
 
@@ -151,13 +152,11 @@ impl FewShotClassifier {
             }
             let mut word_counts: HashMap<usize, f64> = HashMap::new();
             for token in &tokens {
-                let idx = *vocab_map
-                    .entry(token.to_string())
-                    .or_insert_with(|| {
-                        let i = next_idx;
-                        next_idx += 1;
-                        i
-                    });
+                let idx = *vocab_map.entry(token.to_string()).or_insert_with(|| {
+                    let i = next_idx;
+                    next_idx += 1;
+                    i
+                });
                 *word_counts.entry(idx).or_insert(0.0) += 1.0;
             }
             let dim = self.config.feature_dimensions;
@@ -259,8 +258,7 @@ impl FewShotClassifier {
                 self.retrain_internal(&data_snapshot);
                 self.save_training_data(&data_snapshot).await;
                 // Clear the retraining flag
-                self.retraining_in_progress
-                    .store(false, Ordering::SeqCst);
+                self.retraining_in_progress.store(false, Ordering::SeqCst);
             }
         }
     }
@@ -287,7 +285,11 @@ impl FewShotClassifier {
             Ok(content) => match serde_yaml::from_str(&content) {
                 Ok(data) => data,
                 Err(e) => {
-                    tracing::warn!("Failed to parse few-shot training data from {}: {}", path, e);
+                    tracing::warn!(
+                        "Failed to parse few-shot training data from {}: {}",
+                        path,
+                        e
+                    );
                     vec![]
                 }
             },
@@ -316,10 +318,7 @@ impl IntentClassify for FewShotClassifier {
         let td = self.training_data.read().await;
 
         if let Some((category, _confidence)) = self.exact_match_in(&preprocessed, &td) {
-            let route = self
-                .routing
-                .get(&category)
-                .unwrap_or(&self.fallback_entry);
+            let route = self.routing.get(&category).unwrap_or(&self.fallback_entry);
             return ClassificationResult {
                 category,
                 model: route.model.clone(),
@@ -340,10 +339,7 @@ impl IntentClassify for FewShotClassifier {
 
         match best {
             Some((category, score)) if score >= threshold => {
-                let route = self
-                    .routing
-                    .get(&category)
-                    .unwrap_or(&self.fallback_entry);
+                let route = self.routing.get(&category).unwrap_or(&self.fallback_entry);
                 ClassificationResult {
                     category,
                     model: route.model.clone(),
@@ -504,7 +500,10 @@ mod tests {
         let classifier = make_classifier();
         let td = classifier.training_data.read().await;
         assert_eq!(FewShotClassifier::feedback_count_in(&td), 0);
-        assert!((FewShotClassifier::effective_threshold_for(&td, &classifier.config) - 0.6).abs() < 1e-10);
+        assert!(
+            (FewShotClassifier::effective_threshold_for(&td, &classifier.config) - 0.6).abs()
+                < 1e-10
+        );
     }
 
     #[tokio::test]

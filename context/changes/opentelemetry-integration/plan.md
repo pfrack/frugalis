@@ -85,13 +85,17 @@ Note: Pin to the 0.28 compatible set (tracing-opentelemetry version is always ot
 
 **Intent**: Encapsulate all OTel initialization in one module. Exports an `init()` function that returns provider handles and OTel tracing/log layers, plus a `shutdown()` function, plus a `Metrics` struct holding the 4 instruments.
 
-**Contract**:
+**Contract** (final implementation, see addendum below):
 
-- `pub struct OtelGuard` — holds `SdkTracerProvider`, `SdkMeterProvider`, `SdkLoggerProvider`
+- `pub struct OtelGuard` — holds `SdkTracerProvider`, `SdkMeterProvider`, `SdkLoggerProvider`, and `svc_name: &'static str`
 - `pub struct Metrics` — holds `Counter<u64>` for requests, `Histogram<f64>` for duration, `Counter<u64>` for classifications, `Histogram<f64>` for upstream duration
-- `pub fn init(service_name: &str) -> Option<(OtelGuard, impl Layer<S>, impl Layer<S>, Metrics)>` — reads `OTEL_ENABLED` env var; returns `None` if disabled. Builds OTLP HTTP exporters, creates providers, returns layers + metrics instruments
-- `pub fn shutdown(guard: OtelGuard)` — calls `.shutdown()` on all three providers (traces → metrics → logs order)
+- `pub fn init(service_name: &str) -> Option<(OtelGuard, Metrics)>` — reads `OTEL_ENABLED` env var; returns `None` if disabled. Builds OTLP HTTP exporters, creates providers, returns the guard + metrics
+- `impl OtelGuard { pub fn trace_layer<S>(&self) -> Box<dyn Layer<S> + Send + Sync + 'static> }` — builds a tracing-subscriber layer that bridges spans to the OTel tracer
+- `impl OtelGuard { pub fn log_layer<S>(&self) -> Box<dyn Layer<S> + Send + Sync + 'static> }` — builds a tracing-subscriber layer that bridges events to the OTel logger
+- `impl OtelGuard { pub fn shutdown(self) }` — calls `.shutdown()` on all three providers (traces → logs → metrics order)
 - Reads standard env vars: `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`
+
+> **Plan addendum (impl review)**: Original contract specified `init()` returning `(OtelGuard, impl Layer<S>, impl Layer<S>, Metrics)` in a single tuple. This is not implementable because the layers borrow from the guard's tracer/logger providers — they cannot be moved out alongside the guard. The implementation splits the API into `init()` (returns guard + metrics) and `OtelGuard::trace_layer()` / `OtelGuard::log_layer()` (returns the layers by reference). Functionally equivalent; the new shape is cleaner.
 
 #### 3. src/main.rs — Declare module
 
@@ -194,6 +198,8 @@ Add the 4 core metrics at handler callsites: request count, request duration, cl
 
 **Contract**: Feature-gated block after the existing DB logging logic. Accesses metrics from `state.metrics`.
 
+> **Plan addendum (impl review)**: The `classification_total.add(1)` call was *not* placed inside `log_classification`; it is recorded at the two handler-level call sites (`classify_and_log` and `completion_handler`) instead. Rationale: `log_classification` is invoked twice per streaming request (once with `"streaming"` status, once with the final status) and once per non-streaming classification. Putting the counter inside `log_classification` would have double-counted streaming requests. Handler-level placement records exactly one increment per request, which is the metric's intended semantic.
+
 #### 4. src/main.rs — Record upstream duration in completion_handler
 
 **File**: `src/main.rs` (around the upstream request at line 832)
@@ -255,6 +261,8 @@ envVars:
 **Intent**: Document the OTel integration: what env vars to set, how to disable, which backend to use.
 
 **Contract**: Section titled "Observability / OpenTelemetry" explaining: feature flag, env vars, recommended backend (Grafana Cloud free tier), and how to verify it's working.
+
+> **Plan addendum (impl review)**: The OTel documentation section is delivered by the separate `readme-bootstrap` change (`context/changes/readme-bootstrap/`, status: preparing) rather than by this change. Cross-reference: the section "Telemetry (OpenTelemetry)" in `README.md` lines 587–607 (untracked) covers the same content as required by §4.2 here. If `readme-bootstrap` lands first or fails, this change should re-absorb the docs.
 
 ### Success Criteria:
 

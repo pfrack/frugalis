@@ -5,10 +5,7 @@ use opentelemetry::{
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{
-    logs::SdkLoggerProvider,
-    metrics::SdkMeterProvider,
-    trace::SdkTracerProvider,
-    Resource,
+    logs::SdkLoggerProvider, metrics::SdkMeterProvider, trace::SdkTracerProvider, Resource,
 };
 use tracing::Subscriber;
 use tracing_subscriber::{layer::Layer, registry::LookupSpan};
@@ -21,6 +18,7 @@ pub struct OtelGuard {
     tracer_provider: SdkTracerProvider,
     meter_provider: SdkMeterProvider,
     logger_provider: SdkLoggerProvider,
+    svc_name: &'static str,
 }
 
 /// Pre-allocated metric instruments accessed from handler code.
@@ -57,9 +55,7 @@ pub fn init(service_name: &str) -> Option<(OtelGuard, Metrics)> {
         .unwrap_or_else(|_| service_name.to_string())
         .leak();
 
-    let resource = Resource::builder()
-        .with_service_name(svc_name)
-        .build();
+    let resource = Resource::builder().with_service_name(svc_name).build();
 
     let trace_exporter = match SpanExporter::builder()
         .with_http()
@@ -140,6 +136,7 @@ pub fn init(service_name: &str) -> Option<(OtelGuard, Metrics)> {
         tracer_provider,
         meter_provider,
         logger_provider,
+        svc_name,
     };
 
     let metrics = Metrics {
@@ -158,11 +155,11 @@ impl OtelGuard {
     /// The returned layer bridges all `tracing` spans to the OTel tracer
     /// provider held by this guard. Callers should add it to the subscriber
     /// registry alongside the existing `fmt` layer.
-    pub fn trace_layer<S>(&self, svc_name: &'static str) -> Box<dyn Layer<S> + Send + Sync + 'static>
+    pub fn trace_layer<S>(&self) -> Box<dyn Layer<S> + Send + Sync + 'static>
     where
         S: Subscriber + for<'span> LookupSpan<'span> + Send + Sync + 'static,
     {
-        let tracer = self.tracer_provider.tracer(svc_name);
+        let tracer = self.tracer_provider.tracer(self.svc_name);
         Box::new(tracing_opentelemetry::OpenTelemetryLayer::new(tracer))
     }
 

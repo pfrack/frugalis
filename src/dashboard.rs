@@ -155,9 +155,18 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         }
     };
 
-    let summary_fut = persistence.backend.fetch_latency_summary(state.dashboard_config.default_hours);
-    let savings_fut = persistence.backend.fetch_savings_estimate(state.dashboard_config.default_hours, &model_costs, &baseline_model);
-    let recent_fut = persistence.backend.fetch_inferences(0, state.dashboard_config.recent_count, None, None);
+    let summary_fut = persistence
+        .backend
+        .fetch_latency_summary(state.dashboard_config.default_hours);
+    let savings_fut = persistence.backend.fetch_savings_estimate(
+        state.dashboard_config.default_hours,
+        &model_costs,
+        &baseline_model,
+    );
+    let recent_fut =
+        persistence
+            .backend
+            .fetch_inferences(0, state.dashboard_config.recent_count, None, None);
 
     let (summary_res, savings_res, recent_res) = tokio::join!(summary_fut, savings_fut, recent_fut);
 
@@ -261,7 +270,12 @@ async fn latency_handler(
     let hours: u32 = params
         .get("hours")
         .and_then(|h| h.parse::<u32>().ok())
-        .map(|h| h.clamp(state.dashboard_config.hours_min, state.dashboard_config.hours_max))
+        .map(|h| {
+            h.clamp(
+                state.dashboard_config.hours_min,
+                state.dashboard_config.hours_max,
+            )
+        })
         .unwrap_or(state.dashboard_config.default_hours);
 
     let persistence = match &state.persistence {
@@ -310,7 +324,11 @@ async fn savings_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
 
     match persistence
         .backend
-        .fetch_savings_estimate(state.dashboard_config.default_hours, &model_costs, &baseline_model)
+        .fetch_savings_estimate(
+            state.dashboard_config.default_hours,
+            &model_costs,
+            &baseline_model,
+        )
         .await
     {
         Ok(est) => SavingsTemplate {
