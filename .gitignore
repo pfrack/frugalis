@@ -13,3 +13,6 @@ rustc-ice-*.txt
 .idea/
 *.swp
 .DS_Store
+
+# Training data
+data/fewshot_training.yaml

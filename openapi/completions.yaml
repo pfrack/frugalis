@@ -176,6 +176,79 @@ paths:
                   message:
                     type: string
                 required: [error, status, message]
+  /v1/feedback:
+    post:
+      summary: Submit classification feedback for few-shot retraining
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+                  description: The original user prompt that was classified
+                predicted_category:
+                  type: string
+                  description: The category the classifier predicted (optional)
+                actual_category:
+                  type: string
+                  description: The correct category
+                satisfaction:
+                  type: number
+                  format: float
+                  default: 1.0
+                  description: Confidence/satisfaction signal (0.0–1.0)
+              required: [text, actual_category]
+      responses:
+        "200":
+          description: Feedback accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [accepted]
+        "400":
+          description: Invalid category
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  status:
+                    type: integer
+                  message:
+                    type: string
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+        "503":
+          description: Few-shot classifier not configured
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  status:
+                    type: integer
+                  message:
+                    type: string
 components:
   securitySchemes:
     bearerAuth:

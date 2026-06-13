@@ -28,7 +28,26 @@ impl FewShotClassifier {
             serde_yaml::from_str(include_str!("../data/fewshot_bootstrap.yaml"))
                 .expect("bootstrap YAML must be valid");
 
-        let training_data = Arc::new(tokio::sync::RwLock::new(bootstrap.clone()));
+        // Load persisted training data; merge with bootstrap (persisted wins on text match)
+        let persisted = Self::load_training_data(&config.data_path);
+        let mut merged = bootstrap.clone();
+        let persisted_len = persisted.len();
+        if persisted_len > 0 {
+            for pe in persisted {
+                if let Some(pos) = merged.iter().position(|e| e.text == pe.text) {
+                    merged[pos] = pe;
+                } else {
+                    merged.push(pe);
+                }
+            }
+            tracing::info!(
+                "Few-shot: loaded {} persisted examples ({} total after merge)",
+                persisted_len,
+                merged.len()
+            );
+        }
+
+        let training_data = Arc::new(tokio::sync::RwLock::new(merged.clone()));
 
         let classifier = Self {
             vocabulary: dashmap::DashMap::new(),
@@ -39,7 +58,7 @@ impl FewShotClassifier {
             config,
         };
 
-        classifier.retrain_internal(&bootstrap);
+        classifier.retrain_internal(&merged);
         classifier
     }
 
@@ -156,6 +175,15 @@ impl FewShotClassifier {
         }
         for (category, patterns) in category_patterns {
             self.intent_patterns.insert(category, patterns);
+        }
+
+        let vocab_len = self.vocabulary.len();
+        if vocab_len > self.config.max_vocabulary_warn {
+            tracing::warn!(
+                "Few-shot vocabulary size ({}) exceeds max_vocabulary_warn ({}); consider resetting training data",
+                vocab_len,
+                self.config.max_vocabulary_warn
+            );
         }
     }
 
@@ -293,6 +321,10 @@ mod tests {
     use super::*;
 
     fn make_config() -> FewShotConfig {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         FewShotConfig {
             enabled: true,
             confidence_threshold: 0.4,
@@ -300,7 +332,7 @@ mod tests {
             cold_start_feedback_count: 5,
             feature_dimensions: 1000,
             retraining_threshold: 5,
-            data_path: "/tmp/test_fewshot_training.yaml".to_string(),
+            data_path: format!("/tmp/fewshot_test_{}.yaml", nanos),
             max_vocabulary_warn: 5000,
         }
     }

@@ -640,9 +640,9 @@ Add training data save/load to YAML, vocabulary size operator warning, and `.git
 
 #### Automated
 
-- [ ] 4.1 `cargo test` passes (all tests)
-- [ ] 4.2 `cargo test auth` passes — feedback requires auth
-- [ ] 4.3 `cargo test routes_auth` passes
+- [x] 4.1 `cargo test` passes (all tests)
+- [x] 4.2 `cargo test auth` passes — feedback requires auth
+- [x] 4.3 `cargo test routes_auth` passes
 
 #### Manual
 
@@ -654,9 +654,9 @@ Add training data save/load to YAML, vocabulary size operator warning, and `.git
 
 #### Automated
 
-- [ ] 5.1 `cargo build` compiles
-- [ ] 5.2 `cargo test` passes
-- [ ] 5.3 `data/fewshot_training.yaml` not in `git status`
+- [x] 5.1 `cargo build` compiles
+- [x] 5.2 `cargo test` passes
+- [x] 5.3 `data/fewshot_training.yaml` not in `git status`
 
 #### Manual
 

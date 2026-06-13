@@ -1177,6 +1177,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_feedback_requires_auth() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/feedback")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"text":"hello","actual_category":"CASUAL"}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_feedback_no_fewshot_returns_503() {
+        // test_app_with_classifier has no fewshot_classifier → 503
+        let app = test_app_with_classifier();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/feedback")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"text":"hello","actual_category":"SYNTAX_FIX"}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
     async fn test_chain_with_regex_and_fewshot() {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
@@ -1212,6 +1252,10 @@ mod tests {
         let regex_classifier =
             intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
 
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         let fewshot_config = config::FewShotConfig {
             enabled: true,
             confidence_threshold: 0.4,
@@ -1219,7 +1263,7 @@ mod tests {
             cold_start_feedback_count: 5,
             feature_dimensions: 1000,
             retraining_threshold: 5,
-            data_path: "/tmp/test_fewshot_integration.yaml".to_string(),
+            data_path: format!("/tmp/fewshot_int_{}.yaml", nanos),
             max_vocabulary_warn: 5000,
         };
         let fewshot = fewshot_classifier::FewShotClassifier::new(
