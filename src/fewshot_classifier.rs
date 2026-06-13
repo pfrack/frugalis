@@ -1,0 +1,457 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+
+use crate::config::FewShotConfig;
+use crate::intent_classifier::{
+    ClassificationResult, ClassificationTier, FewShotExample, IntentClassify, RouteEntry,
+};
+use crate::routing::DEFAULT_MODEL;
+
+pub(crate) struct FewShotClassifier {
+    vocabulary: dashmap::DashMap<String, usize>,
+    intent_patterns: dashmap::DashMap<String, Vec<Vec<f64>>>,
+    training_data: Arc<tokio::sync::RwLock<Vec<FewShotExample>>>,
+    routing: HashMap<String, RouteEntry>,
+    fallback_entry: RouteEntry,
+    config: FewShotConfig,
+}
+
+impl FewShotClassifier {
+    pub fn new(
+        config: FewShotConfig,
+        routing: HashMap<String, RouteEntry>,
+        fallback_entry: RouteEntry,
+    ) -> Self {
+        let bootstrap: Vec<FewShotExample> =
+            serde_yaml::from_str(include_str!("../data/fewshot_bootstrap.yaml"))
+                .expect("bootstrap YAML must be valid");
+
+        let training_data = Arc::new(tokio::sync::RwLock::new(bootstrap.clone()));
+
+        let classifier = Self {
+            vocabulary: dashmap::DashMap::new(),
+            intent_patterns: dashmap::DashMap::new(),
+            training_data,
+            routing,
+            fallback_entry,
+            config,
+        };
+
+        classifier.retrain_internal(&bootstrap);
+        classifier
+    }
+
+    fn preprocess(text: &str) -> String {
+        let lower = text.to_lowercase();
+        let re = regex::Regex::new(r"(?s)```[^`]*```").expect("code_block_re regex must be valid");
+        let no_blocks = re.replace_all(&lower, " ");
+        let collapsed: Vec<&str> = no_blocks.split_whitespace().collect();
+        collapsed.join(" ")
+    }
+
+    fn extract_features(&self, text: &str, vocab: &dashmap::DashMap<String, usize>) -> Vec<f64> {
+        let tokens: Vec<&str> = text.split_whitespace().collect();
+        let total_words = tokens.len();
+        if total_words == 0 {
+            return vec![0.0; self.config.feature_dimensions];
+        }
+        let mut word_counts: HashMap<usize, f64> = HashMap::new();
+        for token in &tokens {
+            if let Some(idx) = vocab.get(*token) {
+                *word_counts.entry(*idx).or_insert(0.0) += 1.0;
+            }
+        }
+        let mut features = vec![0.0; self.config.feature_dimensions];
+        for (idx, count) in word_counts {
+            if idx < self.config.feature_dimensions {
+                features[idx] = count / total_words as f64;
+            }
+        }
+        features
+    }
+
+    fn score_categories(&self, input_features: &[f64]) -> HashMap<String, f64> {
+        let mut scores = HashMap::new();
+        for entry in self.intent_patterns.iter() {
+            let category = entry.key();
+            let patterns = entry.value();
+            let mut max_score = 0.0_f64;
+            for pattern_vec in patterns {
+                let sim = cosine_similarity(input_features, pattern_vec);
+                if sim > max_score {
+                    max_score = sim;
+                }
+            }
+            scores.insert(category.clone(), max_score);
+        }
+        scores
+    }
+
+    fn exact_match(&self, preprocessed: &str) -> Option<(String, f64)> {
+        let td = self.training_data.blocking_read();
+        for example in td.iter() {
+            let example_preprocessed = Self::preprocess(&example.text);
+            if example_preprocessed == preprocessed {
+                return Some((example.category.clone(), example.confidence));
+            }
+        }
+        None
+    }
+
+    fn feedback_count(&self) -> usize {
+        let td = self.training_data.blocking_read();
+        td.iter().filter(|e| e.confidence < 0.99).count()
+    }
+
+    fn effective_threshold(&self) -> f64 {
+        if self.feedback_count() < self.config.cold_start_feedback_count {
+            self.config.cold_start_threshold
+        } else {
+            self.config.confidence_threshold
+        }
+    }
+
+    fn retrain_internal(&self, data: &[FewShotExample]) {
+        self.vocabulary.clear();
+        self.intent_patterns.clear();
+
+        let mut vocab_map: HashMap<String, usize> = HashMap::new();
+        let mut next_idx = 0usize;
+
+        let mut category_patterns: HashMap<String, Vec<Vec<f64>>> = HashMap::new();
+
+        for example in data {
+            let preprocessed = Self::preprocess(&example.text);
+            let tokens: Vec<&str> = preprocessed.split_whitespace().collect();
+            let total_words = tokens.len();
+            if total_words == 0 {
+                continue;
+            }
+            let mut word_counts: HashMap<usize, f64> = HashMap::new();
+            for token in &tokens {
+                let idx = *vocab_map
+                    .entry(token.to_string())
+                    .or_insert_with(|| {
+                        let i = next_idx;
+                        next_idx += 1;
+                        i
+                    });
+                *word_counts.entry(idx).or_insert(0.0) += 1.0;
+            }
+            let dim = self.config.feature_dimensions;
+            let mut features = vec![0.0; dim];
+            for (idx, count) in word_counts {
+                if idx < dim {
+                    features[idx] = count / total_words as f64;
+                }
+            }
+            category_patterns
+                .entry(example.category.clone())
+                .or_default()
+                .push(features);
+        }
+
+        for (word, idx) in &vocab_map {
+            self.vocabulary.insert(word.clone(), *idx);
+        }
+        for (category, patterns) in category_patterns {
+            self.intent_patterns.insert(category, patterns);
+        }
+    }
+
+    pub async fn add_feedback(
+        &self,
+        text: String,
+        _predicted_category: Option<String>,
+        actual_category: String,
+        satisfaction: f64,
+    ) {
+        let example = FewShotExample {
+            text,
+            category: actual_category,
+            confidence: satisfaction,
+        };
+        {
+            let mut data = self.training_data.write().await;
+            data.push(example);
+        }
+        {
+            let data = self.training_data.read().await;
+            if data.len() >= self.config.retraining_threshold {
+                tracing::info!("Few-shot retraining threshold reached; retraining");
+                self.retrain_internal(&data);
+                self.save_training_data(&data);
+            }
+        }
+    }
+
+    fn save_training_data(&self, data: &[FewShotExample]) {
+        match serde_yaml::to_string(data) {
+            Ok(yaml) => {
+                if let Err(e) = std::fs::write(&self.config.data_path, &yaml) {
+                    tracing::warn!(
+                        "Failed to write few-shot training data to {}: {}",
+                        self.config.data_path,
+                        e
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to serialize few-shot training data: {}", e);
+            }
+        }
+    }
+
+    fn load_training_data(path: &str) -> Vec<FewShotExample> {
+        match std::fs::read_to_string(path) {
+            Ok(content) => match serde_yaml::from_str(&content) {
+                Ok(data) => data,
+                Err(e) => {
+                    tracing::warn!("Failed to parse few-shot training data from {}: {}", path, e);
+                    vec![]
+                }
+            },
+            Err(_) => {
+                vec![]
+            }
+        }
+    }
+}
+
+fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
+    let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f64 = a.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let norm_b: f64 = b.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
+}
+
+#[async_trait]
+impl IntentClassify for FewShotClassifier {
+    async fn classify(&self, prompt: &str) -> ClassificationResult {
+        let preprocessed = Self::preprocess(prompt);
+
+        if let Some((category, confidence)) = self.exact_match(&preprocessed) {
+            let route = self
+                .routing
+                .get(&category)
+                .unwrap_or(&self.fallback_entry);
+            return ClassificationResult {
+                category,
+                model: route.model.clone(),
+                endpoint: route.endpoint.clone(),
+                tier: ClassificationTier::FewShot,
+                provider_type: route.provider_type.clone(),
+                api_key_env: route.api_key_env.clone(),
+            };
+        }
+
+        let features = self.extract_features(&preprocessed, &self.vocabulary);
+        let scores = self.score_categories(&features);
+
+        let threshold = self.effective_threshold();
+        let best = scores
+            .into_iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        match best {
+            Some((category, score)) if score >= threshold => {
+                let route = self
+                    .routing
+                    .get(&category)
+                    .unwrap_or(&self.fallback_entry);
+                ClassificationResult {
+                    category,
+                    model: route.model.clone(),
+                    endpoint: route.endpoint.clone(),
+                    tier: ClassificationTier::FewShot,
+                    provider_type: route.provider_type.clone(),
+                    api_key_env: route.api_key_env.clone(),
+                }
+            }
+            _ => ClassificationResult {
+                category: "unknown".to_string(),
+                model: DEFAULT_MODEL.to_string(),
+                endpoint: String::new(),
+                tier: ClassificationTier::Fallback,
+                provider_type: String::new(),
+                api_key_env: None,
+            },
+        }
+    }
+
+    fn get_routing(&self) -> Option<&HashMap<String, RouteEntry>> {
+        Some(&self.routing)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::intent_classifier::FewShotExample;
+
+    fn make_config() -> FewShotConfig {
+        FewShotConfig {
+            enabled: true,
+            confidence_threshold: 0.4,
+            cold_start_threshold: 0.6,
+            cold_start_feedback_count: 5,
+            feature_dimensions: 1000,
+            retraining_threshold: 5,
+            data_path: "/tmp/test_fewshot_training.yaml".to_string(),
+            max_vocabulary_warn: 5000,
+        }
+    }
+
+    fn make_classifier() -> FewShotClassifier {
+        let config = make_config();
+        let routing = HashMap::new();
+        let fallback = RouteEntry {
+            model: "fallback".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        FewShotClassifier::new(config, routing, fallback)
+    }
+
+    #[tokio::test]
+    async fn known_bootstrap_text_returns_correct_category() {
+        let classifier = make_classifier();
+        let result = classifier
+            .classify("show me the contents of src/main.rs")
+            .await;
+        assert_eq!(result.category, "FILE_READING");
+        assert_eq!(result.tier, ClassificationTier::FewShot);
+    }
+
+    #[tokio::test]
+    async fn unknown_text_returns_fallback() {
+        let classifier = make_classifier();
+        let result = classifier.classify("zxcvbnm qwertyuiop asdfghjkl").await;
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+    }
+
+    #[tokio::test]
+    async fn exact_match_returns_confidence_one() {
+        let classifier = make_classifier();
+        let result = classifier.classify("hello").await;
+        assert_eq!(result.category, "CASUAL");
+        assert_eq!(result.tier, ClassificationTier::FewShot);
+    }
+
+    #[tokio::test]
+    async fn preprocessor_strips_code_blocks() {
+        let input = "```rust\nfn main() {}\n```";
+        let result = FewShotClassifier::preprocess(input);
+        assert!(!result.contains("fn main"));
+        assert!(!result.contains("```"));
+    }
+
+    #[tokio::test]
+    async fn preprocessor_collapses_whitespace() {
+        let input = "hello    world\n\n  test";
+        let result = FewShotClassifier::preprocess(input);
+        assert_eq!(result, "hello world test");
+    }
+
+    #[tokio::test]
+    async fn preprocessor_lowercases() {
+        let input = "HELLO WORLD";
+        let result = FewShotClassifier::preprocess(input);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn cosine_similarity_is_one_for_identical() {
+        let v = vec![1.0, 2.0, 3.0];
+        let sim = cosine_similarity(&v, &v);
+        assert!((sim - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cosine_similarity_is_zero_for_orthogonal() {
+        let a = vec![1.0, 0.0];
+        let b = vec![0.0, 1.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cosine_similarity_is_symmetric() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![4.0, 5.0, 6.0];
+        let sim_ab = cosine_similarity(&a, &b);
+        let sim_ba = cosine_similarity(&b, &a);
+        assert!((sim_ab - sim_ba).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cosine_similarity_zero_for_zero_vector() {
+        let a = vec![0.0, 0.0, 0.0];
+        let b = vec![1.0, 2.0, 3.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 0.0).abs() < 1e-10);
+    }
+
+    #[tokio::test]
+    async fn empty_training_returns_fallback() {
+        let config = make_config();
+        let routing = HashMap::new();
+        let fallback = RouteEntry {
+            model: "fb".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        let classifier = FewShotClassifier::new(config, routing, fallback);
+        let result = classifier.classify("anything").await;
+        assert_eq!(result.tier, ClassificationTier::Fallback);
+    }
+
+    #[tokio::test]
+    async fn cold_start_threshold_enforced_when_no_feedback() {
+        let classifier = make_classifier();
+        assert_eq!(classifier.feedback_count(), 0);
+        assert!((classifier.effective_threshold() - 0.6).abs() < 1e-10);
+    }
+
+    #[tokio::test]
+    async fn add_feedback_increments_training_data() {
+        let classifier = make_classifier();
+        let initial_len = classifier.training_data.blocking_read().len();
+        classifier
+            .add_feedback(
+                "custom text".to_string(),
+                None,
+                "SYNTAX_FIX".to_string(),
+                0.8,
+            )
+            .await;
+        let new_len = classifier.training_data.blocking_read().len();
+        assert_eq!(new_len, initial_len + 1);
+    }
+
+    #[tokio::test]
+    async fn retraining_triggers_after_threshold_feedback() {
+        let classifier = make_classifier();
+        let config_threshold = classifier.config.retraining_threshold;
+        for i in 0..config_threshold {
+            classifier
+                .add_feedback(
+                    format!("feedback text {}", i),
+                    None,
+                    "SYNTAX_FIX".to_string(),
+                    0.8,
+                )
+                .await;
+        }
+        assert!(classifier.vocabulary.len() > 0);
+    }
+}

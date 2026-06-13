@@ -600,9 +600,9 @@ Add training data save/load to YAML, vocabulary size operator warning, and `.git
 
 #### Automated
 
-- [x] 1.1 Project compiles: `cargo build`
-- [x] 1.2 Unit tests pass: `cargo test`
-- [x] 1.3 Config validation accepts new section: `cargo run -- --validate`
+- [x] 1.1 Project compiles: `cargo build` — 87cb72c
+- [x] 1.2 Unit tests pass: `cargo test` — 87cb72c
+- [x] 1.3 Config validation accepts new section: `cargo run -- --validate` — 87cb72c
 
 #### Manual
 
@@ -613,8 +613,8 @@ Add training data save/load to YAML, vocabulary size operator warning, and `.git
 
 #### Automated
 
-- [ ] 2.1 Project compiles: `cargo build`
-- [ ] 2.2 All tests pass: `cargo test`
+- [x] 2.1 Project compiles: `cargo build`
+- [x] 2.2 All tests pass: `cargo test`
 
 #### Manual
 

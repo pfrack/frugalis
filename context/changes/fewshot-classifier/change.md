@@ -5,4 +5,5 @@
 - **status**: implementing
 - **created**: 2026-06-09
 - **updated**: 2026-06-13
+- **status**: implementing
 - **description**: Build a few-shot learning intent classifier inspired by ciresnave/intent-classifier, fitted to cerebrum's existing IntentClassify trait and ClassifierChain architecture.
