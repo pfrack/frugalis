@@ -1,8 +1,8 @@
 use std::sync::Arc;
-use std::time::{SystemTime, Duration};
+use std::time::{Duration, SystemTime};
 
-use async_trait::async_trait;
 use crate::config::DatabaseConfig;
+use async_trait::async_trait;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::PgPool;
@@ -130,7 +130,9 @@ impl PostgresBackend {
 
         let pool = PgPoolOptions::new()
             .max_connections(db_config.max_connections)
-            .acquire_timeout(std::time::Duration::from_secs(db_config.acquire_timeout_secs))
+            .acquire_timeout(std::time::Duration::from_secs(
+                db_config.acquire_timeout_secs,
+            ))
             .idle_timeout(std::time::Duration::from_secs(db_config.idle_timeout_secs))
             .connect_lazy_with(options);
 
@@ -143,7 +145,11 @@ impl PostgresBackend {
                 Ok(_) => break,
                 Err(e) => {
                     if attempt < db_config.connection_retries - 1 {
-                        warn!("DB health check failed (attempt {}): {}. Retrying...", attempt + 1, &e);
+                        warn!(
+                            "DB health check failed (attempt {}): {}. Retrying...",
+                            attempt + 1,
+                            &e
+                        );
                         let backoff = base_delay * (1u32 << attempt);
                         let now_nanos = SystemTime::now()
                             .duration_since(SystemTime::UNIX_EPOCH)
@@ -160,7 +166,10 @@ impl PostgresBackend {
         }
 
         if let Some(e) = last_err {
-            panic!("Database health check failed after {} retries: {}", db_config.connection_retries, e);
+            panic!(
+                "Database health check failed after {} retries: {}",
+                db_config.connection_retries, e
+            );
         }
 
         if let Err(e) = sqlx::migrate!().run(&pool).await {
@@ -226,11 +235,7 @@ impl PersistenceBackend for MemoryBackend {
 
         let offset = offset as usize;
         let limit = limit as usize;
-        let page: Vec<&InferenceRecord> = filtered
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .collect();
+        let page: Vec<&InferenceRecord> = filtered.into_iter().skip(offset).take(limit).collect();
 
         let records: Vec<InferenceLog> = page
             .iter()
@@ -250,7 +255,8 @@ impl PersistenceBackend for MemoryBackend {
         let records = self.records.read().await;
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
 
-        let window: Vec<&InferenceRecord> = records.iter().filter(|r| r.created_at >= cutoff).collect();
+        let window: Vec<&InferenceRecord> =
+            records.iter().filter(|r| r.created_at >= cutoff).collect();
 
         let mut grouped: std::collections::HashMap<Option<String>, Vec<i32>> =
             std::collections::HashMap::new();
@@ -309,9 +315,7 @@ impl PersistenceBackend for MemoryBackend {
         let window: Vec<&InferenceRecord> = records
             .iter()
             .filter(|r| {
-                r.created_at >= cutoff
-                    && r.category.is_some()
-                    && r.upstream_model.is_some()
+                r.created_at >= cutoff && r.category.is_some() && r.upstream_model.is_some()
             })
             .collect();
 
@@ -412,9 +416,18 @@ impl PersistenceBackend for DbBackend {
         filter_model: Option<&str>,
     ) -> Result<(Vec<InferenceLog>, i64), QueryError> {
         match self {
-            DbBackend::Memory(b) => b.fetch_inferences(offset, limit, filter_category, filter_model).await,
-            DbBackend::Sqlite(b) => b.fetch_inferences(offset, limit, filter_category, filter_model).await,
-            DbBackend::Postgres(b) => b.fetch_inferences(offset, limit, filter_category, filter_model).await,
+            DbBackend::Memory(b) => {
+                b.fetch_inferences(offset, limit, filter_category, filter_model)
+                    .await
+            }
+            DbBackend::Sqlite(b) => {
+                b.fetch_inferences(offset, limit, filter_category, filter_model)
+                    .await
+            }
+            DbBackend::Postgres(b) => {
+                b.fetch_inferences(offset, limit, filter_category, filter_model)
+                    .await
+            }
         }
     }
 
@@ -433,9 +446,18 @@ impl PersistenceBackend for DbBackend {
         baseline_model: &str,
     ) -> Result<SavingsEstimate, QueryError> {
         match self {
-            DbBackend::Memory(b) => b.fetch_savings_estimate(hours, model_costs, baseline_model).await,
-            DbBackend::Sqlite(b) => b.fetch_savings_estimate(hours, model_costs, baseline_model).await,
-            DbBackend::Postgres(b) => b.fetch_savings_estimate(hours, model_costs, baseline_model).await,
+            DbBackend::Memory(b) => {
+                b.fetch_savings_estimate(hours, model_costs, baseline_model)
+                    .await
+            }
+            DbBackend::Sqlite(b) => {
+                b.fetch_savings_estimate(hours, model_costs, baseline_model)
+                    .await
+            }
+            DbBackend::Postgres(b) => {
+                b.fetch_savings_estimate(hours, model_costs, baseline_model)
+                    .await
+            }
         }
     }
 }
@@ -1161,7 +1183,10 @@ async fn insert_once(pool: &PgPool, record: &InferenceRecord) -> Result<(), sqlx
     .map(|_| ())
 }
 
-async fn insert_once_sqlite(pool: &SqlitePool, record: &InferenceRecord) -> Result<(), sqlx::Error> {
+async fn insert_once_sqlite(
+    pool: &SqlitePool,
+    record: &InferenceRecord,
+) -> Result<(), sqlx::Error> {
     // Note: `created_at` is omitted and SQLite will use its default CURRENT_TIMESTAMP.
     sqlx::query(
         "INSERT INTO inferences \
@@ -1410,8 +1435,13 @@ mod tests {
     /// Each invocation uses a unique shared-cache URI for isolation.
     async fn test_sqlite_backend() -> PersistenceConfig {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        let uri = format!("sqlite:file:test_{}?mode=memory&cache=shared", uuid::Uuid::new_v4());
-        let backend = SqliteBackend::from_uri(&uri).await.expect("test SQLite backend setup failed");
+        let uri = format!(
+            "sqlite:file:test_{}?mode=memory&cache=shared",
+            uuid::Uuid::new_v4()
+        );
+        let backend = SqliteBackend::from_uri(&uri)
+            .await
+            .expect("test SQLite backend setup failed");
         PersistenceConfig {
             backend: Arc::new(DbBackend::Sqlite(backend)),
             task_semaphore: Arc::new(Semaphore::new(100)),
@@ -1421,7 +1451,8 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_inferences_empty_list() {
         let pc = test_backend();
-        let result = pc.backend
+        let result = pc
+            .backend
             .fetch_inferences(0, 20, Some("NONEXISTENT_CATEGORY_XYZ"), None)
             .await;
         let (records, count) = result.expect("fetch should succeed");
@@ -1443,9 +1474,13 @@ mod tests {
             prompt_char_count: None,
             created_at: chrono::Utc::now(),
         };
-        pc.backend.insert_inference(&record).await.expect("insert should succeed");
+        pc.backend
+            .insert_inference(&record)
+            .await
+            .expect("insert should succeed");
 
-        let (records, count) = pc.backend
+        let (records, count) = pc
+            .backend
             .fetch_inferences(0, 20, Some("TEST_CAT_FETCH"), None)
             .await
             .expect("fetch should succeed");
@@ -1478,10 +1513,17 @@ mod tests {
             prompt_char_count: None,
             created_at: chrono::Utc::now(),
         };
-        pc.backend.insert_inference(&record_a).await.expect("insert alpha");
-        pc.backend.insert_inference(&record_b).await.expect("insert beta");
+        pc.backend
+            .insert_inference(&record_a)
+            .await
+            .expect("insert alpha");
+        pc.backend
+            .insert_inference(&record_b)
+            .await
+            .expect("insert beta");
 
-        let (records, _) = pc.backend
+        let (records, _) = pc
+            .backend
             .fetch_inferences(0, 100, Some("CAT_ALPHA"), None)
             .await
             .expect("fetch should succeed");
@@ -1513,7 +1555,8 @@ mod tests {
             pc.backend.insert_inference(&record).await.expect("insert");
         }
 
-        let (records, total_count) = pc.backend
+        let (records, total_count) = pc
+            .backend
             .fetch_inferences(0, 1, Some("TOTAL_COUNT_TEST"), None)
             .await
             .expect("fetch should succeed");
@@ -1562,9 +1605,13 @@ mod tests {
             prompt_char_count: None,
             created_at: chrono::Utc::now(),
         };
-        pc.backend.insert_inference(&record).await.expect("insert should succeed");
+        pc.backend
+            .insert_inference(&record)
+            .await
+            .expect("insert should succeed");
 
-        let result = pc.backend
+        let result = pc
+            .backend
             .fetch_latency_summary(24)
             .await
             .expect("fetch should succeed");
@@ -1590,43 +1637,53 @@ mod tests {
 
         // Category A: 3 records with durations 100, 200, 300
         for dur in [100, 200, 300] {
-            pc.backend.insert_inference(&InferenceRecord {
-                request_id: uuid::Uuid::new_v4(),
-                status: "ok".to_string(),
-                category: Some(cat_a.clone()),
-                upstream_model: None,
-                duration_ms: Some(dur),
-                prompt_snippet: "cat a".to_string(),
-                prompt_char_count: None,
-                created_at: now,
-            }).await.expect("insert");
+            pc.backend
+                .insert_inference(&InferenceRecord {
+                    request_id: uuid::Uuid::new_v4(),
+                    status: "ok".to_string(),
+                    category: Some(cat_a.clone()),
+                    upstream_model: None,
+                    duration_ms: Some(dur),
+                    prompt_snippet: "cat a".to_string(),
+                    prompt_char_count: None,
+                    created_at: now,
+                })
+                .await
+                .expect("insert");
         }
         // Category B: 2 records with durations 50, 150
         for dur in [50, 150] {
-            pc.backend.insert_inference(&InferenceRecord {
-                request_id: uuid::Uuid::new_v4(),
-                status: "ok".to_string(),
-                category: Some(cat_b.clone()),
-                upstream_model: None,
-                duration_ms: Some(dur),
-                prompt_snippet: "cat b".to_string(),
-                prompt_char_count: None,
-                created_at: now,
-            }).await.expect("insert");
+            pc.backend
+                .insert_inference(&InferenceRecord {
+                    request_id: uuid::Uuid::new_v4(),
+                    status: "ok".to_string(),
+                    category: Some(cat_b.clone()),
+                    upstream_model: None,
+                    duration_ms: Some(dur),
+                    prompt_snippet: "cat b".to_string(),
+                    prompt_char_count: None,
+                    created_at: now,
+                })
+                .await
+                .expect("insert");
         }
         // Category C: 1 record with duration 500
-        pc.backend.insert_inference(&InferenceRecord {
-            request_id: uuid::Uuid::new_v4(),
-            status: "ok".to_string(),
-            category: Some(cat_c.clone()),
-            upstream_model: None,
-            duration_ms: Some(500),
-            prompt_snippet: "cat c".to_string(),
-            prompt_char_count: None,
-            created_at: now,
-        }).await.expect("insert");
+        pc.backend
+            .insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some(cat_c.clone()),
+                upstream_model: None,
+                duration_ms: Some(500),
+                prompt_snippet: "cat c".to_string(),
+                prompt_char_count: None,
+                created_at: now,
+            })
+            .await
+            .expect("insert");
 
-        let result = pc.backend
+        let result = pc
+            .backend
             .fetch_latency_summary(24)
             .await
             .expect("fetch should succeed");
@@ -1674,19 +1731,23 @@ mod tests {
         let now = chrono::Utc::now();
 
         for snippet in ["unclassified 1", "unclassified 2"] {
-            pc.backend.insert_inference(&InferenceRecord {
-                request_id: uuid::Uuid::new_v4(),
-                status: "ok".to_string(),
-                category: None,
-                upstream_model: None,
-                duration_ms: Some(100),
-                prompt_snippet: snippet.to_string(),
-                prompt_char_count: None,
-                created_at: now,
-            }).await.expect("insert");
+            pc.backend
+                .insert_inference(&InferenceRecord {
+                    request_id: uuid::Uuid::new_v4(),
+                    status: "ok".to_string(),
+                    category: None,
+                    upstream_model: None,
+                    duration_ms: Some(100),
+                    prompt_snippet: snippet.to_string(),
+                    prompt_char_count: None,
+                    created_at: now,
+                })
+                .await
+                .expect("insert");
         }
 
-        let result = pc.backend
+        let result = pc
+            .backend
             .fetch_latency_summary(24)
             .await
             .expect("fetch should succeed");
@@ -1707,18 +1768,22 @@ mod tests {
             std::collections::HashMap::new(),
         );
         let model = format!("Z_TST_SAV_EMPTY_{}", uuid::Uuid::new_v4());
-        pc.backend.insert_inference(&InferenceRecord {
-            request_id: uuid::Uuid::new_v4(),
-            status: "ok".to_string(),
-            category: Some("Z_TST_SAV_EMPTY_CAT".to_string()),
-            upstream_model: Some(model.clone()),
-            duration_ms: None,
-            prompt_snippet: "empty test".to_string(),
-            prompt_char_count: Some(100),
-            created_at: chrono::Utc::now(),
-        }).await.expect("insert should succeed");
+        pc.backend
+            .insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some("Z_TST_SAV_EMPTY_CAT".to_string()),
+                upstream_model: Some(model.clone()),
+                duration_ms: None,
+                prompt_snippet: "empty test".to_string(),
+                prompt_char_count: Some(100),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert should succeed");
 
-        let result = pc.backend
+        let result = pc
+            .backend
             .fetch_savings_estimate(24, &mc, "claude-3.5-sonnet")
             .await
             .expect("fetch should succeed");
@@ -1742,28 +1807,35 @@ mod tests {
         let baseline = model_b.clone();
         let now = chrono::Utc::now();
 
-        pc.backend.insert_inference(&InferenceRecord {
-            request_id: uuid::Uuid::new_v4(),
-            status: "ok".to_string(),
-            category: Some("Z_TST_SAV_CAT1".to_string()),
-            upstream_model: Some(model_a),
-            duration_ms: None,
-            prompt_snippet: "cheap prompt".to_string(),
-            prompt_char_count: Some(1000),
-            created_at: now,
-        }).await.expect("insert 1");
-        pc.backend.insert_inference(&InferenceRecord {
-            request_id: uuid::Uuid::new_v4(),
-            status: "ok".to_string(),
-            category: Some("Z_TST_SAV_CAT2".to_string()),
-            upstream_model: Some(model_b.clone()),
-            duration_ms: None,
-            prompt_snippet: "complex prompt with more content".to_string(),
-            prompt_char_count: Some(2000),
-            created_at: now,
-        }).await.expect("insert 2");
+        pc.backend
+            .insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some("Z_TST_SAV_CAT1".to_string()),
+                upstream_model: Some(model_a),
+                duration_ms: None,
+                prompt_snippet: "cheap prompt".to_string(),
+                prompt_char_count: Some(1000),
+                created_at: now,
+            })
+            .await
+            .expect("insert 1");
+        pc.backend
+            .insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some("Z_TST_SAV_CAT2".to_string()),
+                upstream_model: Some(model_b.clone()),
+                duration_ms: None,
+                prompt_snippet: "complex prompt with more content".to_string(),
+                prompt_char_count: Some(2000),
+                created_at: now,
+            })
+            .await
+            .expect("insert 2");
 
-        let result = pc.backend
+        let result = pc
+            .backend
             .fetch_savings_estimate(24, &mc, &baseline)
             .await
             .expect("fetch should succeed");
@@ -1788,18 +1860,22 @@ mod tests {
         );
         let model = format!("Z_TST_SAV_UNK_{}", uuid::Uuid::new_v4());
 
-        pc.backend.insert_inference(&InferenceRecord {
-            request_id: uuid::Uuid::new_v4(),
-            status: "ok".to_string(),
-            category: Some("Z_TST_SAV_UNK_CAT".to_string()),
-            upstream_model: Some(model),
-            duration_ms: None,
-            prompt_snippet: "some prompt".to_string(),
-            prompt_char_count: Some(500),
-            created_at: chrono::Utc::now(),
-        }).await.expect("insert should succeed");
+        pc.backend
+            .insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some("Z_TST_SAV_UNK_CAT".to_string()),
+                upstream_model: Some(model),
+                duration_ms: None,
+                prompt_snippet: "some prompt".to_string(),
+                prompt_char_count: Some(500),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert should succeed");
 
-        let result = pc.backend
+        let result = pc
+            .backend
             .fetch_savings_estimate(24, &mc, "claude-3.5-sonnet")
             .await
             .expect("fetch should succeed");
@@ -1823,18 +1899,22 @@ mod tests {
             std::collections::HashMap::new(),
         );
 
-        pc.backend.insert_inference(&InferenceRecord {
-            request_id: uuid::Uuid::new_v4(),
-            status: "ok".to_string(),
-            category: None,
-            upstream_model: Some("gpt-4o-mini".to_string()),
-            duration_ms: None,
-            prompt_snippet: "uncategorized".to_string(),
-            prompt_char_count: Some(100),
-            created_at: chrono::Utc::now(),
-        }).await.expect("insert should succeed");
+        pc.backend
+            .insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: None,
+                upstream_model: Some("gpt-4o-mini".to_string()),
+                duration_ms: None,
+                prompt_snippet: "uncategorized".to_string(),
+                prompt_char_count: Some(100),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert should succeed");
 
-        let result = pc.backend
+        let result = pc
+            .backend
             .fetch_savings_estimate(24, &mc, "claude-3.5-sonnet")
             .await
             .expect("fetch should succeed — NULL category must not crash the query");
@@ -1852,18 +1932,22 @@ mod tests {
         costs.insert(model.clone(), 0.15);
         let mc = super::super::intent_classifier::ModelCosts::from_costs(costs);
 
-        pc.backend.insert_inference(&InferenceRecord {
-            request_id: uuid::Uuid::new_v4(),
-            status: "ok".to_string(),
-            category: Some("Z_TST_SAV_FB_CAT".to_string()),
-            upstream_model: Some(model.clone()),
-            duration_ms: None,
-            prompt_snippet: "older record with no char count".to_string(),
-            prompt_char_count: None,
-            created_at: chrono::Utc::now(),
-        }).await.expect("insert should succeed");
+        pc.backend
+            .insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some("Z_TST_SAV_FB_CAT".to_string()),
+                upstream_model: Some(model.clone()),
+                duration_ms: None,
+                prompt_snippet: "older record with no char count".to_string(),
+                prompt_char_count: None,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert should succeed");
 
-        let result = pc.backend
+        let result = pc
+            .backend
             .fetch_savings_estimate(24, &mc, &model)
             .await
             .expect("fetch should succeed");
@@ -1885,19 +1969,23 @@ mod tests {
         let cat = format!("Z_TST_LAT_TIME_{}", uuid::Uuid::new_v4());
         let two_hours_ago = chrono::Utc::now() - chrono::Duration::hours(2);
 
-        pc.backend.insert_inference(&InferenceRecord {
-            request_id: uuid::Uuid::new_v4(),
-            status: "ok".to_string(),
-            category: Some(cat.clone()),
-            upstream_model: None,
-            duration_ms: Some(100),
-            prompt_snippet: "old record".to_string(),
-            prompt_char_count: None,
-            created_at: two_hours_ago,
-        }).await.expect("insert should succeed");
+        pc.backend
+            .insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some(cat.clone()),
+                upstream_model: None,
+                duration_ms: Some(100),
+                prompt_snippet: "old record".to_string(),
+                prompt_char_count: None,
+                created_at: two_hours_ago,
+            })
+            .await
+            .expect("insert should succeed");
 
         // Query with hours=1 — should not find the 2-hour-old record.
-        let result = pc.backend
+        let result = pc
+            .backend
             .fetch_latency_summary(1)
             .await
             .expect("fetch should succeed");
@@ -1951,24 +2039,32 @@ mod tests {
         let now = chrono::Utc::now();
         // Insert records with durations 10, 20, 30, 40, 50, 60, 70, 80, 90, 100
         for i in 1..=10 {
-            pc.backend.insert_inference(&InferenceRecord {
-                request_id: uuid::Uuid::new_v4(),
-                status: "ok".to_string(),
-                category: Some("P99_TEST".to_string()),
-                upstream_model: None,
-                duration_ms: Some(i * 10),
-                prompt_snippet: format!("record {}", i),
-                prompt_char_count: None,
-                created_at: now,
-            }).await.expect("insert");
+            pc.backend
+                .insert_inference(&InferenceRecord {
+                    request_id: uuid::Uuid::new_v4(),
+                    status: "ok".to_string(),
+                    category: Some("P99_TEST".to_string()),
+                    upstream_model: None,
+                    duration_ms: Some(i * 10),
+                    prompt_snippet: format!("record {}", i),
+                    prompt_char_count: None,
+                    created_at: now,
+                })
+                .await
+                .expect("insert");
         }
 
-        let result = pc.backend
+        let result = pc
+            .backend
             .fetch_latency_summary(24)
             .await
             .expect("fetch should succeed");
 
-        let row = result.rows.iter().find(|r| r.category == "P99_TEST").expect("P99_TEST row");
+        let row = result
+            .rows
+            .iter()
+            .find(|r| r.category == "P99_TEST")
+            .expect("P99_TEST row");
         assert_eq!(row.request_count, 10);
         assert_eq!(row.avg_duration_ms, Some(55));
         // p99 of [10..100]: idx = ceil(0.99*10)-1 = 9 → 100
@@ -1981,24 +2077,8 @@ mod tests {
         let now = chrono::Utc::now();
         // Insert some records.
         for i in 0..10 {
-            pc.backend.insert_inference(&InferenceRecord {
-                request_id: uuid::Uuid::new_v4(),
-                status: "ok".to_string(),
-                category: Some("CONCUR_TEST".to_string()),
-                upstream_model: None,
-                duration_ms: Some(i),
-                prompt_snippet: format!("record {}", i),
-                prompt_char_count: None,
-                created_at: now,
-            }).await.expect("insert");
-        }
-
-        let mut handles = Vec::new();
-        for _ in 0..5 {
-            let pc = test_backend();
-            // Re-insert records for each concurrent read
-            for i in 0..10 {
-                pc.backend.insert_inference(&InferenceRecord {
+            pc.backend
+                .insert_inference(&InferenceRecord {
                     request_id: uuid::Uuid::new_v4(),
                     status: "ok".to_string(),
                     category: Some("CONCUR_TEST".to_string()),
@@ -2007,10 +2087,34 @@ mod tests {
                     prompt_snippet: format!("record {}", i),
                     prompt_char_count: None,
                     created_at: now,
-                }).await.expect("insert");
+                })
+                .await
+                .expect("insert");
+        }
+
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let pc = test_backend();
+            // Re-insert records for each concurrent read
+            for i in 0..10 {
+                pc.backend
+                    .insert_inference(&InferenceRecord {
+                        request_id: uuid::Uuid::new_v4(),
+                        status: "ok".to_string(),
+                        category: Some("CONCUR_TEST".to_string()),
+                        upstream_model: None,
+                        duration_ms: Some(i),
+                        prompt_snippet: format!("record {}", i),
+                        prompt_char_count: None,
+                        created_at: now,
+                    })
+                    .await
+                    .expect("insert");
             }
             handles.push(tokio::spawn(async move {
-                pc.backend.fetch_inferences(0, 100, Some("CONCUR_TEST"), None).await
+                pc.backend
+                    .fetch_inferences(0, 100, Some("CONCUR_TEST"), None)
+                    .await
             }));
         }
 
@@ -2029,45 +2133,65 @@ mod tests {
         let old = now - chrono::Duration::hours(3);
 
         // Insert a recent record.
-        pc.backend.insert_inference(&InferenceRecord {
-            request_id: uuid::Uuid::new_v4(),
-            status: "ok".to_string(),
-            category: Some("RECENT".to_string()),
-            upstream_model: None,
-            duration_ms: Some(50),
-            prompt_snippet: "recent".to_string(),
-            prompt_char_count: None,
-            created_at: now,
-        }).await.expect("insert");
+        pc.backend
+            .insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some("RECENT".to_string()),
+                upstream_model: None,
+                duration_ms: Some(50),
+                prompt_snippet: "recent".to_string(),
+                prompt_char_count: None,
+                created_at: now,
+            })
+            .await
+            .expect("insert");
         // Insert an old record.
-        pc.backend.insert_inference(&InferenceRecord {
-            request_id: uuid::Uuid::new_v4(),
-            status: "ok".to_string(),
-            category: Some("OLD".to_string()),
-            upstream_model: None,
-            duration_ms: Some(100),
-            prompt_snippet: "old".to_string(),
-            prompt_char_count: None,
-            created_at: old,
-        }).await.expect("insert");
+        pc.backend
+            .insert_inference(&InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some("OLD".to_string()),
+                upstream_model: None,
+                duration_ms: Some(100),
+                prompt_snippet: "old".to_string(),
+                prompt_char_count: None,
+                created_at: old,
+            })
+            .await
+            .expect("insert");
 
         // 1-hour window should only find the recent record.
-        let result = pc.backend
+        let result = pc
+            .backend
             .fetch_latency_summary(1)
             .await
             .expect("fetch should succeed");
 
-        assert!(result.rows.iter().any(|r| r.category == "RECENT"), "recent should appear");
-        assert!(!result.rows.iter().any(|r| r.category == "OLD"), "old should be excluded");
+        assert!(
+            result.rows.iter().any(|r| r.category == "RECENT"),
+            "recent should appear"
+        );
+        assert!(
+            !result.rows.iter().any(|r| r.category == "OLD"),
+            "old should be excluded"
+        );
 
         // 4-hour window should find both.
-        let result4 = pc.backend
+        let result4 = pc
+            .backend
             .fetch_latency_summary(4)
             .await
             .expect("fetch should succeed");
 
-        assert!(result4.rows.iter().any(|r| r.category == "RECENT"), "recent should appear in 4h");
-        assert!(result4.rows.iter().any(|r| r.category == "OLD"), "old should appear in 4h");
+        assert!(
+            result4.rows.iter().any(|r| r.category == "RECENT"),
+            "recent should appear in 4h"
+        );
+        assert!(
+            result4.rows.iter().any(|r| r.category == "OLD"),
+            "old should appear in 4h"
+        );
     }
 
     // ── SQLite backend specific tests ────────────────────────────────────────
@@ -2076,14 +2200,13 @@ mod tests {
     async fn test_sqlite_schema_init() {
         let pc = test_sqlite_backend().await;
         // Verify the table exists by running a query.
-        let row: Result<sqlx::sqlite::SqliteRow, sqlx::Error> = sqlx::query(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='inferences'"
-        )
-        .fetch_one(match &*pc.backend {
-            DbBackend::Sqlite(b) => &b.pool,
-            _ => panic!("expected SQLite backend"),
-        })
-        .await;
+        let row: Result<sqlx::sqlite::SqliteRow, sqlx::Error> =
+            sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='inferences'")
+                .fetch_one(match &*pc.backend {
+                    DbBackend::Sqlite(b) => &b.pool,
+                    _ => panic!("expected SQLite backend"),
+                })
+                .await;
         assert!(row.is_ok(), "inferences table should exist");
 
         let idx: Result<sqlx::sqlite::SqliteRow, sqlx::Error> = sqlx::query(
@@ -2111,9 +2234,13 @@ mod tests {
             prompt_char_count: Some(100),
             created_at: chrono::Utc::now(),
         };
-        pc.backend.insert_inference(&record).await.expect("insert should succeed");
+        pc.backend
+            .insert_inference(&record)
+            .await
+            .expect("insert should succeed");
 
-        let (records, count) = pc.backend
+        let (records, count) = pc
+            .backend
             .fetch_inferences(0, 10, Some("SQLITE_TEST"), None)
             .await
             .expect("fetch should succeed");
@@ -2129,8 +2256,12 @@ mod tests {
         let id2 = uuid::Uuid::new_v4();
         let uri1 = format!("sqlite:file:test_{id1}?mode=memory&cache=shared");
         let uri2 = format!("sqlite:file:test_{id2}?mode=memory&cache=shared");
-        let backend1 = SqliteBackend::from_uri(&uri1).await.expect("test backend1 setup failed");
-        let backend2 = SqliteBackend::from_uri(&uri2).await.expect("test backend2 setup failed");
+        let backend1 = SqliteBackend::from_uri(&uri1)
+            .await
+            .expect("test backend1 setup failed");
+        let backend2 = SqliteBackend::from_uri(&uri2)
+            .await
+            .expect("test backend2 setup failed");
         let pc1 = PersistenceConfig {
             backend: Arc::new(DbBackend::Sqlite(backend1)),
             task_semaphore: Arc::new(Semaphore::new(100)),
@@ -2153,7 +2284,8 @@ mod tests {
         pc1.backend.insert_inference(&record).await.expect("insert");
 
         // pc2 should have no records.
-        let (records, count) = pc2.backend
+        let (records, count) = pc2
+            .backend
             .fetch_inferences(0, 10, Some("ISO_TEST"), None)
             .await
             .expect("fetch should succeed");
@@ -2177,15 +2309,12 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
 
-        let handle = log_inference(
-            pc.backend.clone(),
-            pc.task_semaphore.clone(),
-            record,
-        );
+        let handle = log_inference(pc.backend.clone(), pc.task_semaphore.clone(), record);
         handle.await.expect("logging task should complete");
 
         // Read back.
-        let (records, _) = pc.backend
+        let (records, _) = pc
+            .backend
             .fetch_inferences(0, 10, Some("LOG_TEST"), None)
             .await
             .expect("fetch should succeed");
@@ -2230,7 +2359,9 @@ mod tests {
             idle_timeout_secs: 1800,
             log_concurrency_limit: 7,
         };
-        let pg_backend = PostgresBackend::from_env(&db_config).await.expect("PostgresBackend should succeed");
+        let pg_backend = PostgresBackend::from_env(&db_config)
+            .await
+            .expect("PostgresBackend should succeed");
         let config = PersistenceConfig {
             backend: Arc::new(DbBackend::Postgres(pg_backend)),
             task_semaphore: Arc::new(Semaphore::new(7)),
