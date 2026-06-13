@@ -16,8 +16,11 @@ use axum::{
 use tokio::sync::RwLock;
 use tokio_stream::{Stream, StreamExt};
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
-use tracing::{debug, info, warn};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing::{debug, info, Subscriber, warn};
+use tracing_subscriber::{fmt, layer::Layer, prelude::*, Registry, EnvFilter};
+
+#[cfg(feature = "otel")]
+mod telemetry;
 
 mod auth;
 mod config;
@@ -48,6 +51,8 @@ pub struct AppState {
     dashboard_config: config::DashboardConfig,
     auth_providers: Arc<Vec<config::AuthProviderConfig>>,
     allowed_origins: Arc<RwLock<Vec<String>>>,
+    #[cfg(feature = "otel")]
+    pub metrics: Option<telemetry::Metrics>,
 }
 
 #[tokio::main]
@@ -111,16 +116,46 @@ async fn main() {
 
     let server_config = config::load_server_config_from_value(&config_root);
 
+    // Initialize OpenTelemetry providers before tracing (layers reference the providers)
+    #[cfg(feature = "otel")]
+    let otel: Option<(telemetry::OtelGuard, telemetry::Metrics)> = telemetry::init("cerebrum");
+
     // Initialize tracing using server_config with RUST_LOG override
     let log_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&server_config.log_level));
 
-    let fmt_layer = match server_config.log_format.as_str() {
-        "json" => fmt::layer().json().with_filter(log_filter).boxed(),
-        _ => fmt::layer().compact().with_filter(log_filter).boxed(),
+    let make_fmt_layer = |filter: EnvFilter| -> Box<dyn Layer<Registry> + Send + Sync> {
+        match server_config.log_format.as_str() {
+            "json" => fmt::layer().json().with_filter(filter).boxed(),
+            _ => fmt::layer().compact().with_filter(filter).boxed(),
+        }
     };
 
-    tracing_subscriber::registry().with(fmt_layer).init();
+    // Type-erase the subscriber so #[cfg(feature = "otel")] can produce differing layer stacks.
+    let subscriber: Box<dyn Subscriber + Send + Sync> = {
+        #[cfg(feature = "otel")]
+        match otel.as_ref() {
+            Some((guard, _)) => Box::new(
+                tracing_subscriber::registry()
+                    .with(make_fmt_layer(log_filter))
+                    .with(guard.trace_layer("cerebrum"))
+                    .with(guard.log_layer()),
+            ),
+            None => Box::new(
+                tracing_subscriber::registry()
+                    .with(make_fmt_layer(log_filter)),
+            ),
+        }
+        #[cfg(not(feature = "otel"))]
+        Box::new(
+            tracing_subscriber::registry()
+                .with(make_fmt_layer(log_filter)),
+        )
+    };
+
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("global default subscriber should be set");
+
 
     // Ensure any panic is logged, not silent.
     panic::set_hook(Box::new(|info| {
@@ -373,6 +408,8 @@ let patterns_dir = config_root
         dashboard_config: config::load_dashboard_config_from_value(&config_root),
         auth_providers,
         allowed_origins,
+        #[cfg(feature = "otel")]
+        metrics: otel.as_ref().map(|(_, m)| m.clone()),
     });
 
     let port = server_config.port;
@@ -386,8 +423,29 @@ let patterns_dir = config_root
         .expect("Failed to bind TCP listener");
 
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("Axum server exited unexpectedly");
+
+    #[cfg(feature = "otel")]
+    if let Some((guard, _)) = otel {
+        guard.shutdown();
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+
+    tokio::select! {
+        _ = ctrl_c => {
+            info!("Shutdown signal received (SIGINT), flushing telemetry");
+        }
+        _ = term.recv() => {
+            info!("Shutdown signal received (SIGTERM), flushing telemetry");
+        }
+    }
 }
 
 async fn health() -> (StatusCode, &'static str) {
@@ -441,6 +499,11 @@ async fn classify_and_log(
     state: &AppState,
     log_status: Option<&str>,
 ) -> impl IntoResponse {
+    #[cfg(feature = "otel")]
+    if let Some(ref metrics) = state.metrics {
+        metrics.requests_total.add(1, &[]);
+    }
+
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -460,6 +523,11 @@ async fn classify_and_log(
         None => intent_classifier::ClassificationResult::fallback(),
     };
 
+    #[cfg(feature = "otel")]
+    if let Some(ref metrics) = state.metrics {
+        metrics.classification_total.add(1, &[]);
+    }
+
     let response_body = serde_json::json!({
         "status": "classified",
         "category": classification.category,
@@ -469,6 +537,11 @@ async fn classify_and_log(
     .to_string();
     if let Some(log_status) = log_status {
         log_classification(state, &classification, body_str, start, log_status);
+    }
+
+    #[cfg(feature = "otel")]
+    if let Some(ref metrics) = state.metrics {
+        metrics.request_duration_seconds.record(start.elapsed().as_secs_f64(), &[]);
     }
 
     json_response(StatusCode::OK, response_body)
@@ -721,6 +794,11 @@ async fn completion_handler(
 ) -> Response {
     let start = std::time::Instant::now();
 
+    #[cfg(feature = "otel")]
+    if let Some(ref metrics) = state.metrics {
+        metrics.requests_total.add(1, &[]);
+    }
+
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -786,6 +864,11 @@ async fn completion_handler(
         }
     };
 
+    #[cfg(feature = "otel")]
+    if let Some(ref metrics) = state.metrics {
+        metrics.classification_total.add(1, &[]);
+    }
+
     let client = match &state.http_client {
         Some(c) => c,
         None => {
@@ -829,9 +912,15 @@ async fn completion_handler(
             Ok(r) => r,
         };
 
+    #[cfg_attr(not(feature = "otel"), allow(unused_variables))]
+    let upstream_start = std::time::Instant::now();
     let upstream_response = match upstream_req.send().await {
         Ok(resp) => resp,
         Err(e) => {
+            #[cfg(feature = "otel")]
+            if let Some(ref metrics) = state.metrics {
+                metrics.upstream_duration_seconds.record(upstream_start.elapsed().as_secs_f64(), &[]);
+            }
             log_classification(&state, &classification, &body_str, start, "upstream_error");
             return json_response(
                 StatusCode::BAD_GATEWAY,
@@ -839,6 +928,11 @@ async fn completion_handler(
             );
         }
     };
+
+    #[cfg(feature = "otel")]
+    if let Some(ref metrics) = state.metrics {
+        metrics.upstream_duration_seconds.record(upstream_start.elapsed().as_secs_f64(), &[]);
+    }
 
     if client_wants_stream {
         if !upstream_response.status().is_success() {
@@ -848,6 +942,12 @@ async fn completion_handler(
         }
 
         let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
+
+        #[cfg(feature = "otel")]
+        if let Some(ref metrics) = state.metrics {
+            metrics.request_duration_seconds.record(start.elapsed().as_secs_f64(), &[]);
+        }
+
         return handle_streaming_response(
             state,
             classification,
@@ -866,6 +966,12 @@ async fn completion_handler(
         "upstream_error"
     };
     log_classification(&state, &classification, &body_str, start, log_status);
+
+    #[cfg(feature = "otel")]
+    if let Some(ref metrics) = state.metrics {
+        metrics.request_duration_seconds.record(start.elapsed().as_secs_f64(), &[]);
+    }
+
     json_response(status, body)
 }
 
@@ -1099,6 +1205,8 @@ mod tests {
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
+            #[cfg(feature = "otel")]
+            metrics: None,
         })
     }
 
@@ -1126,6 +1234,8 @@ mod tests {
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
+            #[cfg(feature = "otel")]
+            metrics: None,
         });
         build_app(auth_config, app_state)
     }
@@ -2176,6 +2286,8 @@ mod tests {
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
+            #[cfg(feature = "otel")]
+            metrics: None,
         });
         let app = build_app(auth_config, app_state);
         (app, server)
@@ -2999,6 +3111,8 @@ mod slow_tests {
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
+            #[cfg(feature = "otel")]
+            metrics: None,
         });
         let app = build_app(auth_config, app_state);
 
