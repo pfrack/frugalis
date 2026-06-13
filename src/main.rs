@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::panic;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -52,48 +53,21 @@ async fn main() {
     // Parse config before tracing init to get server settings
     let config_path_option = std::env::var("CONFIG_PATH").ok();
     const DEFAULT_CONFIG_TOML: &str = include_str!("../config.toml");
-    let mut config_root = match toml::from_str::<toml::Value>(DEFAULT_CONFIG_TOML) {
+    let mut config_root: config::ConfigRoot = match toml::from_str(DEFAULT_CONFIG_TOML) {
         Ok(root) => root,
         Err(e) => {
             eprintln!("Embedded config.toml is invalid: {e}; using hardcoded defaults");
-            toml::Value::Table(Default::default())
+            config::ConfigRoot::default()
         }
     };
 
     if let Some(config_path) = config_path_option {
-        match std::fs::read_to_string(&config_path) {
-            Ok(content) => {
-                match toml::from_str::<toml::Value>(&content) {
-                    Ok(overlay) => {
-                        let override_keys: std::collections::HashSet<&str> = overlay
-                            .as_table()
-                            .map(|t| {
-                                t.keys()
-                                    .filter(|k| {
-                                        k.chars().all(|c| c.is_uppercase() || c == '_')
-                                            || matches!(
-                                                k.as_str(),
-                                                "classifiers"
-                                                    | "regex_classifier"
-                                                    | "llm_classifier"
-                                                    | "categories"
-                                                    | "auth_provider"
-                                                    | "model_costs"
-                                            )
-                                    })
-                                    .map(|k| k.as_str())
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        config::merge_toml_values(&mut config_root, &overlay, &override_keys);
-                    }
-                    Err(e) => {
-                        eprintln!("failed to parse config file at {}: {}; using embedded defaults", config_path, e);
-                    }
-                }
+        match config::load_config_from_path(&config_path) {
+            Ok(overlay) => {
+                config::merge_configs(&mut config_root, overlay);
             }
             Err(e) => {
-                eprintln!("failed to read config file at {}: {}; using embedded defaults", config_path, e);
+                eprintln!("failed to parse config file at {}: {}; using embedded defaults", config_path, e);
             }
         }
     }
@@ -126,6 +100,8 @@ async fn main() {
     // Load global classifiers config
     let classifiers_config = config::load_classifiers_config_from_value(&config_root);
 
+    let negative_patterns = config::load_negative_patterns_from_value(&config_root);
+
     let http_config = config::load_http_config_from_value(&config_root);
     let max_upstream_body_bytes = http_config.max_upstream_body_bytes;
     let keepalive_interval_secs = http_config.keepalive_interval_secs;
@@ -136,18 +112,35 @@ async fn main() {
         .build()
         .expect("reqwest client should build");
 
-    let classify_db_log = config_root
-        .get("classify_db_log")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let classify_db_log = config_root.classify_db_log.unwrap_or(false);
     let auth_providers = Arc::new(config::load_auth_providers_from_value(&config_root));
-     let (classifier, routing, model_costs, baseline_model) = {
-             let categories_res = config::load_categories_from_value(&config_root);
-             let categories_ok = categories_res.is_ok();
-             let mut categories = match categories_res {
-                 Ok(c) => c,
-                 Err(_) => intent_classifier::hardcoded_categories(),
-             };
+      let (classifier, routing, model_costs, baseline_model) = {
+               let categories_res = config::load_categories_from_value(&config_root);
+               let categories_ok = categories_res.is_ok();
+               let mut categories = match categories_res {
+                   Ok(c) => c,
+                   Err(_) => vec![],
+               };
+
+              // Resolve external pattern files for each category
+              let patterns_dir = config_root
+                  .patterns_dir
+                  .as_deref()
+                  .map(PathBuf::from)
+                  .unwrap_or_else(|| PathBuf::from("./patterns"));
+              for cat in &mut categories {
+                  if let Some(ref pf) = cat.patterns_file.take() {
+                      match config::load_patterns_from_file(pf, &patterns_dir) {
+                          Ok(entries) => {
+                              cat.patterns = entries;
+                          }
+                          Err(e) => {
+                              warn!("Failed to load pattern file '{}': {}; using empty patterns for category '{}'", pf, e, cat.name);
+                              cat.patterns = vec![];
+                          }
+                      }
+                  }
+              }
 
              let (mut routing_map, mut fallback_entry) = match config::routing_from_value(&config_root) {
                  Ok((map, fallback)) => (map, fallback),
@@ -166,21 +159,19 @@ async fn main() {
                          missing.push(cat.name.clone());
                      }
                  }
-                 if !missing.is_empty() {
-                     warn!("Categories {:?} missing routing entries; falling back to hardcoded categories and routing", missing);
-                     categories = intent_classifier::hardcoded_categories();
-                     let (new_map, new_fallback) = config::hardcoded_routing(&categories);
-                     routing_map = new_map;
-                     fallback_entry = new_fallback;
-                 }
-             }
+                  if !missing.is_empty() {
+                      warn!("Categories {:?} missing routing entries; falling back to empty categories and hardcoded routing", missing);
+                      categories = vec![];
+                      let (new_map, new_fallback) = config::hardcoded_routing(&categories);
+                      routing_map = new_map;
+                      fallback_entry = new_fallback;
+                  }
+              }
 
-             let model_costs = config::build_model_costs(&config_root, &routing_map);
-             let baseline_model = config_root
-                 .get("baseline_model")
-                 .and_then(|v| v.as_str())
-                 .unwrap_or(intent_classifier::DEFAULT_MODEL_COMPLEX)
-                 .to_string();
+              let model_costs = config::build_model_costs(&config_root, &routing_map);
+              let baseline_model = config_root.baseline_model
+                  .clone()
+                  .unwrap_or_else(|| intent_classifier::DEFAULT_MODEL_COMPLEX.to_string());
              if !classifiers_config.enabled {
                  info!("All classifiers disabled via config");
                  (None, HashMap::new(), model_costs, baseline_model)
@@ -191,13 +182,14 @@ async fn main() {
                  for name in &classifiers_config.order {
                      match name.as_str() {
                          "regex" => {
-                             if regex_config.enabled {
-                                 match intent_classifier::RegexClassifier::from_env(
-                                     routing_map.clone(),
-                                     fallback_entry.clone(),
-                                     intent_classifier::SHORT_PROMPT_LEN,
-                                     categories.clone(),
-                                 ) {
+                              if regex_config.enabled {
+                                  match intent_classifier::RegexClassifier::from_env(
+                                      routing_map.clone(),
+                                      fallback_entry.clone(),
+                                      regex_config.short_prompt_len,
+                                      categories.clone(),
+                                      &negative_patterns,
+                                  ) {
                                      Ok(c) => {
                                          info!("Regex classifier initialized");
                                          backends.push(Arc::new(c));
@@ -282,12 +274,23 @@ async fn main() {
                     })
                 }
                 "sqlite" => {
-                    let backend = persistence::SqliteBackend::from_path(&persistence_settings.sqlite_path).await;
-                    info!("Persistence backend: sqlite (path={})", persistence_settings.sqlite_path);
-                    Some(persistence::PersistenceConfig {
-                        backend: Arc::new(persistence::DbBackend::Sqlite(backend)),
-                        task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
-                    })
+                    match persistence::SqliteBackend::from_path(&persistence_settings.sqlite_path).await {
+                        Ok(backend) => {
+                            info!("Persistence backend: sqlite (path={})", persistence_settings.sqlite_path);
+                            Some(persistence::PersistenceConfig {
+                                backend: Arc::new(persistence::DbBackend::Sqlite(backend)),
+                                task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
+                            })
+                        }
+                        Err(e) => {
+                            warn!("SQLite backend failed ({}); falling back to memory", e);
+                            let backend = persistence::MemoryBackend::new();
+                            Some(persistence::PersistenceConfig {
+                                backend: Arc::new(persistence::DbBackend::Memory(backend)),
+                                task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
+                            })
+                        }
+                    }
                 }
                 _ => {
                     // Default: memory.
@@ -846,7 +849,7 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
      let allowed_origin_headers: Vec<HeaderValue> = app_state
          .allowed_origins
          .try_read()
-         .unwrap()
+         .expect("allowed_origins RwLock written at init; poisoning impossible")
          .iter()
          .filter_map(|s| header::HeaderValue::from_str(s).ok())
          .collect();
@@ -870,6 +873,73 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
         .layer(TraceLayer::new_for_http())
         .layer(RequestBodyLimitLayer::new(app_state.request_body_limit_bytes))
         .with_state(app_state)
+}
+
+#[cfg(test)]
+fn test_categories() -> Vec<intent_classifier::CategoryConfig> {
+    vec![
+        intent_classifier::CategoryConfig {
+            name: "FILE_READING".to_string(),
+            description: String::new(),
+            threshold: 3,
+            priority: 1,
+            patterns: vec![
+                intent_classifier::PatternEntry {
+                    regex: r"(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b".to_string(),
+                    weight: 3,
+                },
+            ],
+            patterns_file: None,
+            dual_threshold: None,
+        },
+        intent_classifier::CategoryConfig {
+            name: "SYNTAX_FIX".to_string(),
+            description: String::new(),
+            threshold: 3,
+            priority: 2,
+            patterns: vec![
+                intent_classifier::PatternEntry {
+                    regex: r"(?i)\b(?:fix|correct|repair|patch)\s+(?:this|the|my|a)\s+(?:bug|error|issue|typo|problem|mistake|warning)".to_string(),
+                    weight: 3,
+                },
+            ],
+            patterns_file: None,
+            dual_threshold: None,
+        },
+        intent_classifier::CategoryConfig {
+            name: "COMPLEX_REASONING".to_string(),
+            description: String::new(),
+            threshold: 3,
+            priority: 3,
+            patterns: vec![
+                intent_classifier::PatternEntry {
+                    regex: r"(?i)\b(?:architect|design\s+pattern|system\s+design|trade.?off|refactor|restructure|rearchitect)".to_string(),
+                    weight: 3,
+                },
+            ],
+            patterns_file: None,
+            dual_threshold: None,
+        },
+        intent_classifier::CategoryConfig {
+            name: "CASUAL".to_string(),
+            description: String::new(),
+            threshold: 1,
+            priority: 4,
+            patterns: vec![
+                intent_classifier::PatternEntry {
+                    regex: r"(?i)^\s*(?:hi|hey|hello|greetings|good\s+morning|good\s+afternoon|good\s+evening|howdy)(?:\s+there)?[\s!.,]*$".to_string(),
+                    weight: 3,
+                },
+            ],
+            patterns_file: None,
+            dual_threshold: None,
+        },
+    ]
+}
+
+#[cfg(test)]
+fn test_negative_patterns() -> Vec<intent_classifier::NegativePatternConfig> {
+    vec![]
 }
 
 #[cfg(test)]
@@ -957,7 +1027,7 @@ mod tests {
     fn test_app_with_classifier() -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
-        let cats = intent_classifier::hardcoded_categories();
+        let cats = test_categories();
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
             "user",
@@ -992,7 +1062,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
         let app_state = make_test_app_state(
             regex_classifier,
             None,
@@ -1120,7 +1190,7 @@ mod tests {
     ) -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
-        let cats = intent_classifier::hardcoded_categories();
+        let cats = test_categories();
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
             "user",
@@ -1155,7 +1225,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
         let app_state = make_test_app_state(
             regex_classifier,
             None,
@@ -1744,7 +1814,7 @@ mod tests {
     pub(crate) fn test_app_with_http_client(env_var_name: &str, max_upstream_body_bytes: usize) -> (Router, httpmock::MockServer) {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
-        let cats = intent_classifier::hardcoded_categories();
+        let cats = test_categories();
         let server = httpmock::MockServer::start();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
@@ -1785,7 +1855,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
@@ -1805,7 +1875,7 @@ mod tests {
     ) -> (Router, httpmock::MockServer) {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
-        let cats = intent_classifier::hardcoded_categories();
+        let cats = test_categories();
         let server = httpmock::MockServer::start();
         let client = http_client.unwrap_or_else(|| {
             reqwest::Client::builder()
@@ -1848,7 +1918,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
         let classifier_chain =
             intent_classifier::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
         let classifier_arc = Some(Arc::new(classifier_chain));
@@ -1888,7 +1958,7 @@ mod tests {
     fn test_app_with_dead_endpoint(env_var_name: &str) -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
-        let cats = intent_classifier::hardcoded_categories();
+        let cats = test_categories();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(1))
             .build()
@@ -1927,7 +1997,7 @@ mod tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
@@ -2647,7 +2717,7 @@ mod slow_tests {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap();
-        let cats = intent_classifier::hardcoded_categories();
+        let cats = test_categories();
         let mut routing = std::collections::HashMap::new();
         routing.insert(
             cats[1].name.clone(),
@@ -2667,7 +2737,7 @@ mod slow_tests {
             api_key_env: None,
         };
         let regex_classifier =
-            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats);
+            intent_classifier::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
         let model_costs = intent_classifier::ModelCosts::empty();
         let baseline_model = String::new();
         let classifier_chain =

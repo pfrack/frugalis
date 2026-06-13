@@ -4,7 +4,7 @@ project: cerebrum
 version: 1
 status: draft
 created: 2026-05-26
-updated: 2026-06-10
+updated: 2026-06-11
 prd_version: 1
 main_goal: speed
 top_blocker: time
@@ -53,7 +53,8 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-10 | post-review-cleanup | (tech debt + hardening + reliability) Consolidates review-cleanup, review-hardening, and prod-hardening-reliability into a single 12-phase plan: SSE log timing, handler decomposition, cleanup, test safety, embedded migrations, LLM key refresh, auth hardening, streaming/JSON fixes, dead code, graceful shutdown, configurability, and observability | S-09a | — | planned |
 | S-11 | opentelemetry-integration | export application traces, metrics, and logs via OTLP to an observability backend (Grafana Cloud); leverages existing `tracing` crate with zero business-logic changes for traces | S-10 | FR-005 | proposed |
 | S-12 | in-memory-db-fallback | persistence always available: 3-tier backend config (`memory` / `sqlite` / `postgres`) via `DB_BACKEND` env; enables zero-dep dev startup and real persistence in tests | S-13 | FR-005, NFR (testing) | proposed |
-| S-13 | move-all-config-to-file | deploy with zero hardcoded config — everything is in `config.toml`; env vars reduced to API_KEYS + auth creds + DATABASE_URL only | S-09a, S-12 | FR-002, FR-003 | preparing |
+| S-13 | move-all-config-to-file | Config: eliminate all hardcoded values — 25 hardcoded Rust values + 19 env var reads moved to config.toml; env vars reduced to API_KEYS + auth creds + DATABASE_URL only; categories and regex patterns fully configurable | S-09a, **S-14** | FR-002, FR-003 | done |
+| S-14 | config-format-upgrade | Config: upgrade format to support YAML + external pattern files; add `--validate` and `--migrate-config` CLI tools | **S-13** | FR-002, FR-003 | proposed |
 
 ## Streams
 
@@ -66,7 +67,7 @@ Navigation aid — groups items that share a Prerequisites chain. Canonical orde
 | C | Metrics | — | All metrics features (S-04) integrated into dashboard stream (B). |
 | D | Critical Logging | `F-04` → `S-06` | Ensures all critical paths have observability logs and a dedicated UI page. |
 | E | Observability | `S-10` → `S-11` | Production hardening followed by OpenTelemetry integration for distributed tracing, metrics export, and log correlation. |
-| F | Config | `S-09a` → `S-13` | Config boundary formalization (S-09a) → unified TOML config for ALL settings: server, HTTP, CORS, logging, routing, categories, patterns, weights, model costs, persistence, classifiers, dashboard (S-13). |
+| F | Config | `S-09a` → `S-14` → `S-13` | Config boundary formalization (S-09a) → serde refactor + multi-format upgrade (S-14) → unified TOML config for ALL settings (S-13). |
 
 ## Baseline
 
@@ -386,12 +387,24 @@ Foundations below assume these are present and do NOT re-scaffold them.
   - **Infrastructure**: `"0.0.0.0"` → `[server].bind_host`, `take(10_000)`/`take(200)`/`>1000` → `[persistence]`/`[http]` fields
 - **Change ID:** `move-all-config-to-file`
 - **PRD refs:** FR-002 (intent classification), FR-003 (routing)
-- **Prerequisites:** S-09a (classifier-config-boundary merged), S-12 (persistence backend config) — both implemented
+- **Prerequisites:** S-09a (classifier-config-boundary merged), S-14 (config-format-upgrade) — both implemented
 - **Parallel with:** —
 - **Blockers:** —
 - **Unknowns:** —
 - **Risk:** Medium — touches every module. Classification logic refactoring (`build_all_patterns`, `classify_internal`) is the riskiest change but existing patterns become the shipped default config, preserving behavior. Extensive test coverage already exists.
-- **Status:** preparing (research complete)
+- **Status:** done (research complete)
+
+### S-14: Config Format Upgrade — Multi-Format + External Patterns
+
+- **Outcome:** Upgrade Cerebrum's configuration system to support both YAML and TOML formats (via serde derives) and externalize regex patterns into pattern files. Users can choose configuration format (YAML favored by DevOps, TOML for Rust-native). Regex patterns live in separate `*.patterns` files with `weight | regex` format, eliminating escaping issues. Fully backward compatible with existing `config.toml`. Adds CLI tools: `--validate` checks config and patterns; `--migrate-config` converts old configs to YAML + pattern files.
+- **Change ID:** `config-format-upgrade`
+- **PRD refs:** FR-002, FR-003 (config ergonomics)
+- **Prerequisites:** S-13 (move-all-config-to-file) — unified config system in place
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** —
+- **Risk:** Medium — serde refactor must preserve exact semantics of manual TOML parsing; YAML edge cases need testing; pattern file resolution adds I/O at startup. But approach is incremental (Phase 1 serde refactor keeps existing loader signatures) and all changes are covered by tests.
+- **Status:** proposed (research complete: `context/changes/config-format-upgrade/research-config-format.md`)
 
 ### S-10: Post-Review Cleanup, Hardening & Production Reliability
 
@@ -433,6 +446,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 | S-11 | opentelemetry-integration | Observability: OTLP export of traces, metrics, and logs to Grafana Cloud (feature-gated) | S-10 | FR-005 | proposed |
 | S-12 | in-memory-db-fallback | Persistence: 3-tier backend config (memory/sqlite/postgres); `[persistence]` section in unified TOML | S-13 | FR-005, NFR | proposed |
 | S-13 | move-all-config-to-file | Config: eliminate all hardcoded values — 25 hardcoded Rust values + 19 env var reads moved to config.toml; env vars reduced to API_KEYS + auth creds + DATABASE_URL only; categories and regex patterns fully configurable | yes | Research complete: `context/changes/move-all-config-to-file/research.md`. Prerequisites: S-09a, S-12 already implemented. |
+| S-14 | config-format-upgrade | Config: upgrade format to support YAML + external pattern files; add `--validate` and `--migrate-config` CLI tools | yes | Research complete: `context/changes/config-format-upgrade/research-config-format.md`. Prerequisite: S-13. |
 
 ## Open Roadmap Questions
 
@@ -459,6 +473,7 @@ All roadmap items are active or completed; no currently parked items.
 - **S-07b: A `CategoryConfig` struct is defined with `name`, `description`, `regex_threshold`, and `priority` fields. A static `CATEGORIES: &[CategoryConfig]` array serves as the single source of truth for all four intent categories. `RegexClassifier` consumes `CategoryConfig` at construction time (replacing scattered `CAT_*` constants, thresholds, and hardcoded priority ordering). The same `CategoryConfig` array feeds `LLMClassifier`'s prompt template generation (iterating `.description` fields) so both classifiers operate on the same category set without drift.** — Archived 2026-06-08 → `context/archive/2026-06-07-shared-category-config/`. Lesson: —.
 
 - **S-09: An `LLMClassifier` struct implements `IntentClassify`, sending the user prompt to a small/cheap classification model (e.g., `gpt-4o-mini`) and parsing the intent category from the response. Its config carries: model name, endpoint, `UPSTREAM_API_KEY` env var, and a classification prompt template that instructs the model to output one of the known categories. The `AppState` can hold either `RegexClassifier` or `LLMClassifier` behind the same `Arc<dyn IntentClassify>`.** — Archived 2026-06-08 → `context/archive/2026-06-07-llm-classifier/`. Lesson: —.
+- **S-13: Move All Config to File** — Zero hardcoded configuration in Rust — everything lives in `config.toml`. Environment variables reduced to strictly secrets. — Archived 2026-06-11 → `context/archive/2026-06-10-move-all-config-to-file/`. Lesson: —.
 
 ---
 
@@ -489,8 +504,8 @@ The 3-week MVP budget under a 6-week hard deadline makes calendar time the #1 bl
 **#1 blocker:** time (6-week hard deadline)
 **Baseline present:** Backend/API, Deploy/infra (partial)
 **Foundations:** 4
-**Slices:** 18 (S-01a through S-01e, S-02, S-03, S-04, S-05, S-06, S-07, S-07a, S-07b, S-08, S-09, S-09a, S-10, S-11, S-12, S-13)
-**Status breakdown:** ready: 3 | proposed: 8 (F-04, S-06, S-07a, S-07b, S-09, S-09a, S-11, S-12) | planned: 1 (S-10) | preparing: 1 (S-13) | implemented: 9 | descoped: 1 (S-08) | blocked: 0
+**Slices:** 19 (S-01a through S-01e, S-02, S-03, S-04, S-05, S-06, S-07, S-07a, S-07b, S-08, S-09, S-09a, S-10, S-11, S-12, S-13, S-14)
+**Status breakdown:** ready: 3 | proposed: 9 (F-04, S-06, S-07a, S-07b, S-09, S-09a, S-11, S-12, S-14) | planned: 1 (S-10) | preparing: 1 (S-13) | implemented: 9 | descoped: 1 (S-08) | blocked: 0
 **PRD coverage:** 6 must-have FRs covered | 1 nice-to-have FR (implemented)
 **Open Roadmap Q:** 3 (intent classification rules, cheap fallback model, upstream model choices)
 **Parked items:** 0

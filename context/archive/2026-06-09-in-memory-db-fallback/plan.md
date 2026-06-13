@@ -545,7 +545,7 @@ Run the full test suite, verify the dashboard renders with the memory backend, a
 
 #### Manual
 
-- [ ] 7.4 Dashboard loads with memory backend (no env vars)
-- [ ] 7.5 POST /v1/classify creates visible inference log
-- [ ] 7.6 Postgres path works with DATABASE_URL set
-- [ ] 7.7 SQLite path creates ./cerebrum.db and survives restart
+- [x] 7.4 Dashboard loads with memory backend (no env vars)
+- [x] 7.5 POST /v1/classify creates visible inference log
+- [x] 7.6 Postgres path works with DATABASE_URL set
+- [x] 7.7 SQLite path creates ./cerebrum.db and survives restart

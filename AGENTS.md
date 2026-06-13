@@ -15,7 +15,7 @@ Set these environment variables: `PROXY_API_BEARER_TOKEN`, `DASHBOARD_BASIC_USER
 - `cargo test slow_tests` — run slow tests (e.g., keepalive with real delays)
 - `RUST_LOG=info cargo run` — run locally with logging
 
-Tests are organized in two groups in `src/main.rs`: `mod tests` (fast unit/integration tests, run with `cargo test`) and `mod slow_tests` (tests requiring delays or slow mocks, run with `cargo test slow_tests`). Keepalive interval is configurable via `KEEPALIVE_INTERVAL_SECS` env var (default: 15s).
+Tests are organized in two groups in `src/main.rs`: `mod tests` (fast unit/integration tests, run with `cargo test`) and `mod slow_tests` (tests requiring delays or slow mocks, run with `cargo test slow_tests`). Keepalive interval is configurable via config.toml under `[http]` (default: 15s).
 
 ## Naming & File Layout
 
