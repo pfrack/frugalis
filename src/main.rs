@@ -1278,6 +1278,18 @@ mod tests {
         }
     }
 
+    /// Read a response body as a `serde_json::Value` so assertions can target
+    /// the parsed structure instead of brittle substring matches. Refusing to
+    /// return `Option` here means a non-JSON body fails the test loudly,
+    /// which is the right behavior for shape contracts.
+    async fn parse_json_body(response: axum::response::Response) -> serde_json::Value {
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        serde_json::from_slice(&body_bytes)
+            .unwrap_or_else(|e| panic!("response body should be JSON: {e}; body={:?}", body_bytes))
+    }
+
     /// Build an `AppState` from a `RegexClassifier` and optional HTTP client.
     /// Mergeroutes from all classifier backends.
     fn make_test_app_state(
@@ -1666,19 +1678,22 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(
-            body.contains(r#""category":"SYNTAX_FIX""#),
-            "expected SYNTAX_FIX category, got: {body}"
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("category").and_then(|v| v.as_str()),
+            Some("SYNTAX_FIX"),
+            "expected SYNTAX_FIX category, got: {json}"
         );
-        assert!(
-            body.contains(r#""status":"classified""#),
+        assert_eq!(
+            json.get("status").and_then(|v| v.as_str()),
+            Some("classified"),
             "expected classified status"
         );
-        assert!(body.contains(r#""tier":"Regex""#), "expected Regex tier");
+        assert_eq!(
+            json.get("tier").and_then(|v| v.as_str()),
+            Some("Regex"),
+            "expected Regex tier"
+        );
     }
 
     #[tokio::test]
@@ -1700,23 +1715,27 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(
-            body.contains(r#""category":"SYNTAX_FIX""#),
-            "expected SYNTAX_FIX category, got: {body}"
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("category").and_then(|v| v.as_str()),
+            Some("SYNTAX_FIX"),
+            "expected SYNTAX_FIX category, got: {json}"
         );
-        assert!(
-            body.contains(r#""model":"sf-model""#),
-            "expected sf-model, got: {body}"
+        assert_eq!(
+            json.get("model").and_then(|v| v.as_str()),
+            Some("sf-model"),
+            "expected sf-model, got: {json}"
         );
-        assert!(
-            body.contains(r#""status":"classified""#),
+        assert_eq!(
+            json.get("status").and_then(|v| v.as_str()),
+            Some("classified"),
             "expected classified status"
         );
-        assert!(body.contains(r#""tier":"Regex""#), "expected Regex tier");
+        assert_eq!(
+            json.get("tier").and_then(|v| v.as_str()),
+            Some("Regex"),
+            "expected Regex tier"
+        );
     }
 
     #[tokio::test]
@@ -1750,11 +1769,17 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body_str = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(body_str.contains("upstream response too large"));
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("error").and_then(|v| v.as_str()),
+            Some("upstream_error"),
+            "expected upstream_error contract, got: {json}"
+        );
+        assert_eq!(
+            json.get("message").and_then(|v| v.as_str()),
+            Some("upstream response too large"),
+            "expected truncation message, got: {json}"
+        );
         mock.assert();
     }
 
@@ -1837,26 +1862,18 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(
-            body.contains(r#""category":"SYNTAX_FIX""#),
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("category").and_then(|v| v.as_str()),
+            Some("SYNTAX_FIX"),
             "expected SYNTAX_FIX category"
         );
-        assert!(
-            !body.contains(r#""provider_type""#),
-            "response should NOT contain provider_type"
-        );
-        assert!(
-            !body.contains(r#""endpoint""#),
-            "response should NOT contain endpoint"
-        );
-        assert!(
-            !body.contains(r#""api_key""#),
-            "response should NOT contain api_key"
-        );
+        for forbidden in ["provider_type", "endpoint", "api_key"] {
+            assert!(
+                json.get(forbidden).is_none(),
+                "response should NOT contain {forbidden}, got: {json}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1878,13 +1895,10 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        let json = parse_json_body(response).await;
         assert!(
-            !body.contains(r#""api_key""#),
-            "response should NOT contain api_key"
+            json.get("api_key").is_none(),
+            "response should NOT contain api_key, got: {json}"
         );
     }
 
@@ -1907,18 +1921,13 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(
-            !body.contains(r#""provider_type""#),
-            "classify response should not contain provider_type"
-        );
-        assert!(
-            !body.contains(r#""api_key""#),
-            "classify response should not contain api_key"
-        );
+        let json = parse_json_body(response).await;
+        for forbidden in ["provider_type", "api_key"] {
+            assert!(
+                json.get(forbidden).is_none(),
+                "classify response should not contain {forbidden}, got: {json}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2958,13 +2967,11 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(
-            body.contains(r#""error":"upstream_error""#),
-            "expected upstream_error in body, got: {body}"
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("error").and_then(|v| v.as_str()),
+            Some("upstream_error"),
+            "expected upstream_error contract, got: {json}"
         );
         // cleanup handled by EnvGuard
     }
@@ -3299,8 +3306,9 @@ mod tests {
             .strip_prefix("event: error\ndata: ")
             .and_then(|s| s.strip_suffix("\n\n"))
             .expect("SSE event should have `event: error\\ndata: <json>\\n\\n` framing");
-        let parsed: serde_json::Value = serde_json::from_str(json_str)
-            .expect("data: payload should be valid JSON even when upstream body has JSON-unsafe chars");
+        let parsed: serde_json::Value = serde_json::from_str(json_str).expect(
+            "data: payload should be valid JSON even when upstream body has JSON-unsafe chars",
+        );
         // The proxy embeds the raw upstream body in the SSE event (it
         // does NOT parse the body as JSON). The escape rule replaces
         // literal `\` with `\\` and `"` with `\"` so the data: payload
@@ -3743,6 +3751,120 @@ mod tests {
             body.contains("Database not configured"),
             "expected 'Database not configured' in response, got: {body}"
         );
+    }
+
+    // ── JSON contract shape tests (Phase 5, F4) ─────────────────────────────
+    //
+    // The endpoint tests above verify "what happens for a given request".
+    // These tests verify the SHAPE of the JSON contract itself so that any
+    // accidental change to a key name or value type — even one that would
+    // happen to pass a substring assertion — is caught loudly.
+
+    /// `classification_only_json` must emit exactly 4 keys with the right types.
+    #[test]
+    fn test_classification_only_json_contract_has_4_keys() {
+        let result = intent_classifier::ClassificationResult {
+            category: "SYNTAX_FIX".to_string(),
+            model: "sf-model".to_string(),
+            endpoint: "https://test.endpoint".to_string(),
+            tier: intent_classifier::ClassificationTier::Regex,
+            provider_type: "test_provider".to_string(),
+            api_key_env: Some("TEST_API_KEY".to_string()),
+        };
+        let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result))
+            .expect("classification_only_json output should be valid JSON");
+
+        let obj = json
+            .as_object()
+            .expect("classification_only_json output should be a JSON object");
+        assert_eq!(
+            obj.len(),
+            4,
+            "classification_only_json must emit exactly 4 keys, got: {obj:?}"
+        );
+        assert_eq!(obj.get("status"), Some(&serde_json::json!("classified")));
+        assert_eq!(obj.get("category"), Some(&serde_json::json!("SYNTAX_FIX")));
+        assert_eq!(obj.get("model"), Some(&serde_json::json!("sf-model")));
+        assert_eq!(obj.get("tier"), Some(&serde_json::json!("Regex")));
+    }
+
+    /// `upstream_error_json` must emit exactly 3 keys with `status` as a number.
+    /// This guards against an accidental change like `status: status.to_string()`
+    /// turning the status code into a string.
+    #[test]
+    fn test_upstream_error_json_contract_has_3_keys() {
+        let json: serde_json::Value =
+            serde_json::from_str(&upstream_error_json(502_u16, "upstream response too large"))
+                .expect("upstream_error_json output should be valid JSON");
+
+        let obj = json
+            .as_object()
+            .expect("upstream_error_json output should be a JSON object");
+        assert_eq!(
+            obj.len(),
+            3,
+            "upstream_error_json must emit exactly 3 keys, got: {obj:?}"
+        );
+        assert_eq!(obj.get("error"), Some(&serde_json::json!("upstream_error")));
+        // Crucial: status must be a number, not a string. If a future refactor
+        // does `status: status.to_string()` the contract regresses silently.
+        assert_eq!(
+            obj.get("status"),
+            Some(&serde_json::json!(502)),
+            "status must be a JSON number (not a string) so clients can branch on the code"
+        );
+        assert_eq!(
+            obj.get("message"),
+            Some(&serde_json::json!("upstream response too large"))
+        );
+    }
+
+    /// `json_response` must set `Content-Type: application/json` so clients
+    /// can use `response.json()` without sniffing the body.
+    #[test]
+    fn test_json_response_sets_application_json_content_type() {
+        let resp = json_response(StatusCode::CREATED, "{}".to_string());
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .expect("json_response must set Content-Type");
+        assert_eq!(
+            ct, "application/json",
+            "json_response must advertise application/json so fetch().json() works"
+        );
+    }
+
+    /// `classification_only_json` must serialize every real `ClassificationTier`
+    /// variant. The current production code uses `format!("{:?}", tier)` for the
+    /// value, which couples the JSON contract to the Rust Debug output. This
+    /// test pins the exact strings so a rename of any variant breaks the test
+    /// loudly.
+    #[test]
+    fn test_classification_only_json_serializes_all_3_tiers() {
+        let tiers = [
+            (intent_classifier::ClassificationTier::Regex, "Regex"),
+            (intent_classifier::ClassificationTier::FewShot, "FewShot"),
+            (intent_classifier::ClassificationTier::Fallback, "Fallback"),
+        ];
+        for (tier, expected_label) in tiers {
+            let result = intent_classifier::ClassificationResult {
+                category: "SYNTAX_FIX".to_string(),
+                model: "sf-model".to_string(),
+                endpoint: "https://test.endpoint".to_string(),
+                tier,
+                provider_type: "test_provider".to_string(),
+                api_key_env: Some("TEST_API_KEY".to_string()),
+            };
+            let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result))
+                .expect("classification_only_json output should be valid JSON");
+            assert_eq!(
+                json.get("tier").and_then(|v| v.as_str()),
+                Some(expected_label),
+                "tier {tier:?} should serialize as {expected_label:?}"
+            );
+        }
     }
 }
 
