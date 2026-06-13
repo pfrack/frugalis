@@ -338,15 +338,15 @@ envVars:
 
 #### Manual
 
-- [ ] 1.4 `cargo tree --features otel` shows expected OTel deps without duplicate TLS
+- [x] 1.4 `cargo tree --features otel` shows expected OTel deps without duplicate TLS
 
 ### Phase 2: Tracing Integration & Graceful Shutdown
 
 #### Automated
 
-- [ ] 2.1 `cargo check --features otel` passes
-- [ ] 2.2 `cargo test` passes
-- [ ] 2.3 `cargo test --features otel` passes
+- [x] 2.1 `cargo check --features otel` passes
+- [x] 2.2 `cargo test` passes
+- [x] 2.3 `cargo test --features otel` passes
 
 #### Manual
 
@@ -357,9 +357,9 @@ envVars:
 
 #### Automated
 
-- [ ] 3.1 `cargo check --features otel` passes
-- [ ] 3.2 `cargo test --features otel` passes
-- [ ] 3.3 `cargo clippy --features otel` passes
+- [x] 3.1 `cargo check --features otel` passes
+- [x] 3.2 `cargo test --features otel` passes
+- [x] 3.3 `cargo clippy --features otel` passes
 
 #### Manual
 
@@ -370,8 +370,8 @@ envVars:
 
 #### Automated
 
-- [ ] 4.1 `render.yaml` is valid YAML
-- [ ] 4.2 Build command includes `--features otel`
+- [x] 4.1 `render.yaml` is valid YAML
+- [ ] 4.2 Build command includes `--features otel` — intentionally unmet per impl-review-2 F1 (render.yaml kept as showcase only; user accepted)
 
 #### Manual
 
