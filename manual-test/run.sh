@@ -1262,3 +1262,187 @@ echo ""
 if [ $FAIL -gt 0 ]; then
     exit 1
 fi
+
+# ============================================================================
+# Few-Shot Classifier Manual Tests (Phase 1-5)
+# ============================================================================
+
+test_fewshot_phase1_config() {
+    section "Phase 1 - Config section present in config.toml"
+    # The config.toml already contains [fewshot_classifier] commented block
+    if grep -q '\[fewshot_classifier\]' config.toml; then
+        log_pass "config.toml contains [fewshot_classifier] section"
+        return 0
+    else
+        log_fail "config.toml missing [fewshot_classifier] section"
+        return 1
+    fi
+}
+
+test_fewshot_phase2_classify_casual() {
+    section "Phase 2 - Classify bootstrap CASUAL prompt"
+    # "hello" is in bootstrap as CASUAL
+    _body='{"messages":[{"role":"user","content":"hello"}]}'
+    _resp=$(curl -s -w "\n%{http_code}" \
+        "$URL" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$_body")
+    _code=$(printf '%s' "$_resp" | tail -1)
+    _json=$(printf '%s' "$_resp" | sed '$d')
+    _tier=$(echo "$_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tier',''))" 2>/dev/null || echo "")
+    _cat=$(echo "$_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('category',''))" 2>/dev/null || echo "")
+
+    if [ "$_code" = "200" ] && [ "$_tier" = "FewShot" ] && [ "$_cat" = "CASUAL" ]; then
+        log_pass "Bootstrap CASUAL classified: tier=FewShot, category=CASUAL"
+        return 0
+    else
+        log_fail "Expected 200 with tier=FewShot, category=CASUAL, got code=$_code tier=$_tier cat=$_cat"
+        return 1
+    fi
+}
+
+test_fewshot_phase2_classify_gibberish() {
+    section "Phase 2 - Classify gibberish returns Fallback"
+    _body='{"messages":[{"role":"user","content":"zxcvbnm qwertyuiop asdfghjkl"}]}'
+    _resp=$(curl -s -w "\n%{http_code}" \
+        "$URL" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$_body")
+    _code=$(printf '%s' "$_resp" | tail -1)
+    _json=$(printf '%s' "$_resp" | sed '$d')
+    _tier=$(echo "$_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tier',''))" 2>/dev/null || echo "")
+
+    if [ "$_code" = "200" ] && [ "$_tier" = "Fallback" ]; then
+        log_pass "Gibberish returns Fallback"
+        return 0
+    else
+        log_fail "Expected 200 with tier=Fallback, got code=$_code tier=$_tier"
+        return 1
+    fi
+}
+
+test_fewshot_phase3_chain_integration() {
+    section "Phase 3 - Regex catches, fewshot runs in chain"
+    # "fix this bug" should be caught by regex (SYNTAX_FIX) and not fall through to fewshot
+    _body='{"messages":[{"role":"user","content":"fix this bug"}]}'
+    _resp=$(curl -s -w "\n%%{http_code}" \
+        "$URL" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$_body")
+    _code=$(printf '%s' "$_resp" | tail -1)
+    _json=$(printf '%s' "$_resp" | sed '$d')
+    _tier=$(echo "$_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tier',''))" 2>/dev/null || echo "")
+    _cat=$(echo "$_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('category',''))" 2>/dev/null || echo "")
+
+    if [ "$_code" = "200" ] && [ "$_tier" = "Regex" ] && [ "$_cat" = "SYNTAX_FIX" ]; then
+        log_pass "Regex classifies SYNTAX_FIX correctly (tier=Regex)"
+        return 0
+    else
+        log_fail "Expected Regex/SYNTAX_FIX, got code=$_code tier=$_tier cat=$_cat"
+        return 1
+    fi
+}
+
+test_fewshot_phase4_feedback_endpoint() {
+    section "Phase 4 - POST /v1/feedback returns 200"
+    # Use a bootstrap example that's in the data
+    _body='{"text":"can you explain what a hash map is","actual_category":"CASUAL"}'
+    _resp=$(curl -s -w "\n%{http_code}" \
+        "$URL/v1/feedback" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$_body")
+    _code=$(printf '%s' "$_resp" | tail -1)
+    _json=$(printf '%s' "$_resp" | sed '$d')
+    _status=$(echo "$_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
+
+    if [ "$_code" = "200" ] && [ "$_status" = "accepted" ]; then
+        log_pass "Feedback endpoint returns 200 {status:accepted}"
+        return 0
+    else
+        log_fail "Expected 200 with status=accepted, got code=$_code status=$_status"
+        return 1
+    fi
+}
+
+test_fewshot_phase4_feedback_requires_auth() {
+    section "Phase 4 - Feedback requires bearer auth"
+    _body='{"text":"test","actual_category":"CASUAL"}'
+    _resp=$(curl -s -w "\n%{http_code}" \
+        "$URL/v1/feedback" \
+        -H "Content-Type: application/json" \
+        -d "$_body")
+    _code=$(printf '%s' "$_resp" | tail -1)
+    if [ "$_code" = "401" ]; then
+        log_pass "Feedback returns 401 without auth"
+        return 0
+    else
+        log_fail "Expected 401, got $_code"
+        return 1
+    fi
+}
+
+test_fewshot_phase5_gitignore() {
+    section "Phase 5 - Training data is gitignored"
+    if grep -q 'data/fewshot_training.yaml' .gitignore; then
+        log_pass ".gitignore contains data/fewshot_training.yaml"
+        return 0
+    else
+        log_fail ".gitignore missing training data entry"
+        return 1
+    fi
+}
+
+run_fewshot_manual_tests() {
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════════╗"
+    echo "║  Few-Shot Classifier Manual Tests                              ║"
+    echo "╚══════════════════════════════════════════════════════════════════╝"
+    echo ""
+
+    # Ensure server is running with default config (which includes fewshot)
+    if ! curl -s http://localhost:10000/health > /dev/null 2>&1; then
+        echo "Server not running on localhost:10000"
+        echo "Start with: RUST_LOG=info cargo run"
+        exit 1
+    fi
+
+    local total=0
+    local passed=0
+
+    run_wrapper() {
+        local name="$1"; shift
+        if "$@"; then
+            passed=$((passed+1))
+        fi
+        total=$((total+1))
+    }
+
+    run_wrapper "Phase 1 config" test_fewshot_phase1_config
+    run_wrapper "Phase 2 classify CASUAL" test_fewshot_phase2_classify_casual
+    run_wrapper "Phase 2 classify gibberish" test_fewshot_phase2_classify_gibberish
+    run_wrapper "Phase 3 chain integration" test_fewshot_phase3_chain_integration
+    run_wrapper "Phase 4 feedback endpoint" test_fewshot_phase4_feedback_endpoint
+    run_wrapper "Phase 4 feedback auth" test_fewshot_phase4_feedback_requires_auth
+    run_wrapper "Phase 5 gitignore" test_fewshot_phase5_gitignore
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    printf " Results: ${GREEN}%d/%d passed${NC}\n" "$passed" "$total"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    if [ $passed -ne $total ]; then
+        exit 1
+    fi
+}
+
+# Allow running just the fewshot tests
+if [ "$1" = "--fewshot" ] || [ "$1" = "-f" ]; then
+    run_fewshot_manual_tests
+    exit $?
+fi
+
