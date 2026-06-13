@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
+use tokio::fs;
 
 use crate::config::FewShotConfig;
 use crate::intent_classifier::{
-    ClassificationResult, ClassificationTier, FewShotExample, IntentClassify, RouteEntry,
+    code_block_re, ClassificationResult, ClassificationTier, FewShotExample, IntentClassify, RouteEntry,
 };
 use crate::routing::DEFAULT_MODEL;
 
@@ -16,6 +18,7 @@ pub(crate) struct FewShotClassifier {
     routing: HashMap<String, RouteEntry>,
     fallback_entry: RouteEntry,
     config: FewShotConfig,
+    retraining_in_progress: AtomicBool,
 }
 
 impl FewShotClassifier {
@@ -56,6 +59,7 @@ impl FewShotClassifier {
             routing,
             fallback_entry,
             config,
+            retraining_in_progress: AtomicBool::new(false),
         };
 
         classifier.retrain_internal(&merged);
@@ -64,8 +68,7 @@ impl FewShotClassifier {
 
     fn preprocess(text: &str) -> String {
         let lower = text.to_lowercase();
-        let re = regex::Regex::new(r"(?s)```[^`]*```").expect("code_block_re regex must be valid");
-        let no_blocks = re.replace_all(&lower, " ");
+        let no_blocks = code_block_re().replace_all(&lower, " ");
         let collapsed: Vec<&str> = no_blocks.split_whitespace().collect();
         collapsed.join(" ")
     }
@@ -199,24 +202,73 @@ impl FewShotClassifier {
             category: actual_category,
             confidence: satisfaction,
         };
-        {
+        // Push the new example and decide whether to trigger retraining
+        let (should_retrain, data_clone) = {
             let mut data = self.training_data.write().await;
             data.push(example);
-        }
-        {
-            let data = self.training_data.read().await;
-            if data.len() >= self.config.retraining_threshold {
-                tracing::info!("Few-shot retraining threshold reached; retraining");
-                self.retrain_internal(&data);
-                self.save_training_data(&data);
+
+            // Eviction: Respect max_training_examples by removing oldest non-bootstrap entries
+            if data.len() > self.config.max_training_examples {
+                let mut boots = Vec::new();
+                let mut feedback = Vec::new();
+                for ex in data.iter() {
+                    if ex.confidence >= 0.99 {
+                        boots.push(ex.clone());
+                    } else {
+                        feedback.push(ex.clone());
+                    }
+                }
+                let total_allowed = self.config.max_training_examples;
+                let allowed_feedback = total_allowed.saturating_sub(boots.len());
+                if feedback.len() > allowed_feedback {
+                    feedback = feedback.split_off(feedback.len() - allowed_feedback);
+                }
+                *data = boots.into_iter().chain(feedback).collect();
+                tracing::info!(
+                    "Few-shot training data trimmed to {} examples (max_training_examples={})",
+                    data.len(),
+                    self.config.max_training_examples
+                );
+            }
+
+            let need_retrain = data.len() >= self.config.retraining_threshold;
+            let currently_retraining = self.retraining_in_progress.load(Ordering::SeqCst);
+            let will_retrain = need_retrain && !currently_retraining;
+            if will_retrain {
+                // Attempt to set the flag to mark that we are responsible for retraining
+                if self
+                    .retraining_in_progress
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    // Clone training data for retraining after releasing the write lock
+                    let data_clone = data.clone();
+                    (true, Some(data_clone))
+                } else {
+                    // Another thread beat us to it
+                    (false, None)
+                }
+            } else {
+                (false, None)
+            }
+        };
+
+        // Perform retraining and persistence outside the write lock
+        if should_retrain {
+            if let Some(data_snapshot) = data_clone {
+                self.retrain_internal(&data_snapshot);
+                self.save_training_data(&data_snapshot).await;
+                // Clear the retraining flag
+                self.retraining_in_progress
+                    .store(false, Ordering::SeqCst);
             }
         }
     }
 
-    fn save_training_data(&self, data: &[FewShotExample]) {
+    async fn save_training_data(&self, data: &[FewShotExample]) {
         match serde_yaml::to_string(data) {
             Ok(yaml) => {
-                if let Err(e) = std::fs::write(&self.config.data_path, &yaml) {
+                if let Err(e) = fs::write(&self.config.data_path, &yaml).await {
                     tracing::warn!(
                         "Failed to write few-shot training data to {}: {}",
                         self.config.data_path,
@@ -239,7 +291,8 @@ impl FewShotClassifier {
                     vec![]
                 }
             },
-            Err(_) => {
+            Err(e) => {
+                tracing::debug!("No persisted few-shot training data at {}: {}", path, e);
                 vec![]
             }
         }
@@ -334,6 +387,7 @@ mod tests {
             retraining_threshold: 5,
             data_path: format!("/tmp/fewshot_test_{}.yaml", nanos),
             max_vocabulary_warn: 5000,
+            max_training_examples: 10000,
         }
     }
 

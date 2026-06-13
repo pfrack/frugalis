@@ -52,6 +52,7 @@ fn default_feature_dimensions() -> usize { 1000 }
 fn default_retraining_threshold() -> usize { 5 }
 fn default_fewshot_data_path() -> String { "data/fewshot_training.yaml".to_string() }
 fn default_max_vocabulary_warn() -> usize { 5000 }
+fn default_max_training_examples() -> usize { 10000 }
 
 /// Load dashboard configuration from a parsed ConfigRoot.
 /// Returns defaults if section is absent.
@@ -910,7 +911,7 @@ impl Default for ClassifiersConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            order: vec!["regex".to_string(), "llm".to_string()],
+            order: vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()],
         }
     }
 }
@@ -1029,6 +1030,8 @@ pub(crate) struct FewShotConfig {
     pub data_path: String,
     #[serde(default = "default_max_vocabulary_warn")]
     pub max_vocabulary_warn: usize,
+    #[serde(default = "default_max_training_examples")]
+    pub max_training_examples: usize,
 }
 
 /// Load few-shot classifier config from a parsed ConfigRoot.
@@ -1463,7 +1466,7 @@ priority = 1
         let root: ConfigRoot = toml::from_str(toml_content).expect("valid TOML");
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
-        assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
+        assert_eq!(cfg.order, vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()]);
     }
 
     #[test]
@@ -1507,7 +1510,7 @@ priority = 1
         let root = ConfigRoot::default();
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
-        assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
+        assert_eq!(cfg.order, vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()]);
     }
 
     #[test]
@@ -1516,7 +1519,7 @@ priority = 1
         let root = ConfigRoot::default();
         let cfg = load_classifiers_config_from_value(&root);
         assert!(cfg.enabled);
-        assert_eq!(cfg.order, vec!["regex".to_string(), "llm".to_string()]);
+        assert_eq!(cfg.order, vec!["regex".to_string(), "fewshot".to_string(), "llm".to_string()]);
     }
 
     #[test]

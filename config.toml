@@ -50,6 +50,7 @@ short_prompt_len = 30
 # retraining_threshold = 5
 # data_path = "data/fewshot_training.yaml"
 # max_vocabulary_warn = 5000
+# max_training_examples = 10000
 
 # [llm_classifier] — uncomment to enable LLM backend
 # enabled = true

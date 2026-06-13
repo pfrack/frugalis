@@ -430,7 +430,7 @@ pub fn auth_headers_for(providers: &[AuthProviderConfig], provider_type: &str, a
 
 // ── Code-block regex (lazily compiled once) ──
 
-fn code_block_re() -> &'static Regex {
+pub(crate) fn code_block_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?s)```[^`]*```").expect("code_block_re regex must be valid"))
 }

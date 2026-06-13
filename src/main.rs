@@ -925,12 +925,15 @@ async fn feedback_handler(
     }
     drop(routing);
 
+    // Clamp satisfaction to [0.0, 1.0] as per OpenAPI spec
+    let satisfaction = body.satisfaction.max(0.0).min(1.0);
     fewshot.add_feedback(
         body.text,
         body.predicted_category,
         body.actual_category,
-        body.satisfaction,
-    ).await;
+        satisfaction,
+    )
+    .await;
 
     (StatusCode::OK, Json(serde_json::json!({
         "status": "accepted"
@@ -1265,6 +1268,7 @@ mod tests {
             retraining_threshold: 5,
             data_path: format!("/tmp/fewshot_int_{}.yaml", nanos),
             max_vocabulary_warn: 5000,
+            max_training_examples: 10000,
         };
         let fewshot = fewshot_classifier::FewShotClassifier::new(
             fewshot_config,
