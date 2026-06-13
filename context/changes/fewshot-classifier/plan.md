@@ -626,9 +626,9 @@ Add training data save/load to YAML, vocabulary size operator warning, and `.git
 
 #### Automated
 
-- [ ] 3.1 `cargo build` compiles with new module wired in
-- [ ] 3.2 `cargo test` passes (all existing + integration)
-- [ ] 3.3 `cargo test routes_auth` passes
+- [x] 3.1 `cargo build` compiles with new module wired in — ae654ba
+- [x] 3.2 `cargo test` passes (all existing + integration) — ae654ba
+- [x] 3.3 `cargo test routes_auth` passes — ae654ba
 
 #### Manual
 

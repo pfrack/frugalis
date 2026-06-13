@@ -95,7 +95,7 @@ pub enum ClassificationTier {
 
 /// Trait for intent classification backends.
 #[async_trait]
-pub trait IntentClassify: Send + Sync {
+pub trait IntentClassify: Send + Sync + 'static {
     async fn classify(&self, prompt: &str) -> ClassificationResult;
 
     /// Returns a reference to this backend's routing table, if it has one.
