@@ -1065,26 +1065,26 @@ The `format_sse_error_event` helper is `pub(crate)` or
 
 #### Automated
 
-- [x] 2.1 `cargo test snippet_path_` (3 new tests pass in default CI)
-- [x] 2.2 `cargo test persistence_integration_` (2 existing tests pass with their `DATABASE_URL` skip behavior preserved)
-- [x] 2.3 `cargo build --release` succeeds
-- [x] 2.4 `cargo clippy --all-targets` reports no new warnings
+- [x] 2.1 `cargo test snippet_path_` (3 new tests pass in default CI) — fd971f7
+- [x] 2.2 `cargo test persistence_integration_` (2 existing tests pass with their `DATABASE_URL` skip behavior preserved) — fd971f7
+- [x] 2.3 `cargo build --release` succeeds — fd971f7
+- [x] 2.4 `cargo clippy --all-targets` reports no new warnings — fd971f7
 
 #### Manual
 
-- [ ] 2.5 New tests assert on the persisted `InferenceRecord` fields (not on a mocked `log_classification` call)
-- [ ] 2.6 2 existing `persistence_integration_*` tests still skip without `DATABASE_URL`
-- [ ] 2.7 Production code in `log_classification` (`src/main.rs:458-490`) and `extract_snippet` (`src/persistence.rs:1080-1088`) is unchanged
+- [x] 2.5 New tests assert on the persisted `InferenceRecord` fields (not on a mocked `log_classification` call) — fd971f7
+- [x] 2.6 2 existing `persistence_integration_*` tests still skip without `DATABASE_URL` — fd971f7
+- [x] 2.7 Production code in `log_classification` (`src/main.rs:458-490`) and `extract_snippet` (`src/persistence.rs:1080-1088`) is unchanged — fd971f7
 
 ### Phase 3: Risk #2 F2 — SSE error path invariants (production refactor + tests)
 
 #### Automated
 
-- [ ] 3.1 `cargo test format_sse_error_event_` (helper unit tests pass)
-- [ ] 3.2 `cargo test streaming_handler_error_` (integration tests pass; all 5 invariants covered)
-- [ ] 3.3 `cargo test streaming_handler_non_2xx_returns_sse_error_event` (existing test still passes)
-- [ ] 3.4 `cargo build --release` succeeds
-- [ ] 3.5 `cargo clippy --all-targets` reports no new warnings
+- [x] 3.1 `cargo test format_sse_error_event_` (helper unit tests pass) — pending
+- [x] 3.2 `cargo test streaming_handler_error_` (integration tests pass; all 5 invariants covered) — pending
+- [x] 3.3 `cargo test streaming_handler_non_2xx_returns_sse_error_event` (existing test still passes) — pending
+- [x] 3.4 `cargo build --release` succeeds — pending
+- [x] 3.5 `cargo clippy --all-targets` reports no new warnings — pending
 
 #### Manual
 

@@ -738,11 +738,12 @@ fn handle_streaming_response(
                         Some(Ok(bytes)) => { if tx.send(bytes).await.is_err() { break; } }
                         Some(Err(_e)) => {
                             stream_status = "stream_error";
-                            let error_msg = _e.to_string();
-                            let json_payload = serde_json::json!({"error": error_msg}).to_string();
-                            let _ = tx.send(Bytes::from(
-                                format!("event: error\ndata: {}\n\n", json_payload)
-                            )).await;
+                            // Use the same SSE error event format as
+                            // `handle_streaming_error` (non-2xx upstream) so
+                            // the two error paths produce byte-compatible
+                            // frames — a single SSE error contract.
+                            let sse_error = format_sse_error_event(&_e.to_string());
+                            let _ = tx.send(Bytes::from(sse_error)).await;
                             break;
                         }
                         None => break,
@@ -773,7 +774,54 @@ fn handle_streaming_response(
     resp
 }
 
+/// Build the SSE error event body for an upstream error message:
+/// `event: error\ndata: {"error":"<msg>"}\n\n`.
+///
+/// Applies the JSON-escape rule (`\\` → `\\\\`, `"` → `\\"`, `\n`/`\r`
+/// → space) to the embedded message. The 2 KB body cap and 512-char
+/// truncate (upstream on `handle_streaming_error`) and the status
+/// passthrough + `Content-Type: text/event-stream` + `Cache-Control:
+/// no-cache` (downstream on the response) are NOT this helper's concern.
+/// Helper invariants: (a) JSON-escape correctness of the embedded
+/// message, (b) SSE event format. Both call sites — `handle_streaming_error`
+/// (non-2xx upstream) and the inline mid-stream error branch in
+/// `handle_streaming_response` (chunk stream error) — call this helper
+/// with the raw upstream error string.
+pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
+    let escaped = error_msg
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\n', '\r'], " ");
+    format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", escaped)
+}
+
+/// Convert a non-2xx upstream response into an SSE error event for the client.
+///
+/// 5 invariants protect this code path (the F2 review fixes; see
+/// `context/foundation/lessons.md` for the review history):
+/// 1. **Body cap (2 KB)** — upstream error bodies are bounded to 2 KB.
+///    Large upstream bodies would amplify latency and memory pressure
+///    on the proxy, and SSE clients don't need the full body to surface
+///    an error.
+/// 2. **JSON escape** — `\`, `"`, `\n`, `\r` in the upstream error text
+///    are replaced with safe equivalents before serialization. Without
+///    this, a malicious upstream could inject SSE frames or break the
+///    JSON parse that downstream consumers use to detect error events.
+/// 3. **SSE event format** — the body is `event: error\ndata: {"error":"…"}\n\n`.
+///    A valid SSE event with the `error` event name lets clients using
+///    `EventSource`-style subscribe to error events distinctly from data
+///    events.
+/// 4. **Status passthrough** — the upstream's status code is forwarded
+///    to the client (e.g., 503 → 503). This preserves the upstream's
+///    classification of the failure (rate limit vs. server error vs.
+///    auth failure) so clients can react correctly.
+/// 5. **`Content-Type: text/event-stream` + `Cache-Control: no-cache`**
+///    — the client must parse the body as SSE and must not cache error
+///    events (caching would replay a transient error long after it has
+///    been resolved).
 async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Response {
+    // Invariant 1: bound the upstream error body to 2 KB to cap latency
+    // and memory on large error payloads.
     const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
     let mut error_bytes = Vec::new();
     loop {
@@ -788,16 +836,19 @@ async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Res
             Err(_) => break,
         }
     }
+    // Truncate to 512 chars before passing to the helper. The helper
+    // applies the JSON-escape rule (Invariant 2) and emits the SSE event
+    // body (Invariant 3).
     let error_text = String::from_utf8_lossy(&error_bytes)
         .chars()
         .take(512)
-        .collect::<String>()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace(['\n', '\r'], " ");
-    let sse_error = format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", error_text);
+        .collect::<String>();
+    let sse_error = format_sse_error_event(&error_text);
     let mut resp = Response::new(Body::from(sse_error));
+    // Invariant 4: forward the upstream's status code to the client so
+    // it can react to the specific failure class.
     *resp.status_mut() = upstream_response.status();
+    // Invariant 5: mark the response as an uncacheable SSE stream.
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("text/event-stream"),
@@ -3102,6 +3153,271 @@ mod tests {
         );
         mock.assert();
         // cleanup handled by EnvGuard
+    }
+
+    // ── format_sse_error_event helper tests (Phase 3 — F2 helper invariants) ──
+    // The helper applies the JSON-escape rule and emits the SSE event body.
+    // These 6 unit tests cover plain text, each escape rule, and a combined
+    // injection attempt that must still produce a valid JSON `data:` payload.
+
+    #[test]
+    fn test_format_sse_error_event_plain_text() {
+        let s = format_sse_error_event("hello");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"hello\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_escapes_backslash() {
+        let s = format_sse_error_event(r"a\b");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a\\\\b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_escapes_double_quote() {
+        let s = format_sse_error_event("a\"b");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a\\\"b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_newline_with_space() {
+        let s = format_sse_error_event("a\nb");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_carriage_return_with_space() {
+        let s = format_sse_error_event("a\rb");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_combined_injection_produces_valid_json() {
+        // Combined injection: ";\n}\nattack\n\r{ would break the SSE event
+        // framing and the JSON payload if the escape rule were skipped.
+        // The escape rule replaces \n and \r with single spaces.
+        let s = format_sse_error_event("\";\n}\nattack\n\r{");
+        let json_str = s
+            .strip_prefix("event: error\ndata: ")
+            .and_then(|s| s.strip_suffix("\n\n"))
+            .expect("SSE event should have `event: error\\ndata: <json>\\n\\n` framing");
+        let parsed: serde_json::Value = serde_json::from_str(json_str)
+            .expect("data: payload should be valid JSON even with injection chars");
+        // " → \", \n → space, \r → space. After escape the string is
+        // `"; ` + ` ` + `}` + ` ` + `attack` + ` ` + ` ` + `{`.
+        // = `"; } attack  {` (one space after `}`, one space after `;`,
+        // two spaces between `attack` and `{` from \n and \r).
+        assert_eq!(parsed, serde_json::json!({"error": "\"; } attack  {"}));
+    }
+
+    // ── F2 integration tests (Phase 3 — handle_streaming_error 5 invariants) ──
+    // These tests lock each of the 5 F2 invariants at the HTTP level. They
+    // exercise the full axum stack via test_app_with_http_client and assert
+    // on the response status, body, and headers.
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_truncates_oversized_body() {
+        let env = "TEST_STREAM_TRUNC";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        // 3 KB body, > the 2 KB cap.
+        let large_body = "x".repeat(3_000);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(large_body);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // The SSE event body is bounded: at most 2 KB of upstream body +
+        // ~50 bytes of format overhead (`event: error\ndata: {"error":"..."}\n\n`).
+        assert!(
+            body.len() <= 2 * 1024 + 64,
+            "SSE error body should be bounded to ~2 KB + format overhead, got {} bytes",
+            body.len()
+        );
+        assert!(
+            body.starts_with("event: error"),
+            "expected SSE error framing, got: {body}"
+        );
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_escapes_json_injection() {
+        let env = "TEST_STREAM_ESC";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        // Upstream body with all 4 JSON-unsafe chars: \, ", \n, \r.
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"a\"b\\c\nd"}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        let json_str = body
+            .strip_prefix("event: error\ndata: ")
+            .and_then(|s| s.strip_suffix("\n\n"))
+            .expect("SSE event should have `event: error\\ndata: <json>\\n\\n` framing");
+        let parsed: serde_json::Value = serde_json::from_str(json_str)
+            .expect("data: payload should be valid JSON even when upstream body has JSON-unsafe chars");
+        // The proxy embeds the raw upstream body in the SSE event (it
+        // does NOT parse the body as JSON). The escape rule replaces
+        // literal `\` with `\\` and `"` with `\"` so the data: payload
+        // is valid JSON. The parsed `error` field is the JSON-decoded
+        // value of the embedded raw body, which is the original raw
+        // upstream body.
+        let error_value = parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("error field should be a string");
+        assert_eq!(
+            error_value, r#"{"error":"a\"b\\c\nd"}"#,
+            "raw upstream body should round-trip through the SSE escape rule"
+        );
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_content_type_and_cache_control() {
+        let env = "TEST_STREAM_CT";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"overloaded"}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(
+            content_type, "text/event-stream",
+            "expected SSE content type"
+        );
+        let cache_control = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(cache_control, "no-cache", "expected no-cache control");
+        mock.assert();
+    }
+
+    async fn assert_status_passthrough(status: u16) {
+        let env = "TEST_STREAM_ST";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(status)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"upstream"}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        let response_status = response.status().as_u16();
+        assert_eq!(
+            response_status, status,
+            "expected upstream status {status} to be forwarded to client"
+        );
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_status_passthrough_429() {
+        assert_status_passthrough(429).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_status_passthrough_500() {
+        assert_status_passthrough(500).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_status_passthrough_502() {
+        assert_status_passthrough(502).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_status_passthrough_503() {
+        assert_status_passthrough(503).await;
     }
 
     #[tokio::test]
