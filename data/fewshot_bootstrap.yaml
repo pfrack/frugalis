@@ -1,0 +1,201 @@
+- text: "show me the contents of src/main.rs"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "read the file config.toml"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "display the code in src/auth.rs"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "what's in the current directory"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "list all files in the project"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "print the contents of Cargo.toml"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "view the source code for the classifier"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "cat the log file"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "search for the function definition in the codebase"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "open the file and show me its contents"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "find where the struct is defined"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "look at the line 42 in database.rs"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "inspect the error handling code"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "check the contents of the output file"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "navigate to the src folder and list files"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "grep for the term 'fallback' in the code"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "what does the file config.rs contain"
+  category: "FILE_READING"
+  confidence: 1.0
+- text: "show me around line 100 in main.rs"
+  category: "FILE_READING"
+  confidence: 1.0
+
+- text: "fix the compilation error in src/main.rs"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "correct this bug in the loop"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "patch the syntax error on line 42"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "my code won't compile"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "there's a type error in this function"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "fix the null pointer dereference"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "repair the broken import statement"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "resolve this merge conflict"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "my tests are failing with an assertion error"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "the build is broken after my last change"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "why does this code panic at runtime"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "fix the typo in the variable name"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "correct the regex pattern that doesn't compile"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "patch the security vulnerability in the auth module"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "fix the off-by-one error in this loop"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+- text: "resolve the borrow checker error"
+  category: "SYNTAX_FIX"
+  confidence: 1.0
+
+- text: "design a distributed rate limiting system"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "refactor the entire authentication module"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "architect a microservices deployment strategy"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "analyze the performance bottleneck in the database layer"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "compare and contrast different caching strategies"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "design a fault-tolerant message queuing system"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "evaluate the trade-offs between sync and async processing"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "plan the migration from monolith to microservices"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "optimize the query performance for large datasets"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "design a state machine for order processing"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "what's the best approach to handle concurrent writes"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "architect a scalable WebSocket notification system"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "design the database schema for a multi-tenant SaaS app"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "analyze the security implications of the current auth flow"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "refactor the codebase to reduce coupling between modules"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "design a circuit breaker pattern for external API calls"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+- text: "how would you implement event sourcing for this system"
+  category: "COMPLEX_REASONING"
+  confidence: 1.0
+
+- text: "hello"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "hi there"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "good morning"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "thanks for your help"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "what is a variable"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "how do I write a loop in Python"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "ok got it"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "sure that works"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "can you explain what a hash map is"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "nice work"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "goodbye"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "how are you doing"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "what's the difference between a list and a tuple"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "define polymorphism"
+  category: "CASUAL"
+  confidence: 1.0
+- text: "got it thanks"
+  category: "CASUAL"
+  confidence: 1.0

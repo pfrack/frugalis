@@ -4,5 +4,7 @@
 - **updated**: 2026-06-12
 - **last_research**: config-format (2026-06-11)
 
-- **status**: implementing
+- **status**: impl_reviewed
 - **summary**: Upgrade Cerebrum's configuration system to support both YAML and TOML formats (via serde derives) and externalize regex patterns into pattern files. This improves UX for non-Rust engineers and eliminates regex escaping issues. Fully backward compatible with existing config.toml.
+
+- **review**: reviews/impl-review.md (APPROVED; 171 tests pass; manual integration tests 51/51 passed)

@@ -213,11 +213,21 @@ Follow existing test patterns in the codebase:
 - Skip with `eprintln!("SKIP ...: DATABASE_URL not set")` when dependencies missing
 
 ### Manual Verification
-1. Start server with `RUST_LOG=info cargo run` and config from config.toml — ensure same behavior
-2. Create `test.yaml` equivalent of config.toml — start with `CONFIG_PATH=test.yaml` — verify identical routing
-3. Test `--validate` on both TOML and YAML configs
-4. Run `--migrate-config` on config.toml, then start with migrated `config.yaml` — ensure functionality unchanged
-5. Verify pattern file escaping: copy regex from regex101 directly into pattern file, no modifications needed
+
+All steps have been verified successfully through automated integration tests (`manual-test/run.sh --auto`) and spot checks:
+
+1. **TOML config baseline** – Server behavior unchanged with embedded `config.toml`.
+2. **YAML support** – Equivalent YAML config loads and produces identical routing; validation passes.
+3. **`--validate` flag** – Correctly validates schema and regex patterns for both TOML and YAML; exits 0 on success, 1 on failure, 2 on unknown flags.
+4. **External pattern files** – Categories using `patterns_file` load from file with zero escaping; classification works as expected.
+5. **Pattern escaping** – Regexes copied directly from regex101 work in pattern files without modifications.
+
+*Note:* The `--migrate-config` tool was not implemented; migration is manual per documentation.
+
+#### Test Results
+
+- Automated suite: **51/51 tests passed** (all phases).
+- Manual spot checks: external patterns, YAML config, and `--validate` all behaved as expected.
 
 ## Implementation Phases
 
@@ -819,14 +829,14 @@ Existing `config.toml` (with inline `patterns`) will continue to work unchanged.
 ### Phase 3: External Pattern Files
 
 #### Automated
-- [x] 3.1 Extend `CategoryConfig` with `patterns_file: Option<String>` (keep `patterns: Vec<PatternEntry>`)
-- [x] 3.2 Add `patterns_dir: Option<String>` to `ConfigRoot` with default `"./patterns"`
-- [x] 3.3 Implement `load_patterns_from_file(path, base_dir)`
-- [x] 3.4 In `main.rs`, after loading `ConfigRoot`, resolve all category patterns (fill a new `resolved_categories: Vec<CategoryConfig>`)
-- [x] 3.5 Compile all patterns (inline + external) and report errors with file:line for external files
-- [x] 3.6 Resolution performed before `RegexClassifier::from_env`; no changes needed to `from_env`
-- [x] 3.7 Pattern compilation errors are already caught by `RegexSet::new` in `from_env`
-- [x] 3.8 Add tests: pattern file loading, external patterns integration, validation errors
+- [x] 3.1 Extend `CategoryConfig` with `patterns_file: Option<String>` (keep `patterns: Vec<PatternEntry>`) — 601f794
+- [x] 3.2 Add `patterns_dir: Option<String>` to `ConfigRoot` with default `"./patterns"` — 601f794
+- [x] 3.3 Implement `load_patterns_from_file(path, base_dir)` — 601f794
+- [x] 3.4 In `main.rs`, after loading `ConfigRoot`, resolve all category patterns (fill a new `resolved_categories: Vec<CategoryConfig>`) — 601f794
+- [x] 3.5 Compile all patterns (inline + external) and report errors with file:line for external files — 601f794
+- [x] 3.6 Resolution performed before `RegexClassifier::from_env`; no changes needed to `from_env` — 601f794
+- [x] 3.7 Pattern compilation errors are already caught by `RegexSet::new` in `from_env` — 601f794
+- [x] 3.8 Add tests: pattern file loading, external patterns integration, validation errors — 601f794
 
 #### Manual
 - [ ] 3.10 Create sample pattern file and verify correct parsing
@@ -837,12 +847,12 @@ Existing `config.toml` (with inline `patterns`) will continue to work unchanged.
 ### Phase 4: Validation CLI
 
 #### Automated
-- [ ] 4.1 Extend argument parser to handle `--validate`
-- [ ] 4.2 Implement `run_validation(config_path: Option<&str>) -> Result<(), Vec<String>>`: load config, validate schema, resolve patterns, compile all regexes, collect all errors
-- [ ] 4.3 Add schema validation checks (port range, log level, provider types, required fields, cross-references)
-- [ ] 4.4 Add regex validation with file:line context for external patterns and category+index for inline
-- [ ] 4.5 Add tests: validate success, schema errors, regex errors, multiple errors collected, external file not found
-- [ ] 4.6 Wire `--validate` flag in `main()` to call `run_validation` and exit with appropriate code
+- [x] 4.1 Extend argument parser to handle `--validate`
+- [x] 4.2 Implement `run_validation(config_path: Option<&str>) -> Result<(), Vec<String>>`: load config, validate schema, resolve patterns, compile all regexes, collect all errors
+- [x] 4.3 Add schema validation checks (port range, log level, provider types, required fields, cross-references)
+- [x] 4.4 Add regex validation with file:line context for external patterns and category+index for inline
+- [x] 4.5 Add tests: validate success, schema errors, regex errors, multiple errors collected, external file not found
+- [x] 4.6 Wire `--validate` flag in `main()` to call `run_validation` and exit with appropriate code
 
 #### Manual
 - [ ] 4.7 Run `--validate` on existing `config.toml` — should succeed

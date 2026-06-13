@@ -251,12 +251,11 @@ EOF
         return 0
     }
 
-    test_combined_config() {
-        section "Test 5: Combined config.toml (categories + routing)"
-        
-         cat > /tmp/cerebrum-config-test.toml << 'EOF'
-[[categories]]
-name = "FILE_READING"
+     test_combined_config() {
+         section "Test 5: Combined config.toml (categories + routing)"
+         
+          cat > /tmp/cerebrum-config-test.toml << 'EOF'
+[categories.FILE_READING]
 description = "Reading, viewing, inspecting, searching, or navigating files or code"
 threshold = 3
 priority = 1
@@ -264,8 +263,7 @@ patterns = [
   { regex = '(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b', weight = 3 }
 ]
 
-[[categories]]
-name = "SYNTAX_FIX"
+[categories.SYNTAX_FIX]
 description = "Fixing bugs, errors, typos, compilation issues, or broken code"
 threshold = 3
 priority = 2
@@ -273,8 +271,7 @@ patterns = [
   { regex = '(?i)\b(?:fix|correct|repair|patch)\s+(?:this|the|my|a)\s+(?:bug|error|issue|typo|problem|mistake|warning)', weight = 3 }
 ]
 
-[[categories]]
-name = "COMPLEX_REASONING"
+[categories.COMPLEX_REASONING]
 description = "Multi-step reasoning, architecture design, refactoring, deep analysis, or performance optimization"
 threshold = 3
 priority = 3
@@ -282,8 +279,7 @@ patterns = [
   { regex = '(?i)\b(?:architect|design\s+pattern|system\s+design|trade.?off|refactor|restructure|rearchitect)', weight = 3 }
 ]
 
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Simple questions, greetings, general conversation, or short prompts"
 threshold = 1
 priority = 4
@@ -351,12 +347,11 @@ EOF
         return $([ "$all_pass" = true ] && echo 0 || echo 1)
     }
 
-     test_field_integrity() {
-         section "Test 6: Field Value Integrity"
-         
-          cat > /tmp/cerebrum-config-test.toml << 'EOF'
-[[categories]]
-name = "FILE_READING"
+    test_field_integrity() {
+        section "Test 6: Field Value Integrity"
+        
+         cat > /tmp/cerebrum-config-test.toml << 'EOF'
+[categories.FILE_READING]
 description = "Reading files"
 threshold = 100
 priority = 1
@@ -364,21 +359,17 @@ patterns = [
   { regex = '(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b', weight = 3 }
 ]
 
-
-[[categories]]
-name = "SYNTAX_FIX"
+[categories.SYNTAX_FIX]
 description = "Test syntax fix"
 threshold = 3
 priority = 2
 
-[[categories]]
-name = "COMPLEX_REASONING"
+[categories.COMPLEX_REASONING]
 description = "Test complex"
 threshold = 3
 priority = 3
 
-[[categories]]
-name = "CASUAL"
+[categories.CASUAL]
 description = "Test casual"
 threshold = 1
 priority = 4
@@ -453,10 +444,533 @@ EOF
         fi
     }
 
+    # ── Phase 1: Serde Derive Refactor ──
+
+    test_phase1_embedded_config() {
+        section "Phase 1 - Test 8: Embedded config.toml loads correctly"
+
+        if ! start_server ""; then
+            log_fail "Failed to start server with embedded config"
+            return 1
+        fi
+
+        local tests=(
+            "FILE_READING:please read the file src/main.rs"
+            "CASUAL:hello"
+        )
+
+        local all_pass=true
+        for test in "${tests[@]}"; do
+            IFS=':' read -r expected prompt <<< "$test"
+            result=$(classify "$prompt" 2>/dev/null) || result="ERROR"
+            if [ "$result" = "$expected" ]; then
+                log_pass "Embedded config: $expected classified correctly"
+            else
+                log_fail "Embedded config: expected $expected, got $result"
+                all_pass=false
+            fi
+        done
+
+        stop_server
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
+    test_phase1_informative_errors() {
+        section "Phase 1 - Test 9: Error messages remain informative"
+
+        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+[categories.BAD_CAT]
+description = "Bad"
+threshold = 0
+priority = 0
+EOF
+
+        export PROXY_API_BEARER_TOKEN="$TOKEN"
+        export DASHBOARD_BASIC_USER="admin"
+        export DASHBOARD_BASIC_PASSWORD="admin"
+        export CONFIG_PATH="/tmp/cerebrum-config-test.toml"
+
+        local output rc
+        set +e
+        output=$("$BINARY" --validate 2>&1)
+        rc=$?
+        set -e
+
+        if [ $rc -ne 0 ] && echo "$output" | grep -q "threshold"; then
+            log_pass "Validation reports threshold error informatively"
+        else
+            log_fail "Validation did not report threshold error (rc=$rc, output: $output)"
+            return 1
+        fi
+
+        unset CONFIG_PATH
+        return 0
+    }
+
+    # ── Phase 2: Multi-Format Support ──
+
+    test_phase2_yaml_config() {
+        section "Phase 2 - Test 10: YAML config starts and classifies"
+
+        cat > /tmp/cerebrum-config-test.yaml << 'YAMLEOF'
+server:
+  port: 10000
+  log_level: info
+  log_format: compact
+
+http:
+  max_upstream_body_bytes: 10485760
+  keepalive_interval_secs: 15
+  request_body_limit_bytes: 10485760
+  client_timeout_secs: 120
+  client_connect_timeout_secs: 30
+  streaming_channel_capacity: 32
+
+database:
+  connection_retries: 3
+  retry_base_ms: 1000
+  max_connections: 10
+  acquire_timeout_secs: 30
+  idle_timeout_secs: 1800
+  log_concurrency_limit: 100
+
+persistence:
+  backend: memory
+
+classifiers:
+  enabled: true
+  order:
+    - regex
+    - llm
+
+regex_classifier:
+  enabled: true
+  short_prompt_len: 30
+
+categories:
+  FILE_READING:
+    description: "Reading, viewing, inspecting, searching, or navigating files or code"
+    threshold: 3
+    priority: 1
+    patterns:
+      - regex: '(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b'
+        weight: 3
+  SYNTAX_FIX:
+    description: "Fixing bugs, errors, typos, compilation issues, or broken code"
+    threshold: 3
+    priority: 2
+    patterns:
+      - regex: '(?i)\b(?:fix|correct|repair|patch)\s+(?:this|the|my|a)\s+(?:bug|error|issue|typo|problem|mistake|warning)'
+        weight: 3
+  COMPLEX_REASONING:
+    description: "Multi-step reasoning, architecture design, refactoring"
+    threshold: 3
+    priority: 3
+    patterns:
+      - regex: '(?i)\b(?:architect|design\s+pattern|system\s+design|trade.?off|refactor|restructure|rearchitect)'
+        weight: 3
+  CASUAL:
+    description: "Simple questions, greetings, general conversation"
+    threshold: 1
+    priority: 4
+    patterns:
+      - regex: '(?i)^\s*(?:hi|hey|hello|greetings|good\s+morning|good\s+afternoon|good\s+evening|howdy)(?:\s+there)?[\s!.,]*$'
+        weight: 3
+
+negative_patterns:
+  - regex: '(?i)\b(?:read|show|display|cat|view|open)\s+(?:the|this|my|a)\s+\w*(?:architecture|design|system|pattern|refactor)'
+    suppressed: COMPLEX_REASONING
+    penalty: 2
+
+routing:
+  FILE_READING:
+    model: meta/llama-3.1-70b-instruct
+    endpoint: https://integrate.api.nvidia.com/v1/chat/completions
+    provider_type: nvidia_nim
+    api_key_env: NVIDIA_API_KEY
+  SYNTAX_FIX:
+    model: meta/llama-3.1-8b-instruct
+    endpoint: https://integrate.api.nvidia.com/v1/chat/completions
+    provider_type: nvidia_nim
+    api_key_env: NVIDIA_API_KEY
+  COMPLEX_REASONING:
+    model: meta/llama-3.3-70b-instruct
+    endpoint: https://integrate.api.nvidia.com/v1/chat/completions
+    provider_type: nvidia_nim
+    api_key_env: NVIDIA_API_KEY
+  CASUAL:
+    model: meta/llama-3.1-8b-instruct
+    endpoint: https://integrate.api.nvidia.com/v1/chat/completions
+    provider_type: nvidia_nim
+    api_key_env: NVIDIA_API_KEY
+  DEFAULT:
+    model: meta/llama-3.1-8b-instruct
+    endpoint: https://integrate.api.nvidia.com/v1/chat/completions
+    provider_type: nvidia_nim
+    api_key_env: NVIDIA_API_KEY
+
+baseline_model: meta/llama-3.3-70b-instruct
+classify_db_log: false
+
+auth_provider:
+  - type: openai_compatible
+    header: authorization
+    value_template: "Bearer {api_key}"
+  - type: nvidia_nim
+    header: authorization
+    value_template: "Bearer {api_key}"
+
+model_costs:
+  claude-3.5-sonnet: 3.0
+  gpt-4o: 2.5
+
+dashboard:
+  default_hours: 24
+  hours_min: 1
+  hours_max: 720
+  page_limit: 20
+  page_limit_max: 100
+  recent_count: 5
+YAMLEOF
+
+        if ! start_server "/tmp/cerebrum-config-test.yaml"; then
+            log_fail "Failed to start server with YAML config"
+            return 1
+        fi
+
+        local tests=(
+            "FILE_READING:please read the file src/main.rs"
+            "COMPLEX_REASONING:architect a distributed rate limiter"
+            "CASUAL:hello"
+        )
+
+        local all_pass=true
+        for test in "${tests[@]}"; do
+            IFS=':' read -r expected prompt <<< "$test"
+            result=$(classify "$prompt" 2>/dev/null) || result="ERROR"
+            if [ "$result" = "$expected" ]; then
+                log_pass "YAML config: $expected classified correctly"
+            else
+                log_fail "YAML config: expected $expected, got $result"
+                all_pass=false
+            fi
+        done
+
+        stop_server
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
+    test_phase2_yaml_validate() {
+        section "Phase 2 - Test 11: YAML config validates successfully"
+
+        export CONFIG_PATH="/tmp/cerebrum-config-test.yaml"
+        export PROXY_API_BEARER_TOKEN="$TOKEN"
+        export DASHBOARD_BASIC_USER="admin"
+        export DASHBOARD_BASIC_PASSWORD="admin"
+
+        local output
+        output=$("$BINARY" --validate 2>&1)
+        local rc=$?
+
+        unset CONFIG_PATH
+
+        if [ $rc -eq 0 ]; then
+            log_pass "YAML config validates successfully"
+            return 0
+        else
+            log_fail "YAML config validation failed: $output"
+            return 1
+        fi
+    }
+
+    # ── Phase 3: External Pattern Files ──
+
+    test_phase3_external_patterns() {
+        section "Phase 3 - Test 12: External pattern files load and classify"
+
+        mkdir -p /tmp/cerebrum-patterns
+
+        cat > /tmp/cerebrum-patterns/file_reading.patterns << 'EOF'
+3 | (?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b
+2 | (?i)\b(?:look|go|navigate)\s+(?:at|through|to|into)\s+(?:the\s+)?(?:file|directory|code|source)
+EOF
+
+        cat > /tmp/cerebrum-patterns/casual.patterns << 'EOF'
+3 | (?i)^\s*(?:hi|hey|hello|greetings|good\s+morning|good\s+afternoon|good\s+evening|howdy)(?:\s+there)?[\s!.,]*$
+2 | (?i)^\s*(?:thanks|thank\s+you|thx|ty|appreciate\s+it|cheers|thanks\s+a\s+lot)[\s!.,]*$
+EOF
+
+        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+patterns_dir = "/tmp/cerebrum-patterns"
+
+[categories.FILE_READING]
+description = "Reading files"
+threshold = 3
+priority = 1
+patterns_file = "file_reading.patterns"
+
+[categories.CASUAL]
+description = "Simple questions"
+threshold = 1
+priority = 4
+patterns_file = "casual.patterns"
+
+[routing.FILE_READING]
+model = "meta/llama-3.1-70b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.CASUAL]
+model = "meta/llama-3.1-8b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.DEFAULT]
+model = "meta/llama-3.1-8b-instruct"
+provider_type = "nvidia_nim"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+api_key_env = "NVIDIA_API_KEY"
+EOF
+
+        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+            log_fail "Failed to start server with external pattern files"
+            return 1
+        fi
+
+        local all_pass=true
+
+        result=$(classify "please read the file src/main.rs" 2>/dev/null) || result="ERROR"
+        if [ "$result" = "FILE_READING" ]; then
+            log_pass "External pattern: FILE_READING classified correctly"
+        else
+            log_fail "External pattern: expected FILE_READING, got $result"
+            all_pass=false
+        fi
+
+        result=$(classify "hello" 2>/dev/null) || result="ERROR"
+        if [ "$result" = "CASUAL" ]; then
+            log_pass "External pattern: CASUAL classified correctly"
+        else
+            log_fail "External pattern: expected CASUAL, got $result"
+            all_pass=false
+        fi
+
+        stop_server
+        rm -rf /tmp/cerebrum-patterns
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
+    test_phase3_pattern_file_validation() {
+        section "Phase 3 - Test 13: Invalid pattern file detected by --validate"
+
+        mkdir -p /tmp/cerebrum-patterns
+
+        cat > /tmp/cerebrum-patterns/bad.patterns << 'EOF'
+3 | (?i)\b(?:read|show)\s+file\b
+BADWEIGHT | not a number
+NO_DELIMITER_LINE
+EOF
+
+        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+patterns_dir = "/tmp/cerebrum-patterns"
+
+[categories.TEST_CAT]
+description = "Test"
+threshold = 3
+priority = 1
+patterns_file = "bad.patterns"
+
+[routing.TEST_CAT]
+model = "test-model"
+provider_type = "nvidia_nim"
+endpoint = "https://example.com"
+api_key_env = "NVIDIA_API_KEY"
+EOF
+
+        export CONFIG_PATH="/tmp/cerebrum-config-test.toml"
+        export PROXY_API_BEARER_TOKEN="$TOKEN"
+        export DASHBOARD_BASIC_USER="admin"
+        export DASHBOARD_BASIC_PASSWORD="admin"
+
+        local output rc
+        set +e
+        output=$("$BINARY" --validate 2>&1)
+        rc=$?
+        set -e
+
+        unset CONFIG_PATH
+        rm -rf /tmp/cerebrum-patterns
+
+        if [ $rc -ne 0 ] && echo "$output" | grep -q "invalid weight"; then
+            log_pass "Invalid pattern file detected with informative error"
+            return 0
+        else
+            log_fail "Invalid pattern file not detected (rc=$rc, output: $output)"
+            return 1
+        fi
+    }
+
+    # ── Phase 4: Validation CLI ──
+
+    test_phase4_validate_toml() {
+        section "Phase 4 - Test 14: --validate on existing config.toml succeeds"
+
+        export PROXY_API_BEARER_TOKEN="$TOKEN"
+        export DASHBOARD_BASIC_USER="admin"
+        export DASHBOARD_BASIC_PASSWORD="admin"
+
+        local config_toml_path
+        config_toml_path="$(pwd)/config.toml"
+        export CONFIG_PATH="$config_toml_path"
+
+        local output
+        output=$("$BINARY" --validate 2>&1)
+        local rc=$?
+
+        unset CONFIG_PATH
+
+        if [ $rc -eq 0 ]; then
+            log_pass "--validate on config.toml succeeds (exit 0)"
+            return 0
+        else
+            log_fail "--validate on config.toml failed (rc=$rc): $output"
+            return 1
+        fi
+    }
+
+    test_phase4_validate_invalid_regex() {
+        section "Phase 4 - Test 15: --validate detects invalid regex"
+
+        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+[categories.BAD_REGEX]
+description = "Bad regex test"
+threshold = 3
+priority = 1
+patterns = [
+  { regex = '(?i)valid pattern', weight = 3 },
+  { regex = '[invalid(regex', weight = 3 }
+]
+
+[routing.BAD_REGEX]
+model = "test-model"
+provider_type = "nvidia_nim"
+endpoint = "https://example.com"
+api_key_env = "NVIDIA_API_KEY"
+EOF
+
+        export CONFIG_PATH="/tmp/cerebrum-config-test.toml"
+        export PROXY_API_BEARER_TOKEN="$TOKEN"
+        export DASHBOARD_BASIC_USER="admin"
+        export DASHBOARD_BASIC_PASSWORD="admin"
+
+        local output rc
+        set +e
+        output=$("$BINARY" --validate 2>&1)
+        rc=$?
+        set -e
+
+        unset CONFIG_PATH
+
+        if [ $rc -ne 0 ] && echo "$output" | grep -qi "pattern\|regex\|invalid"; then
+            log_pass "--validate detects invalid regex (exit non-zero)"
+            return 0
+        else
+            log_fail "--validate did not detect invalid regex (rc=$rc): $output"
+            return 1
+        fi
+    }
+
+    test_phase4_validate_schema_errors() {
+        section "Phase 4 - Test 16: --validate detects schema errors"
+
+        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+[server]
+port = 0
+log_level = "invalid_level"
+log_format = "bad_format"
+
+[http]
+client_timeout_secs = 0
+
+[categories.ZERO_THRESH]
+description = "Zero threshold"
+threshold = 0
+priority = 0
+EOF
+
+        export CONFIG_PATH="/tmp/cerebrum-config-test.toml"
+        export PROXY_API_BEARER_TOKEN="$TOKEN"
+        export DASHBOARD_BASIC_USER="admin"
+        export DASHBOARD_BASIC_PASSWORD="admin"
+
+        local output rc
+        set +e
+        output=$("$BINARY" --validate 2>&1)
+        rc=$?
+        set -e
+
+        unset CONFIG_PATH
+
+        local all_pass=true
+
+        if [ $rc -eq 0 ]; then
+            log_fail "Schema errors not detected (exit 0)"
+            return 1
+        fi
+
+        if echo "$output" | grep -q "port"; then
+            log_pass "Schema: invalid port detected"
+        else
+            log_fail "Schema: invalid port not reported"
+            all_pass=false
+        fi
+
+        if echo "$output" | grep -qi "level\|log_level"; then
+            log_pass "Schema: invalid log_level detected"
+        else
+            log_fail "Schema: invalid log_level not reported"
+            all_pass=false
+        fi
+
+        if echo "$output" | grep -q "threshold"; then
+            log_pass "Schema: zero threshold detected"
+        else
+            log_fail "Schema: zero threshold not reported"
+            all_pass=false
+        fi
+
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
+    test_phase4_validate_unknown_args() {
+        section "Phase 4 - Test 17: Unknown CLI argument gives helpful error"
+
+        export PROXY_API_BEARER_TOKEN="$TOKEN"
+        export DASHBOARD_BASIC_USER="admin"
+        export DASHBOARD_BASIC_PASSWORD="admin"
+
+        local output rc
+        set +e
+        output=$("$BINARY" --badflag 2>&1)
+        rc=$?
+        set -e
+
+        if [ $rc -eq 2 ] && echo "$output" | grep -q "unknown argument"; then
+            log_pass "Unknown flag exits 2 with helpful message"
+            return 0
+        else
+            log_fail "Unknown flag behavior unexpected (rc=$rc): $output"
+            return 1
+        fi
+    }
+
     run_automated_tests() {
         echo ""
         echo "╔══════════════════════════════════════════════════════════════════╗"
         echo "║  Automated Integration Tests: Shared Category Config (S-07b)    ║"
+        echo "║  + Config Format Upgrade Manual Tests                          ║"
         echo "╚══════════════════════════════════════════════════════════════════╝"
         echo ""
         
@@ -474,6 +988,18 @@ EOF
         test_combined_config
         test_field_integrity
         test_negative_suppression
+
+        # ── Config Format Upgrade (plan.md) manual tests ──
+        test_phase1_embedded_config
+        test_phase1_informative_errors
+        test_phase2_yaml_config
+        test_phase2_yaml_validate
+        test_phase3_external_patterns
+        test_phase3_pattern_file_validation
+        test_phase4_validate_toml
+        test_phase4_validate_invalid_regex
+        test_phase4_validate_schema_errors
+        test_phase4_validate_unknown_args
         
         echo ""
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

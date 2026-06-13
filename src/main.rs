@@ -50,8 +50,43 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
-    // Parse config before tracing init to get server settings
+    // Parse CLI arguments
+    let args: Vec<String> = std::env::args().collect();
+    let mut enable_validate = false;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--validate" => {
+                enable_validate = true;
+                i += 1;
+            }
+            _ => {
+                eprintln!("unknown argument: {}", args[i]);
+                std::process::exit(2);
+            }
+        }
+    }
+
     let config_path_option = std::env::var("CONFIG_PATH").ok();
+
+    // ── Validation mode ──
+    if enable_validate {
+        let result = config::run_validation(config_path_option.as_deref());
+        match result {
+            Ok(()) => {
+                println!("Configuration valid");
+                std::process::exit(0);
+            }
+            Err(errors) => {
+                for err in &errors {
+                    eprintln!("{}", err);
+                }
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Parse config before tracing init to get server settings
     const DEFAULT_CONFIG_TOML: &str = include_str!("../config.toml");
     let mut config_root: config::ConfigRoot = match toml::from_str(DEFAULT_CONFIG_TOML) {
         Ok(root) => root,
@@ -123,11 +158,10 @@ async fn main() {
                };
 
               // Resolve external pattern files for each category
-              let patterns_dir = config_root
-                  .patterns_dir
-                  .as_deref()
-                  .map(PathBuf::from)
-                  .unwrap_or_else(|| PathBuf::from("./patterns"));
+let patterns_dir = config_root
+                    .patterns_dir
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("./patterns"));
               for cat in &mut categories {
                   if let Some(ref pf) = cat.patterns_file.take() {
                       match config::load_patterns_from_file(pf, &patterns_dir) {

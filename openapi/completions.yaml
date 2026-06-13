@@ -47,7 +47,7 @@ paths:
                     description: Model selected for this category
                   tier:
                     type: string
-                    enum: [Regex, Fallback]
+                    enum: [Regex, FewShot, Fallback]
                 required: [status, category, model, tier]
         "401":
           description: Missing or invalid bearer token
@@ -114,7 +114,7 @@ paths:
                         description: Model selected for this category
                       tier:
                         type: string
-                        enum: [Regex, Fallback]
+                        enum: [Regex, FewShot, Fallback]
                     required: [status, category, model, tier]
                     description: Classification-only response when no upstream is configured
             text/event-stream:

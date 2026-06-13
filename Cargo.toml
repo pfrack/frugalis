@@ -28,6 +28,7 @@ tokio-stream = "0.1"
 futures = "0.3"
 hmac = "0.12"
 sha2 = "0.10"
+dashmap = "6"
 getrandom = "0.2"
 
 [dev-dependencies]

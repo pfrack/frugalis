@@ -3,7 +3,7 @@ use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use regex::Regex;
 use regex::RegexSet;
@@ -89,6 +89,7 @@ pub struct ClassificationResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassificationTier {
     Regex,
+    FewShot,
     Fallback,
 }
 
@@ -395,6 +396,13 @@ pub fn build_llm_classifier_prompt(categories: &[CategoryConfig]) -> String {
 pub struct PatternMeta {
     pub category: String,
     pub weight: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct FewShotExample {
+    pub text: String,
+    pub category: String,
+    pub confidence: f64,
 }
 
 
