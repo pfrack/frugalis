@@ -3789,15 +3789,12 @@ mod slow_tests {
         (url, handle)
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn test_streaming_keepalive_injected() {
+    /// Build an axum test app that routes the SYNTAX_FIX category to the
+    /// given upstream URL, with a 1s keepalive interval. Used by all 4
+    /// keepalive slow tests (1 existing + 3 new) so the app wiring is
+    /// defined in one place.
+    fn build_keepalive_app(url: String, env_var: &'static str) -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        let (url, server_handle) = spawn_slow_sse_server().await;
-        let env = "TEST_STREAM_KA_SLOW";
-        let _guard = EnvGuard(env);
-        std::env::set_var(env, "sk-test");
-
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -3811,7 +3808,7 @@ mod slow_tests {
                 endpoint: url,
                 cost_per_1m_input_tokens: None,
                 provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env.to_string()),
+                api_key_env: Some(env_var.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
@@ -3833,7 +3830,6 @@ mod slow_tests {
         let classifier_chain =
             intent_classifier::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
         let classifier = Some(Arc::new(classifier_chain));
-        // Merge routing from all backends in the chain
         let mut merged_routing = HashMap::new();
         if let Some(cls) = classifier.as_ref() {
             for backend in cls.backends().iter() {
@@ -3866,7 +3862,104 @@ mod slow_tests {
             #[cfg(feature = "otel")]
             metrics: None,
         });
-        let app = build_app(auth_config, app_state);
+        build_app(auth_config, app_state)
+    }
+
+    /// Count SSE keepalive comments in a body, anchored to line start.
+    /// A regression to `data: keepalive\n\n` (a regular SSE event) would
+    /// not match because the substring `data:` precedes `: keepalive`.
+    /// The body may also start with `: keepalive\n\n` (no preceding
+    /// newline), so we count start-of-body matches separately. We split
+    /// on `\n` and count lines that are exactly `: keepalive` — this
+    /// correctly handles consecutive keepalives (which would otherwise
+    /// be missed by `str::matches` due to its non-overlapping behavior).
+    fn count_anchored_keepalives(body: &str) -> usize {
+        body.split('\n')
+            .filter(|line| *line == ": keepalive")
+            .count()
+    }
+
+    /// Fast upstream: sends `data: hello\n\n` within 100ms of headers
+    /// (well below the 1s keepalive interval). The proxy must NOT inject
+    /// a keepalive because the upstream data arrives first.
+    async fn spawn_fast_sse_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/v1/chat/completions");
+        let handle = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let headers = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+            let _ = sock.write_all(headers.as_bytes()).await;
+            let _ = sock.flush().await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let body = "data: hello\n\n";
+            let _ = sock.write_all(body.as_bytes()).await;
+            let _ = sock.flush().await;
+        });
+        (url, handle)
+    }
+
+    /// Chunk-then-idle upstream: sends `data: chunk1\n\n`, idles 1500ms
+    /// (longer than the 1s keepalive interval), then sends
+    /// `data: chunk2\n\n`. The proxy must emit at least one keepalive
+    /// between the two chunks.
+    async fn spawn_chunk_then_idle_sse_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/v1/chat/completions");
+        let handle = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let headers = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+            let _ = sock.write_all(headers.as_bytes()).await;
+            let _ = sock.flush().await;
+            // First chunk
+            let _ = sock.write_all(b"data: chunk1\n\n").await;
+            let _ = sock.flush().await;
+            // Idle 1500ms — keepalive should fire at 1s
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            // Second chunk
+            let _ = sock.write_all(b"data: chunk2\n\n").await;
+            let _ = sock.flush().await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+        (url, handle)
+    }
+
+    /// Long-stall upstream: idles 3500ms (≥ 3 keepalive intervals at 1s)
+    /// then sends `data: hello\n\n`. The proxy must emit ≥ 3 keepalives
+    /// to prove the keepalive loop is sustained over multiple intervals.
+    async fn spawn_long_stall_sse_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/v1/chat/completions");
+        let handle = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let headers = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+            let _ = sock.write_all(headers.as_bytes()).await;
+            let _ = sock.flush().await;
+            // Idle 3500ms — should produce 3 keepalives at 1s, 2s, 3s.
+            tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
+            let body = "data: hello\n\n";
+            let _ = sock.write_all(body.as_bytes()).await;
+            let _ = sock.flush().await;
+        });
+        (url, handle)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_keepalive_injected() {
+        let (url, server_handle) = spawn_slow_sse_server().await;
+        let env = "TEST_STREAM_KA_SLOW";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let app = build_keepalive_app(url, env);
 
         let response = app
             .oneshot(
@@ -3896,13 +3989,144 @@ mod slow_tests {
             .await
             .expect("body should be readable");
         let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // Tightened assertion: anchor the keepalive substring to line start.
+        // A regression to `data: keepalive\n\n` (a regular SSE event with
+        // name "keepalive") would NOT match because `data:` precedes `: keepalive`.
         assert!(
-            body.contains(": keepalive\n\n"),
-            "expected keepalive comment in stream, got: {body}"
+            count_anchored_keepalives(body) >= 1,
+            "expected ≥ 1 anchored keepalive comment, got: {body}"
         );
         assert!(
             body.contains("data: hello"),
             "expected upstream data after keepalive, got: {body}"
+        );
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_keepalive_not_injected_when_upstream_fast() {
+        let (url, server_handle) = spawn_fast_sse_server().await;
+        let env = "TEST_STREAM_KA_FAST";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let app = build_keepalive_app(url, env);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // Fast upstream (< 100ms, well under the 1s keepalive interval) must
+        // NOT trigger a keepalive. The proxy forwards the data immediately.
+        assert_eq!(
+            count_anchored_keepalives(body),
+            0,
+            "fast upstream should NOT inject keepalive, got: {body}"
+        );
+        assert!(
+            body.contains("data: hello"),
+            "expected upstream data to be forwarded, got: {body}"
+        );
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_keepalive_injected_alongside_chunk() {
+        let (url, server_handle) = spawn_chunk_then_idle_sse_server().await;
+        let env = "TEST_STREAM_KA_CHUNK";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let app = build_keepalive_app(url, env);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // Both chunks must be forwarded, AND at least one keepalive must
+        // have fired between them (1500ms idle > 1s interval).
+        assert!(
+            body.contains("data: chunk1"),
+            "expected first chunk, got: {body}"
+        );
+        assert!(
+            body.contains("data: chunk2"),
+            "expected second chunk, got: {body}"
+        );
+        assert!(
+            count_anchored_keepalives(body) >= 1,
+            "expected ≥ 1 keepalive between chunks, got: {body}"
+        );
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_keepalive_multiple_consecutive() {
+        let (url, server_handle) = spawn_long_stall_sse_server().await;
+        let env = "TEST_STREAM_KA_LONG";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let app = build_keepalive_app(url, env);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // 3500ms idle ≥ 3 keepalive intervals at 1s. The keepalive loop
+        // is sustained across multiple intervals.
+        assert!(
+            count_anchored_keepalives(body) >= 3,
+            "expected ≥ 3 keepalives during 3.5s stall, got: {body}"
+        );
+        assert!(
+            body.contains("data: hello"),
+            "expected upstream data after keepalives, got: {body}"
         );
         let _ = server_handle.await;
     }

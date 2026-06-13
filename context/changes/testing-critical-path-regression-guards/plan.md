@@ -1080,25 +1080,25 @@ The `format_sse_error_event` helper is `pub(crate)` or
 
 #### Automated
 
-- [x] 3.1 `cargo test format_sse_error_event_` (helper unit tests pass) — pending
-- [x] 3.2 `cargo test streaming_handler_error_` (integration tests pass; all 5 invariants covered) — pending
-- [x] 3.3 `cargo test streaming_handler_non_2xx_returns_sse_error_event` (existing test still passes) — pending
-- [x] 3.4 `cargo build --release` succeeds — pending
-- [x] 3.5 `cargo clippy --all-targets` reports no new warnings — pending
+- [x] 3.1 `cargo test format_sse_error_event_` (helper unit tests pass) — a6f1eca
+- [x] 3.2 `cargo test streaming_handler_error_` (integration tests pass; all 5 invariants covered) — a6f1eca
+- [x] 3.3 `cargo test streaming_handler_non_2xx_returns_sse_error_event` (existing test still passes) — a6f1eca
+- [x] 3.4 `cargo build --release` succeeds — a6f1eca
+- [x] 3.5 `cargo clippy --all-targets` reports no new warnings — a6f1eca
 
 #### Manual
 
-- [ ] 3.6 Function-level docstring on `handle_streaming_error` describes the 5 invariants in plain language (no `// F1`/`// F2` markers)
-- [ ] 3.7 Inline mid-stream error branch (`src/main.rs:712-720`) calls the same helper (or applies the same escape rule) as `handle_streaming_error`
+- [x] 3.6 Function-level docstring on `handle_streaming_error` describes the 5 invariants in plain language (no `// F1`/`// F2` markers) — a6f1eca
+- [x] 3.7 Inline mid-stream error branch (`src/main.rs:712-720`) calls the same helper (or applies the same escape rule) as `handle_streaming_error` — a6f1eca
 
 ### Phase 4: Risk #2 F3 — Keepalive coverage
 
 #### Automated
 
-- [ ] 4.1 `cargo test slow_tests -- --test-threads=1` (3 new keepalive tests + 1 tightened existing test pass)
-- [ ] 4.2 `cargo test test_streaming_keepalive_injected` (tightened test passes in isolation)
-- [ ] 4.3 `cargo build --release` succeeds
-- [ ] 4.4 `cargo clippy --all-targets` reports no new warnings
+- [x] 4.1 `cargo test slow_tests -- --test-threads=1` (3 new keepalive tests + 1 tightened existing test pass) — pending
+- [x] 4.2 `cargo test test_streaming_keepalive_injected` (tightened test passes in isolation) — pending
+- [x] 4.3 `cargo build --release` succeeds — pending
+- [x] 4.4 `cargo clippy --all-targets` reports no new warnings — pending
 
 #### Manual
 
