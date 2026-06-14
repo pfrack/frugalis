@@ -880,10 +880,13 @@ pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
 ///    Large upstream bodies would amplify latency and memory pressure
 ///    on the proxy, and SSE clients don't need the full body to surface
 ///    an error.
-/// 2. **JSON escape** — `\`, `"`, `\n`, `\r` in the upstream error text
-///    are replaced with safe equivalents before serialization. Without
+/// 2. **JSON escape** — `\`, `"`, and all C0 control chars
+///    (`\0x00`-`\0x1F`, including `\n`, `\r`, `\t`, `\b`, `\f`, and
+///    other non-printable bytes) in the upstream error text are
+///    replaced with safe equivalents before serialization. Without
 ///    this, a malicious upstream could inject SSE frames or break the
 ///    JSON parse that downstream consumers use to detect error events.
+///    See `format_sse_error_event` for the escape rule.
 /// 3. **SSE event format** — the body is `event: error\ndata: {"error":"…"}\n\n`.
 ///    A valid SSE event with the `error` event name lets clients using
 ///    `EventSource`-style subscribe to error events distinctly from data
@@ -2192,8 +2195,8 @@ mod tests {
             }
         };
 
-        std::env::set_var("MOCK_API_KEY", "sk-test");
         let _mock_api_key_guard = EnvGuard("MOCK_API_KEY");
+        std::env::set_var("MOCK_API_KEY", "sk-test");
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
 
         let (app, server) = build_app_with_persistence(pool.clone(), semaphore.clone(), None);
@@ -2262,8 +2265,8 @@ mod tests {
             }
         };
 
-        std::env::set_var("MOCK_API_KEY", "sk-test");
         let _mock_api_key_guard = EnvGuard("MOCK_API_KEY");
+        std::env::set_var("MOCK_API_KEY", "sk-test");
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
 
         let (app, server) = build_app_with_persistence(pool.clone(), semaphore.clone(), None);

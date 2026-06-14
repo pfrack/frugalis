@@ -18,6 +18,32 @@
 | Pattern Consistency | WARNING — F2 docstring retains `F2` cross-reference label (per `lessons.md:26-31`, references should be by lessons.md rule, not finding number) |
 | Success Criteria | PASS — 215 fast + 5 slow tests, all 5 gates (build, test, slow_tests, clippy `-D warnings`, fmt) green on 2026-06-14 |
 
+## Addenda (post-rollout corrections)
+
+### Addendum 6: Re-review findings (post-triage)
+
+The re-review of the 8 triage fixes (commit `3dc8571`'s review + the 8
+fix commits) found 2 cross-fix interactions that were missed by the
+original triage:
+
+- **Re-review A (F5 docstring invariant 2 stale after F8)**: After F8
+  extended `format_sse_error_event` to all C0 control chars, the
+  `handle_streaming_error` docstring's invariant 2 (`src/main.rs:883-886`)
+  still said the helper escapes only `\\`, `"`, `\n`, `\r`. The F5 fix
+  (c529f7b) was accurate when written but became stale when F8 (63b7b99)
+  landed later. Fixed by re-rewriting the invariant 2 paragraph to
+  mention all C0 control chars and reference the helper's escape rule.
+- **Re-review B (F7 EnvGuard ordering inverted at 2 of 3 sites)**: The
+  F7 fix added EnvGuard to `persistence_integration_sse_streaming_*`
+  tests at `src/main.rs:2198` and `:2268`, but in the wrong order
+  (`set_var` first, then `EnvGuard`). The 3rd F7 site (`:3235`) and
+  the F3 template (`:3640-3641`) use the correct order. Fixed by
+  swapping the 2 lines at `:2198-2199` and `:2268-2269` to match the
+  codebase convention.
+
+Both fixes are mechanical (1 paragraph + 4 lines). All gates remain
+green: 221 fast + 5 slow tests, clippy `-D warnings` clean, fmt clean.
+
 ## Findings
 
 ### F1 — Squashed-merge scope drift (readme-bootstrap + opentelemetry-integration bundled into Tests #12)
