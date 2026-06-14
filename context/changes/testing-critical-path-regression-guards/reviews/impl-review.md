@@ -43,7 +43,7 @@
   - Tradeoff: Future PRs may continue this pattern; plan-vs-PR-scope alignment is broken.
   - Confidence: HIGH on preserving work, LOW on establishing a sustainable process.
   - Blind spot: Doesn't address that the testing PR review (this one) couldn't meaningfully review the bundled work in plan context.
-- **Decision**: PENDING
+- **Decision**: ACCEPTED-AS-RULE: "Squash merges must not bundle unrelated in-flight changes into one PR" (added to `context/foundation/lessons.md`).
 
 ### F2 — `test_log_classification_failure_does_not_block_response` does not assert the warn log
 
