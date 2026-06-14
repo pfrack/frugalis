@@ -536,6 +536,6 @@ mod tests {
                 )
                 .await;
         }
-        assert!(classifier.vocabulary.len() > 0);
+        assert!(!classifier.vocabulary.is_empty());
     }
 }

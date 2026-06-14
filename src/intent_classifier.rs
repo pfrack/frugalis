@@ -250,7 +250,7 @@ impl LLMClassifier {
         })
         .abort_handle();
 
-        let classifier = Self {
+        Self {
             client,
             model: config.model,
             endpoint: config.endpoint,
@@ -262,9 +262,7 @@ impl LLMClassifier {
             prompt_template,
             timeout: std::time::Duration::from_secs(config.timeout_secs),
             task_handle,
-        };
-
-        classifier
+        }
     }
 
     async fn classify_async(&self, prompt: &str) -> ClassificationResult {

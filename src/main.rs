@@ -35,11 +35,7 @@ struct RequestMetrics {
 
 #[cfg(feature = "otel")]
 impl RequestMetrics {
-    fn new(
-        metrics: Option<telemetry::Metrics>,
-        method: &'static str,
-        route: &'static str,
-    ) -> Self {
+    fn new(metrics: Option<telemetry::Metrics>, method: &'static str, route: &'static str) -> Self {
         Self {
             metrics,
             method,
@@ -239,10 +235,7 @@ async fn main() {
     let (classifier, routing, model_costs, baseline_model, fewshot_classifier) = {
         let categories_res = config::load_categories_from_value(&config_root);
         let categories_ok = categories_res.is_ok();
-        let mut categories = match categories_res {
-            Ok(c) => c,
-            Err(_) => vec![],
-        };
+        let mut categories = categories_res.unwrap_or_default();
 
         // Resolve external pattern files for each category
         let patterns_dir = config_root
@@ -510,7 +503,9 @@ async fn main() {
         match shutdown_result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => warn!("OTel shutdown task panicked: {e}"),
-            Err(_) => warn!("OTel shutdown timed out after 5s; exiting with telemetry possibly unflushed"),
+            Err(_) => {
+                warn!("OTel shutdown timed out after 5s; exiting with telemetry possibly unflushed")
+            }
         }
     }
 }
@@ -1071,16 +1066,14 @@ async fn completion_handler(
         Err(e) => {
             #[cfg(feature = "otel")]
             if let Some(ref metrics) = state.metrics {
-                metrics
-                    .upstream_duration_seconds
-                    .record(
-                        upstream_start.elapsed().as_secs_f64(),
-                        &[
-                            KeyValue::new("provider", classification.provider_type.clone()),
-                            KeyValue::new("model", classification.model.clone()),
-                            KeyValue::new("status", "502"),
-                        ],
-                    );
+                metrics.upstream_duration_seconds.record(
+                    upstream_start.elapsed().as_secs_f64(),
+                    &[
+                        KeyValue::new("provider", classification.provider_type.clone()),
+                        KeyValue::new("model", classification.model.clone()),
+                        KeyValue::new("status", "502"),
+                    ],
+                );
             }
             log_classification(&state, &classification, &body_str, start, "upstream_error");
             #[cfg(feature = "otel")]
@@ -1094,16 +1087,14 @@ async fn completion_handler(
 
     #[cfg(feature = "otel")]
     if let Some(ref metrics) = state.metrics {
-        metrics
-            .upstream_duration_seconds
-            .record(
-                upstream_start.elapsed().as_secs_f64(),
-                &[
-                    KeyValue::new("provider", classification.provider_type.clone()),
-                    KeyValue::new("model", classification.model.clone()),
-                    KeyValue::new("status", upstream_response.status().as_u16().to_string()),
-                ],
-            );
+        metrics.upstream_duration_seconds.record(
+            upstream_start.elapsed().as_secs_f64(),
+            &[
+                KeyValue::new("provider", classification.provider_type.clone()),
+                KeyValue::new("model", classification.model.clone()),
+                KeyValue::new("status", upstream_response.status().as_u16().to_string()),
+            ],
+        );
     }
 
     if client_wants_stream {
@@ -1207,7 +1198,7 @@ async fn feedback_handler(
     drop(routing);
 
     // Clamp satisfaction to [0.0, 1.0] as per OpenAPI spec
-    let satisfaction = body.satisfaction.max(0.0).min(1.0);
+    let satisfaction = body.satisfaction.clamp(0.0, 1.0);
     fewshot
         .add_feedback(
             body.text,

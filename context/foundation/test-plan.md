@@ -6,7 +6,7 @@
 >
 > Refresh: re-run `/10x-test-plan --refresh` when stale (see §8).
 >
-> Last updated: 2026-06-13 (Phase 1 → planned)
+> Last updated: 2026-06-14 (Phase 1 → implementation complete)
 
 ## 1. Strategy
 
@@ -67,7 +67,7 @@ orchestrator updates Status as artifacts appear on disk.
 
 | # | Phase name | Goal (one line) | Risks covered | Test types | Status | Change folder |
 |---|------------|------------------|----------------|------------|--------|----------------|
-| 1 | Critical-path regression guards | Defend Risk #1 + #2 at the cheapest layer; lock the chain-handoff contract and the F1–F4 invariants | #1, #2 | integration (chain escalation with mock backends), regression (invariant assertions on `completion_handler`) | planned | `testing-critical-path-regression-guards` |
+| 1 | Critical-path regression guards | Defend Risk #1 + #2 at the cheapest layer; lock the chain-handoff contract and the F1–F4 invariants | #1, #2 | integration (chain escalation with mock backends), regression (invariant assertions on `completion_handler`) | complete | `testing-critical-path-regression-guards` |
 | 2 | Persistence + snippet guardrails | Make the NFR ("async logging failure does not block response") observable, and prove snippet extraction holds across all three backends + adversarial PII inputs | #3, #5, #6 | integration (`log_inference` against unreachable backend), testcontainers cross-backend, property tests on snippet extraction | not started | — |
 | 3 | Dashboard + auth coverage | Close the 0-test gap on `src/dashboard.rs` (4 routes + macro) and prove the constant-time compare invariant holds at every call site | #4, #7 | HTTP integration (dashboard routes via `test_app()`), unit (constant-time compare), grep-based guard | not started | — |
 | 4 | CI floor + cookbook | Wire `slow_tests` into a scheduled CI job, add a coverage-fail threshold, and update §6 cookbook with the patterns the rollout just shipped | cross-cutting | gates + cookbook (no new test code) | not started | — |
@@ -129,29 +129,41 @@ the relevant rollout phase ships; before that, the sub-section reads
 
 ### 6.1 Adding a unit test
 
-- **Location**: same file as the unit under test, inside a `#[cfg(test)] mod tests` block (per `AGENTS.md` rule).
+- **Location**: same file as the unit under test, inside a `#[cfg(test)] mod tests` block (per `AGENTS.md` rule). Test-only backends shared across `mod tests` blocks (e.g. across files) live in a `pub(crate) mod test_util` sibling block, not duplicated.
 - **Naming**: `test_<unit>_<case>`.
-- **Reference test**: TBD — see §3 Phase 1.
+- **Side-effect observation**: when the unit under test is a `ClassifierChain`-style orchestrator that returns a `ClassificationResult` whose `tier` field cannot distinguish backends (e.g. `LLMClassifier` returns `tier: Regex` on success and `ClassificationTier` has only `Regex | FewShot | Fallback`), use a test-only `CountingClassifier` impl that holds `Arc<AtomicUsize>` + a configurable `ClassificationResult` and increments the counter on each `classify()` call. Assert on the counter — never on `tier` inspection.
+- **Reference test**: `CountingClassifier` in `src/intent_classifier.rs:679-711` (`pub(crate) mod test_util`) and the 3 stub-based 3-backend chain tests in `src/intent_classifier.rs:1040`, `:1091`, `:1149` (3-backend short-circuits-when-first-matches, short-circuits-when-middle-matches, returns-last-on-all-fallback).
 - **Run locally**: `cargo test <test_name>` (fast) or `cargo test slow_tests` (real-delay).
 
 ### 6.2 Adding an integration test
 
-- **Location**: same file as the unit under test, inside `#[cfg(test)] mod tests`; use the shared `test_app()` harness (per `AGENTS.md`).
-- **Mocking policy**: mock only at the HTTP edge via `httpmock`. Never mock internal modules. For cross-backend DB work, use `testcontainers` (Phase 2).
-- **Reference test**: TBD — see §3 Phase 1 (chain escalation) and §3 Phase 2 (cross-backend log_inference).
+- **Location**: same file as the unit under test, inside `#[cfg(test)] mod tests`; use the shared `test_app()` / `test_app_with_classifier()` / `build_app_with_persistence_backend()` harness family (per `AGENTS.md`).
+- **Mocking policy**: mock only at the HTTP edge via `httpmock`. Never mock internal modules. For cross-backend DB work, use `testcontainers` (Phase 2). For in-memory persistence, use the refactored `build_app_with_persistence_backend(Arc<DbBackend>, ...)` — pass `DbBackend::Memory(MemoryBackend::new())` directly (no `DATABASE_URL` required, runs in default CI).
+- **Side-effect observation** (for orchestrator tests): use `CountingClassifier` from `intent_classifier::test_util` to assert on backend call counts after sending a real HTTP request.
+- **Reference test**: `test_chain_3_backend_escalates_to_llm` in `src/main.rs:1622` (wires a real `[RegexClassifier, CountingClassifier, LLMClassifier]` chain via `httpmock`, asserts the LLM is called exactly once and `CountingClassifier` counter is 1); and `test_snippet_path_truncates_to_200_chars` / `test_snippet_path_does_not_contain_full_prompt` / `test_log_classification_failure_does_not_block_response` in `src/main.rs:2314`, `:2371`, `:2447` (snippet-path F1 invariants via real axum stack + in-memory backend).
 - **Run locally**: `cargo test <test_name>`.
 
 ### 6.3 Adding an e2e test
 
-- TBD — see §3 Phase 1. (No e2e layer exists today; `test_app()` + axum `Request` is the cheapest layer that exercises the full proxy stack including middleware.)
+- **No e2e layer is wired in this project today** (and none is on the roadmap — see §3 Phase 4). The de facto e2e analog is the `test_app()` / `test_app_with_classifier()` / `build_app_with_persistence_backend()` harness family in `src/main.rs:1406`, `:1438`, `:2743`, which spins up the full axum stack (router, middleware, `AppState`, classifier chain, persistence backend) in-process and exercises it via `tower::ServiceExt::oneshot` requests.
+- **When to add a new harness variant** vs. reuse `test_app()`: add a new variant when you need (a) a non-default `AppState` field (e.g. a real `FewShotClassifier` or non-empty `routing` map), or (b) a real `DbBackend` for snippet-path tests. The naming convention is `test_app_with_<discriminator>` (e.g. `test_app_with_classifier`, `build_app_with_persistence_backend`).
+- **Reference test**: `test_chain_3_backend_escalates_to_llm` in `src/main.rs:1622` (uses `test_app_with_classifier()` at `:1438`); `test_snippet_path_truncates_to_200_chars` in `src/main.rs:2314` (uses `build_app_with_persistence_backend()` at `:2743` with `DbBackend::Memory`).
+- **Run locally**: `cargo test <test_name>`.
 
 ### 6.4 Adding a test for a new API endpoint
 
-- TBD — see §3 Phase 1 (chain handoff on `/v1/chat/completions`) and §3 Phase 3 (dashboard routes).
+- **Pattern**: build a test app via `test_app_with_classifier()` (or a harness variant from §6.3); build a `tower::ServiceExt::oneshot` request to the new endpoint's path; assert on response status, response body (parse as JSON via `serde_json::from_str` rather than substring-match — see the `parse_json_body` helper in `src/main.rs` mod tests), and on any side-effect-relevant state (backend call counts, persisted records, emitted log events).
+- **Authentication**: every endpoint test must include a `Bearer <token>` header (or basic-auth header for dashboard routes) and at least one negative test that omits the header and asserts 401. Reuse `AuthConfig::from_values("proxy-token", "user", "password")` from `src/auth.rs` for the harness; do not reimplement the auth check in the test.
+- **Reference test**: `test_chain_3_backend_escalates_to_llm` in `src/main.rs:1622` (exercises `/v1/chat/completions` and the chain's escalation logic); `test_snippet_path_truncates_to_200_chars` in `src/main.rs:2314` (exercises the snippet path through `log_classification` → `log_inference` → `MemoryBackend::insert_inference`).
+- **Run locally**: `cargo test <test_name>`.
 
 ### 6.5 Adding a test for a new classifier backend
 
-- TBD — see §3 Phase 1. The `IntentClassify` trait has three live implementations (`RegexClassifier`, `FewshotClassifier`, `LLMClassifier`); the chain-handoff test in Phase 1 is the canonical example.
+- **Pattern**: define a test-only `IntentClassify` impl in a `pub(crate) mod test_util` block (sibling to `mod tests`) in the same file as the production classifier subsystem (`src/intent_classifier.rs`). Hold an `Arc<AtomicUsize>` counter and a configurable `ClassificationResult`; impl `IntentClassify::classify()` to increment the counter and return the configured result. The struct must be `Send + Sync + 'static` to fit in `ClassifierChain::new(backends: Vec<Arc<dyn IntentClassify + Send + Sync>>)`.
+- **Wiring**: pass `Arc::new(<YourBackend> { ... })` into `ClassifierChain::new(vec![arc1, arc2, arc3])` (see `src/intent_classifier.rs:147`); assert on `backend.counter.load(Ordering::SeqCst)` after `chain.classify(&prompt).await`.
+- **Why side-effect observation, not tier inspection**: `LLMClassifier` returns `tier: ClassificationTier::Regex` on success and the `ClassificationTier` enum has only `Regex | FewShot | Fallback` (no `Llm` variant). Tier inspection cannot distinguish "regex matched" from "LLM matched" — the counter is the only honest signal.
+- **Reference test**: `CountingClassifier` in `src/intent_classifier.rs:679-711` (`pub(crate) mod test_util`); chain-wired examples in `src/intent_classifier.rs:1040`, `:1091`, `:1149` (3-backend stub scenarios) and `src/main.rs:1622` (real-axum-stack chain integration test).
+- **Run locally**: `cargo test <test_name>`.
 
 ### 6.6 Per-rollout-phase notes
 
