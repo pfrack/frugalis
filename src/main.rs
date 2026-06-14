@@ -793,8 +793,14 @@ fn handle_streaming_response(
                             // Use the same SSE error event format as
                             // `handle_streaming_error` (non-2xx upstream) so
                             // the two error paths produce byte-compatible
-                            // frames — a single SSE error contract.
-                            let sse_error = format_sse_error_event(&_e.to_string());
+                            // frames — a single SSE error contract. Apply the
+                            // same 512-char truncate to bound the SSE event
+                            // size (the inline branch's `_e` is a
+                            // `reqwest::Error`; while typically < 1 KB, a
+                            // pathological upstream could produce a longer
+                            // string).
+                            let error_text: String = _e.to_string().chars().take(512).collect();
+                            let sse_error = format_sse_error_event(&error_text);
                             let _ = tx.send(Bytes::from(sse_error)).await;
                             break;
                         }

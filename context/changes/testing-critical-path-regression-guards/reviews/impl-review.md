@@ -152,7 +152,7 @@
   - Tradeoff: Minor — extract a small `truncate_error_for_sse` helper or inline the truncate.
   - Confidence: HIGH.
   - Blind spot: Pre-existing gap; not introduced by the rollout.
-- **Decision**: PENDING
+- **Decision**: FIXED via Fix A (applied 512-char truncate at `src/main.rs:797`; the inline branch's `_e: reqwest::Error` is typically < 1 KB, so the 2 KB body cap from `handle_streaming_error` is not needed upstream — only the 512-char truncate).
 
 ### F10 — Phase 1.4 optional extension + stale line-number citations in the plan
 
