@@ -2171,6 +2171,7 @@ mod tests {
         };
 
         std::env::set_var("MOCK_API_KEY", "sk-test");
+        let _mock_api_key_guard = EnvGuard("MOCK_API_KEY");
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
 
         let (app, server) = build_app_with_persistence(pool.clone(), semaphore.clone(), None);
@@ -2240,6 +2241,7 @@ mod tests {
         };
 
         std::env::set_var("MOCK_API_KEY", "sk-test");
+        let _mock_api_key_guard = EnvGuard("MOCK_API_KEY");
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
 
         let (app, server) = build_app_with_persistence(pool.clone(), semaphore.clone(), None);
@@ -3208,6 +3210,7 @@ mod tests {
     #[serial]
     async fn test_streaming_handler_non_2xx_returns_sse_error_event() {
         let env = "TEST_STREAM_ERR";
+        let _env_guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
         let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {

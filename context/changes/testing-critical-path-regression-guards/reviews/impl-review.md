@@ -114,7 +114,7 @@
   - Tradeoff: Same as F1.
   - Confidence: HIGH.
   - Blind spot: None.
-- **Decision**: PENDING (rolled into F1)
+- **Decision**: SKIPPED (rolled into F1, which is ACCEPTED-AS-RULE: "Squash merges must not bundle unrelated in-flight changes into one PR"; the F6 finding is a specific instance of the F1 lesson and doesn't need its own decision).
 
 ### F7 — Pre-existing env-var leaks in 3 tests (not introduced by rollout)
 
@@ -128,7 +128,7 @@
   - Tradeoff: None significant.
   - Confidence: HIGH.
   - Blind spot: There may be other env-var leaks elsewhere; a quick `rg "std::env::set_var" src/` would surface them.
-- **Decision**: PENDING
+- **Decision**: FIXED via Fix A (added `_mock_api_key_guard = EnvGuard("MOCK_API_KEY")` at the 2 `persistence_integration_sse_streaming_*` tests in `src/main.rs:2170` and `:2239`; added `_env_guard = EnvGuard(env)` to `test_streaming_handler_non_2xx_returns_sse_error_event` at `:3190`).
 
 ### F8 — `format_sse_error_event` does not escape all JSON control chars (RFC 8259 gap)
 
