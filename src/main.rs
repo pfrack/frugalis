@@ -829,21 +829,37 @@ fn handle_streaming_response(
 /// Build the SSE error event body for an upstream error message:
 /// `event: error\ndata: {"error":"<msg>"}\n\n`.
 ///
-/// Applies the JSON-escape rule (`\\` → `\\\\`, `"` → `\\"`, `\n`/`\r`
-/// → space) to the embedded message. The 2 KB body cap and 512-char
-/// truncate (upstream on `handle_streaming_error`) and the status
-/// passthrough + `Content-Type: text/event-stream` + `Cache-Control:
-/// no-cache` (downstream on the response) are NOT this helper's concern.
+/// Applies the JSON-escape rule to the embedded message:
+/// - `\\` → `\\\\` (backslash escape, JSON-required)
+/// - `"` → `\\"` (double-quote escape, JSON-required)
+/// - All C0 control chars (`\0x00`-`\0x1F`, including `\n`, `\r`,
+///   `\t`, `\b`, `\f`, and other non-printable bytes) → ` ` (space)
+///
+/// The C0 → space replacement ensures the resulting `data:` payload
+/// is valid JSON (any literal C0 char would break `serde_json::from_str`
+/// or smuggle SSE frames into the event body) and is consistent with
+/// the plan's original `\n`/`\r` → space rule — extending it to the
+/// full C0 range closes the RFC 8259 §7 gap (tab, backspace, form
+/// feed, and other control chars) that was previously a no-escape
+/// hole. The 2 KB body cap and 512-char truncate (upstream on
+/// `handle_streaming_error`) and the status passthrough +
+/// `Content-Type: text/event-stream` + `Cache-Control: no-cache`
+/// (downstream on the response) are NOT this helper's concern.
 /// Helper invariants: (a) JSON-escape correctness of the embedded
 /// message, (b) SSE event format. Both call sites — `handle_streaming_error`
 /// (non-2xx upstream) and the inline mid-stream error branch in
 /// `handle_streaming_response` (chunk stream error) — call this helper
 /// with the raw upstream error string.
 pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
-    let escaped = error_msg
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace(['\n', '\r'], " ");
+    let mut escaped = String::with_capacity(error_msg.len());
+    for c in error_msg.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            c if (c as u32) < 0x20 => escaped.push(' '),
+            _ => escaped.push(c),
+        }
+    }
     format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", escaped)
 }
 
@@ -3298,6 +3314,52 @@ mod tests {
         // = `"; } attack  {` (one space after `}`, one space after `;`,
         // two spaces between `attack` and `{` from \n and \r).
         assert_eq!(parsed, serde_json::json!({"error": "\"; } attack  {"}));
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_tab_with_space() {
+        // \t is a C0 control char (0x09) that the helper now replaces
+        // with a single space. Locks the F8 fix that extended the escape
+        // rule from [\n, \r] to the full C0 range.
+        let s = format_sse_error_event("a\tb");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_backspace_with_space() {
+        // \x08 is a C0 control char (0x08) that the helper now replaces
+        // with a single space.
+        let s = format_sse_error_event("a\x08\x08");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a  \"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_form_feed_with_space() {
+        // \x0C is a C0 control char that the helper now replaces with
+        // a single space.
+        let s = format_sse_error_event("a\x0Cb");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_other_control_chars_with_space() {
+        // \x01 and \x1F are at the C0 range extremes (both < 0x20 and
+        // not \n, \r, \t, \b, \f). The helper must replace them with
+        // a single space each, just like the named C0 chars.
+        let s = format_sse_error_event("a\x01b\x1Fc");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b c\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_preserves_printable_ascii() {
+        // Sanity: chars >= 0x20 (printable ASCII) must pass through
+        // unchanged. Catches a regression where the C0 replacement
+        // accidentally widened its range.
+        let s = format_sse_error_event("Hello, World! 123 ~`@#$%^&*()");
+        assert_eq!(
+            s,
+            "event: error\ndata: {\"error\":\"Hello, World! 123 ~`@#$%^&*()\"}\n\n"
+        );
     }
 
     // ── F2 integration tests (Phase 3 — handle_streaming_error 5 invariants) ──

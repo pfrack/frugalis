@@ -138,7 +138,7 @@
 - **Location**: `src/main.rs:842-848`
 - **Detail**: The helper escapes `\\`, `"`, `\n`, `\r` per the plan. It does not escape other JSON-unsafe control characters (tab `0x09`, backspace `0x08`, form feed `0x0C`, and others per RFC 8259 §7). The plan explicitly limited scope to the 4 chars, so this is a documented edge case, not a bug. In practice, upstream error bodies rarely contain raw control chars.
 - **Fix**: Either (a) document the limitation in the helper docstring, or (b) extend the escape rule to handle all control chars and add a test case. Low priority.
-- **Decision**: PENDING
+- **Decision**: FIXED via Fix A (rewrote `format_sse_error_event` at `src/main.rs:842-865` to use a char-by-char match; C0 control chars (0x00-0x1F, including \n, \r, \t, \b, \f, and other non-printable bytes) are now all replaced with a single space; `\\` and `"` escape rules preserved. Added 5 new unit tests at `src/main.rs:3319-3366` for \t, \b (\\x08), \f (\\x0C), other C0 chars (\\x01/\\x1F), and a printable-ASCII pass-through sanity check. Test count: 216 → 221 fast).
 
 ### F9 — F2 inline mid-stream branch returns unbounded string (no 2KB cap or 512-char truncate)
 
