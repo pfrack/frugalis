@@ -72,7 +72,7 @@
   - Tradeoff: ~30-50 lines of test setup; the arrange is non-trivial (timing + chunk framing).
   - Confidence: MEDIUM — depends on whether the arrange is doable with `tokio::io` or requires a deeper test fixture.
   - Blind spot: The test would assert the helper's output contract, not the specific inline-branch code path; a future change that reverts the inline branch to its own format (and updates the test) would be missed.
-- **Decision**: PENDING
+- **Decision**: FIXED via Fix A (added `test_inline_mid_stream_error_uses_same_format` at `src/main.rs:3550`; uses a real TCP server with `Content-Length: 1000` mismatch to force reqwest's mid-stream error; asserts both the first chunk is forwarded AND the SSE error event matches the helper's format; also asserts the `data:` payload is valid JSON with an `error` string field).
 
 ### F4 — Plan's Phase 3 helper contract is internally inconsistent
 

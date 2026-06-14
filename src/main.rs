@@ -1332,6 +1332,7 @@ mod tests {
         http::{header, Request},
     };
     use serial_test::serial;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::util::ServiceExt;
 
     /// Guard that removes an env var on drop to prevent test pollution.
@@ -3545,6 +3546,157 @@ mod tests {
         );
         mock.assert();
         // cleanup handled by EnvGuard
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_inline_mid_stream_error_uses_same_format() {
+        // Trigger the inline mid-stream error branch in
+        // `handle_streaming_response` (src/main.rs:790-800). The branch
+        // fires when reqwest's byte stream returns `Some(Err(_e))` after
+        // SSE headers have been sent. We engineer this by serving a
+        // response whose `Content-Length: 1000` mismatches the bytes
+        // actually written, then closing the socket — reqwest returns a
+        // body-read error and the inline branch emits the same SSE error
+        // event format as `handle_streaming_error`.
+        //
+        // This test must use a real TCP server (not httpmock) because
+        // httpmock cannot simulate a mid-stream body error.
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let env = "TEST_INLINE_ERR";
+        let _env_guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/v1/chat/completions");
+
+        let server_task = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            // Read the request (we don't care what's in it).
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            // Claim content-length: 1000 but write 10 bytes ("data: he")
+            // then close — reqwest will error trying to read the
+            // remaining 990 bytes the headers claimed.
+            let headers = "HTTP/1.1 200 OK\r\n\
+                           content-type: text/event-stream\r\n\
+                           content-length: 1000\r\n\r\n";
+            sock.write_all(headers.as_bytes()).await.expect("headers");
+            sock.flush().await.expect("flush headers");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            sock.write_all(b"data: he").await.expect("first chunk");
+            sock.flush().await.expect("flush first chunk");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // Close the socket abruptly — reqwest's next body read errors.
+            drop(sock);
+        });
+
+        // Build an app that routes SYNTAX_FIX to the real TCP server.
+        // Reuses the `make_test_app_state` helper from mod tests.
+        let cats = test_categories();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("test reqwest client should build");
+        let mut routing = std::collections::HashMap::new();
+        routing.insert(
+            cats[1].name.clone(),
+            intent_classifier::RouteEntry {
+                model: "sf-model".to_string(),
+                endpoint: url,
+                cost_per_1m_input_tokens: None,
+                provider_type: "openai_compatible".to_string(),
+                api_key_env: Some(env.to_string()),
+            },
+        );
+        let fallback = intent_classifier::RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
+        let app_state = make_test_app_state(
+            regex_classifier,
+            Some(client),
+            intent_classifier::ModelCosts::empty(),
+            String::new(),
+            10_485_760,
+        );
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let app = build_app(auth_config, app_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+
+        // The proxy returns 200 to the client even when the upstream
+        // errors mid-stream (the response body contains the SSE error
+        // event, not a 5xx).
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "proxy should return 200 to client on mid-stream upstream error"
+        );
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+
+        // The first chunk ("data: he") should be forwarded before the
+        // error branch fires. The inline branch then emits the same
+        // SSE error event format as handle_streaming_error.
+        assert!(
+            body.starts_with("data: he"),
+            "expected the upstream's first chunk to be forwarded before the error, got: {body:?}"
+        );
+        assert!(
+            body.contains("event: error\ndata: {\"error\":"),
+            "expected the inline branch to emit an SSE error event matching handle_streaming_error's format, got: {body:?}"
+        );
+        // The error data: payload must be parseable JSON (the helper's
+        // invariant 2). Parse the data: line and confirm it's a single
+        // object with an "error" string field.
+        let data_line = body
+            .split('\n')
+            .find(|line| line.starts_with("data: ") && line.contains("\"error\""))
+            .expect("expected an SSE data: line with the error event");
+        let json_str = data_line.trim_start_matches("data: ");
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_str).expect("SSE error data: must be valid JSON");
+        assert!(
+            parsed.get("error").and_then(|v| v.as_str()).is_some(),
+            "SSE error data: payload must contain an 'error' string field, got: {parsed}"
+        );
+
+        // Wait for the server task to finish cleanly (it drops the
+        // socket on its own once the response is complete).
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_task).await;
     }
 
     #[tokio::test]
