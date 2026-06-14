@@ -1127,15 +1127,15 @@ The `format_sse_error_event` helper is `pub(crate)` or
 
 #### Automated
 
-- [x] 6.1 `test-plan.md` §6.1–§6.5 all read as concrete (no remaining `TBD — see §3 Phase 1` placeholders)
-- [x] 6.2 `change.md` `status` field is the final value per the test-plan vocabulary
-- [x] 6.3 `cargo build --release` succeeds
-- [x] 6.4 `cargo test` passes (all fast tests)
-- [x] 6.5 `cargo test slow_tests -- --test-threads=1` passes
-- [x] 6.6 `cargo clippy --all-targets -- -D warnings` reports no issues
-- [x] 6.7 `cargo fmt --check` reports no issues
+- [x] 6.1 `test-plan.md` §6.1–§6.5 all read as concrete (no remaining `TBD — see §3 Phase 1` placeholders) — ce14ec7
+- [x] 6.2 `change.md` `status` field is the final value per the test-plan vocabulary — ce14ec7
+- [x] 6.3 `cargo build --release` succeeds — ce14ec7
+- [x] 6.4 `cargo test` passes (all fast tests) — ce14ec7
+- [x] 6.5 `cargo test slow_tests -- --test-threads=1` passes — ce14ec7
+- [x] 6.6 `cargo clippy --all-targets -- -D warnings` reports no issues — ce14ec7
+- [x] 6.7 `cargo fmt --check` reports no issues — ce14ec7
 
 #### Manual
 
-- [x] 6.8 `test-plan.md` §6.1–§6.5 each have a "Reference test" line pointing to a real test from this rollout
-- [x] 6.9 Phase 3's production code changes are limited to `handle_streaming_error` and `handle_streaming_response` inline branch
+- [x] 6.8 `test-plan.md` §6.1–§6.5 each have a "Reference test" line pointing to a real test from this rollout — ce14ec7
+- [x] 6.9 Phase 3's production code changes are limited to `handle_streaming_error` and `handle_streaming_response` inline branch — ce14ec7
