@@ -166,4 +166,4 @@
   - Tradeoff: Modifies a closed plan; the team may prefer to leave historical plans as-is.
   - Confidence: MEDIUM — depends on team preference.
   - Blind spot: Phase 1.4 might still be valuable as defense-in-depth even with the 3-backend test in place.
-- **Decision**: PENDING
+- **Decision**: FIXED via Fix A (added 5 addenda at the end of `plan.md` post-rollout: Addendum 1 lists the line-number shifts in a citation table; Addendum 2 marks Phase 1.4 as "deferred — 3-backend test covers the same contract"; Addendum 3 corrects the test-count bookkeeping typo; Addendum 4 documents the F8 control-char coverage extension; Addendum 5 documents the F5 docstring rewrite).
