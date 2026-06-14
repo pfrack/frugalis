@@ -86,7 +86,7 @@
   - Tradeoff: Modifies a closed plan; should be an addendum, not a silent edit.
   - Confidence: HIGH — the fix is mechanical and the implementation already matches the proposed canonical statement.
   - Blind spot: None significant.
-- **Decision**: PENDING
+- **Decision**: FIXED via Fix A (rewrote `plan.md:139-153` Critical Implementation Details §2 with a single canonical statement: "helper takes a raw error string, applies the escape rule internally"; preserved the Phase 3.1 Contract statement at `:437-442` since it was already aligned with the canonical model).
 
 ### F5 — F2 docstring retains `F2` cross-reference label (lessons.md violation)
 

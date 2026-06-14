@@ -136,17 +136,24 @@ Three constraints the implementer needs to know before touching the code:
   counter. Tier inspection cannot distinguish "regex matched" from
   "LLM matched".
 
-- **`format_sse_error_event` helper contract.** The helper takes a
-  pre-truncated, pre-escaped error message string and returns the SSE
-  event body `event: error\ndata: {"error":"<msg>"}\n\n`. The 2 KB cap
-  and 512-char truncate (upstream) and the status passthrough,
-  `Content-Type`, `Cache-Control` (downstream on the response) are NOT
-  the helper's concern. Both call sites — `handle_streaming_error` and
-  the inline mid-stream branch in `handle_streaming_response` — must
-  apply the same escape rule (`\\` → `\\\\`, `"` → `\\"`, `\n` → ` `,
-  `\r` → ` `) on `error_msg` before calling the helper. The helper's
-  own unit tests cover the 2 invariants that are its concern: JSON
-  escape correctness and the SSE event format.
+- **`format_sse_error_event` helper contract (canonical, post-implementation).**
+  The helper takes a **raw** error message string and returns the SSE
+  event body `event: error\ndata: {"error":"<msg>"}\n\n`. The escape
+  rule (`\\` → `\\\\`, `"` → `\\"`, `\n` → ` `, `\r` → ` `) is applied
+  **internally** by the helper — call sites pass the un-escaped error
+  string. The 2 KB body cap and 512-char truncate are upstream of
+  `handle_streaming_error` (the only call site that needs them); the
+  status passthrough, `Content-Type`, and `Cache-Control` are
+  downstream on the response (only `handle_streaming_error` sets
+  them). The helper's own concerns are: (a) JSON escape correctness
+  and (b) the SSE event format. Both call sites —
+  `handle_streaming_error` and the inline mid-stream branch in
+  `handle_streaming_response` — pass the raw error string. The
+  helper's unit tests cover its 2 invariants. (Earlier prose in this
+  plan described the call sites as applying the escape before calling
+  the helper; the implementation resolved to the cleaner "helper owns
+  the escape" model. The docstring at `src/main.rs:830-841` and the
+  helper body at `:842-848` make this explicit.)
 
 - **`build_app_with_persistence` refactor ripple.** Changing the
   signature to accept `Arc<DbBackend>` (so `Memory` can be injected in
