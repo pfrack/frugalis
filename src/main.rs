@@ -849,8 +849,11 @@ pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
 
 /// Convert a non-2xx upstream response into an SSE error event for the client.
 ///
-/// 5 invariants protect this code path (the F2 review fixes; see
-/// `context/foundation/lessons.md` for the review history):
+/// 5 invariants protect this code path (the prior-review-fix lessons in
+/// `context/foundation/lessons.md`, specifically "Re-run review after a
+/// follow-up change touches the same handler" — the F1–F4 review fixes
+/// were lost twice across follow-up commits; this function is the
+/// regression guard that catches any future re-loss):
 /// 1. **Body cap (2 KB)** — upstream error bodies are bounded to 2 KB.
 ///    Large upstream bodies would amplify latency and memory pressure
 ///    on the proxy, and SSE clients don't need the full body to surface
@@ -872,8 +875,8 @@ pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
 ///    events (caching would replay a transient error long after it has
 ///    been resolved).
 async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Response {
-    // Invariant 1: bound the upstream error body to 2 KB to cap latency
-    // and memory on large error payloads.
+    // Bound the upstream error body to 2 KB to cap latency and memory on
+    // large error payloads.
     const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
     let mut error_bytes = Vec::new();
     loop {
@@ -889,18 +892,17 @@ async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Res
         }
     }
     // Truncate to 512 chars before passing to the helper. The helper
-    // applies the JSON-escape rule (Invariant 2) and emits the SSE event
-    // body (Invariant 3).
+    // applies the JSON-escape rule and emits the SSE event body.
     let error_text = String::from_utf8_lossy(&error_bytes)
         .chars()
         .take(512)
         .collect::<String>();
     let sse_error = format_sse_error_event(&error_text);
     let mut resp = Response::new(Body::from(sse_error));
-    // Invariant 4: forward the upstream's status code to the client so
-    // it can react to the specific failure class.
+    // Forward the upstream's status code to the client so it can react
+    // to the specific failure class.
     *resp.status_mut() = upstream_response.status();
-    // Invariant 5: mark the response as an uncacheable SSE stream.
+    // Mark the response as an uncacheable SSE stream.
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("text/event-stream"),

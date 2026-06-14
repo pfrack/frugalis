@@ -100,7 +100,7 @@
   - Tradeoff: Minor — ~6 inline comment renames.
   - Confidence: HIGH.
   - Blind spot: The numbered `Invariant N` scheme is also used in the docstring; if the user wants to keep the numbering for cross-reference, leave it but add a note.
-- **Decision**: PENDING
+- **Decision**: FIXED via Fix A (rewrote docstring at `src/main.rs:850-873` to reference the lessons.md rule by name ("Re-run review after a follow-up change touches the same handler") instead of the F2 finding number; renamed inline `// Invariant 1:`..`// Invariant 5:` comments to descriptive names; the docstring's "1..5" enumerated list was kept as it enumerates the 5 invariants in a single paragraph, not as a guard-point marker).
 
 ### F6 — `src/telemetry.rs` OTel F6 fix landed in the testing PR
 
