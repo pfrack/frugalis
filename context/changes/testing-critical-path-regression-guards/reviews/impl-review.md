@@ -58,7 +58,7 @@
   - Tradeoff: Adds a `tracing-test` dev-dep or a small custom layer (~20 lines).
   - Confidence: HIGH — `fail_next` consumption check is mechanical; the log capture is the only complexity.
   - Blind spot: None significant.
-- **Decision**: PENDING
+- **Decision**: FIXED via Fix A (added `!memory_backend.fail_next` consumption check at `src/main.rs:2438`; corrected plan's "warn" → "error" wording at `plan.md:358`; `tracing-test` log capture deferred — the consumption check is the honest regression guard).
 
 ### F3 — F2 inline mid-stream error branch has no integration test
 

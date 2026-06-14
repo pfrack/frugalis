@@ -358,9 +358,16 @@ run in default CI.
 - `test_log_classification_failure_does_not_block_response` —
   point the `DbBackend` at a backend whose `log_inference` returns
   an error (or use a wrapper that returns Err); send a request;
-  assert (a) response status is 200 (proxy succeeds), (b) warn log
-  is emitted at the configured `tracing` level, (c) the bounded
-  semaphore on the `PersistenceConfig` is released (no deadlock).
+  assert (a) response status is 200 (proxy succeeds), (b) `fail_next`
+  flag is consumed by the log task within the wait window
+  (proves the log task actually ran; the records-empty side effect
+  alone is ambiguous between "log task ran and failed" and "log
+  task never ran"), (c) the bounded semaphore on the
+  `PersistenceConfig` is released (no deadlock). Production code
+  emits the failure at `error!` level (see `src/persistence.rs:1157`),
+  not `warn!` — the plan's "warn" wording is a typo. Log capture
+  via `tracing-test` is out of scope; the `fail_next` consumption
+  check is the honest regression guard.
   This may require a custom test-only `DbBackend` variant or a
   test-only flag on `MemoryBackend` to simulate failure; the
   implementer picks the cleanest path.

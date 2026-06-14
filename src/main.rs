@@ -2448,7 +2448,7 @@ mod tests {
         let records_handle = memory_backend.records.clone();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
         let backend = Arc::new(persistence::DbBackend::Memory(memory_backend));
-        let (app, server) = build_app_with_persistence_backend(backend, semaphore, None);
+        let (app, server) = build_app_with_persistence_backend(backend.clone(), semaphore, None);
 
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
@@ -2480,7 +2480,11 @@ mod tests {
         // Wait for the fire-and-forget log task to attempt + fail.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        // (b) The failed insert means the record was NOT persisted.
+        // (b) The failed insert means the record was NOT persisted AND
+        // `fail_next` was atomically consumed. The consumption check confirms
+        // the log task actually ran within the wait window (otherwise the
+        // `records.len() == 0` check above would be a false-positive
+        // indistinguishable from "log task never ran").
         // (The flag auto-resets, so a follow-up request would succeed.)
         let records = records_handle.read().await;
         assert_eq!(
@@ -2488,6 +2492,16 @@ mod tests {
             0,
             "the injected failure should prevent the record from being persisted"
         );
+        drop(records);
+        if let persistence::DbBackend::Memory(ref mb) = *backend {
+            assert!(
+                !mb.fail_next.load(std::sync::atomic::Ordering::SeqCst),
+                "fail_next must have been consumed by the log task within the wait window; \
+                 if this fires, the log task didn't run and the records.len() check above is meaningless"
+            );
+        } else {
+            panic!("test fixture invariant: backend must be DbBackend::Memory");
+        }
     }
 
     #[tokio::test]
