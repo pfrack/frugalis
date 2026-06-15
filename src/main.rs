@@ -1097,7 +1097,6 @@ async fn completion_handler(
                     upstream_start.elapsed().as_secs_f64(),
                     &[
                         KeyValue::new("provider", classification.provider_type.clone()),
-                        KeyValue::new("model", classification.model.clone()),
                         KeyValue::new("status", "502"),
                     ],
                 );
@@ -1114,14 +1113,13 @@ async fn completion_handler(
 
     #[cfg(feature = "otel")]
     if let Some(ref metrics) = state.metrics {
-        metrics.upstream_duration_seconds.record(
-            upstream_start.elapsed().as_secs_f64(),
-            &[
-                KeyValue::new("provider", classification.provider_type.clone()),
-                KeyValue::new("model", classification.model.clone()),
-                KeyValue::new("status", upstream_response.status().as_u16().to_string()),
-            ],
-        );
+            metrics.upstream_duration_seconds.record(
+                upstream_start.elapsed().as_secs_f64(),
+                &[
+                    KeyValue::new("provider", classification.provider_type.clone()),
+                    KeyValue::new("status", upstream_response.status().as_u16().to_string()),
+                ],
+            );
     }
 
     if client_wants_stream {
@@ -1153,6 +1151,9 @@ async fn completion_handler(
         "upstream_error"
     };
     log_classification(&state, &classification, &body_str, start, log_status);
+
+    #[cfg(feature = "otel")]
+    rm.set_status(status);
 
     json_response(status, body)
 }
