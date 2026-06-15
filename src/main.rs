@@ -102,13 +102,38 @@ pub struct AppState {
 #[tokio::main]
 async fn main() {
     // Parse CLI arguments
+    enum CliMode {
+        Run,
+        Validate,
+        Help,
+        Init(Option<String>),
+        Quickstart,
+    }
+
     let args: Vec<String> = std::env::args().collect();
-    let mut enable_validate = false;
+    let mut mode = CliMode::Run;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--validate" => {
-                enable_validate = true;
+                mode = CliMode::Validate;
+                i += 1;
+            }
+            "--help" => {
+                mode = CliMode::Help;
+                i += 1;
+            }
+            "--init" => {
+                let path = args.get(i + 1).filter(|a| !a.starts_with("--")).cloned();
+                if path.is_some() {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                mode = CliMode::Init(path);
+            }
+            "--quickstart" => {
+                mode = CliMode::Quickstart;
                 i += 1;
             }
             _ => {
@@ -118,10 +143,47 @@ async fn main() {
         }
     }
 
+    // Early-exit commands (before config loading or tracing init)
+    if let CliMode::Help = mode {
+        print!(
+            "\
+cerebrum — intent-aware routing gateway
+
+USAGE:
+    cerebrum [OPTIONS]
+
+OPTIONS:
+    --help         Show this help
+    --init [PATH]  Generate a starter config (default: stdout)
+    --quickstart   Interactive setup wizard
+    --validate     Validate configuration and exit
+
+ENVIRONMENT:
+    CONFIG_PATH              Path to config overlay (TOML or YAML)
+    PROXY_API_BEARER_TOKEN   Required for proxy routes
+    DASHBOARD_BASIC_USER     Required for dashboard access
+    DASHBOARD_BASIC_PASSWORD Required for dashboard access
+"
+        );
+        std::process::exit(0);
+    }
+
+    if let CliMode::Init(_path) = &mode {
+        // Phase 2 will implement this
+        eprintln!("--init is not yet implemented");
+        std::process::exit(1);
+    }
+
+    if let CliMode::Quickstart = mode {
+        // Phase 3 will implement this
+        eprintln!("--quickstart is not yet implemented");
+        std::process::exit(1);
+    }
+
     let config_path_option = std::env::var("CONFIG_PATH").ok();
 
     // ── Validation mode ──
-    if enable_validate {
+    if let CliMode::Validate = mode {
         let result = config::run_validation(config_path_option.as_deref());
         match result {
             Ok(()) => {
