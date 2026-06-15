@@ -99,6 +99,42 @@ pub struct AppState {
     pub metrics: Option<telemetry::Metrics>,
 }
 
+/// Embedded init template loaded at compile time. Used by `--init` to
+/// produce a commented starter config the user can fill in.
+const INIT_TEMPLATE: &str = include_str!("../init_template.toml");
+
+/// Write the init template to the given path, or print it to stdout if no
+/// path is given. Refuses to overwrite an existing file unless `force` is
+/// true. Creates parent directories as needed. Returns an error suitable
+/// for `eprintln!` on failure (empty on success).
+fn run_init(path: Option<&str>, force: bool) -> Result<(), String> {
+    match path {
+        Some(p) => {
+            let path = std::path::Path::new(p);
+            if path.exists() && !force {
+                return Err(format!(
+                    "refusing to overwrite existing file: {} (use --force to overwrite)",
+                    p
+                ));
+            }
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        format!("failed to create parent directory for {}: {}", p, e)
+                    })?;
+                }
+            }
+            std::fs::write(path, INIT_TEMPLATE)
+                .map_err(|e| format!("failed to write {}: {}", p, e))?;
+            eprintln!("Wrote starter config to {}", p);
+        }
+        None => {
+            print!("{}", INIT_TEMPLATE);
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     // Parse CLI arguments
@@ -112,6 +148,7 @@ async fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let mut mode = CliMode::Run;
+    let mut force = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -124,16 +161,32 @@ async fn main() {
                 i += 1;
             }
             "--init" => {
-                let path = args.get(i + 1).filter(|a| !a.starts_with("--")).cloned();
-                if path.is_some() {
-                    i += 2;
-                } else {
-                    i += 1;
+                let mut j = i + 1;
+                // --force may appear before or after the path; handle both.
+                if args.get(j).map(|a| a.as_str()) == Some("--force") {
+                    force = true;
+                    j += 1;
                 }
+                let path = args.get(j).filter(|a| !a.starts_with("--")).cloned();
+                if path.is_some() {
+                    j += 1;
+                }
+                if args.get(j).map(|a| a.as_str()) == Some("--force") {
+                    force = true;
+                    j += 1;
+                }
+                i = j;
                 mode = CliMode::Init(path);
             }
             "--quickstart" => {
                 mode = CliMode::Quickstart;
+                i += 1;
+            }
+            "--force" => {
+                // Standalone --force (outside --init). Consumed for forward
+                // compatibility with other commands; ignored if no command
+                // acts on it.
+                force = true;
                 i += 1;
             }
             _ => {
@@ -155,6 +208,7 @@ USAGE:
 OPTIONS:
     --help         Show this help
     --init [PATH]  Generate a starter config (default: stdout)
+    --force        With --init, overwrite an existing file at PATH
     --quickstart   Interactive setup wizard
     --validate     Validate configuration and exit
 
@@ -168,10 +222,14 @@ ENVIRONMENT:
         std::process::exit(0);
     }
 
-    if let CliMode::Init(_path) = &mode {
-        // Phase 2 will implement this
-        eprintln!("--init is not yet implemented");
-        std::process::exit(1);
+    if let CliMode::Init(path_opt) = &mode {
+        match run_init(path_opt.as_deref(), force) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     if let CliMode::Quickstart = mode {
@@ -4234,6 +4292,107 @@ mod tests {
                 "tier {tier:?} should serialize as {expected_label:?}"
             );
         }
+    }
+
+    // ── --init template tests (Phase 2) ──
+    // run_init writes the embedded template to a path or prints it to stdout.
+    // We test the file-writing path directly; the stdout path is exercised by
+    // the binary's CLI (see manual verification) and by INIT_TEMPLATE's own
+    // content assertions below.
+
+    /// Each test gets its own scratch directory under the OS temp dir to keep
+    /// parallel runs and CI reruns from clobbering each other.
+    fn init_scratch(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("cerebrum-init-{label}-{nanos}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir should be creatable");
+        dir
+    }
+
+    #[test]
+    fn init_template_contains_all_five_routing_sections() {
+        for section in [
+            "[routing.DEFAULT]",
+            "[routing.FILE_READING]",
+            "[routing.SYNTAX_FIX]",
+            "[routing.COMPLEX_REASONING]",
+            "[routing.CASUAL]",
+        ] {
+            assert!(
+                INIT_TEMPLATE.contains(section),
+                "init template should contain section {section}, got:\n{INIT_TEMPLATE}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_template_parses_as_valid_toml_syntax() {
+        // Placeholders like "<your-model>" are not valid for ConfigRoot (the
+        // schema requires a non-empty provider_type), but they ARE valid TOML
+        // syntax. Verify the syntax layer at least.
+        let value: toml::Value =
+            toml::from_str(INIT_TEMPLATE).expect("init template should be valid TOML syntax");
+        let table = value
+            .as_table()
+            .expect("init template should be a top-level TOML table");
+        let routing = table
+            .get("routing")
+            .and_then(|v| v.as_table())
+            .expect("init template should have a [routing] table");
+        assert_eq!(
+            routing.len(),
+            5,
+            "init template should declare exactly 5 routing entries, got: {routing:?}"
+        );
+    }
+
+    #[test]
+    fn run_init_writes_template_to_new_file() {
+        let dir = init_scratch("write");
+        let path = dir.join("cerebrum.toml");
+        run_init(Some(path.to_str().unwrap()), false).expect("write should succeed");
+        let content = std::fs::read_to_string(&path).expect("file should be readable");
+        assert_eq!(content, INIT_TEMPLATE);
+    }
+
+    #[test]
+    fn run_init_refuses_to_overwrite_existing_file() {
+        let dir = init_scratch("refuse");
+        let path = dir.join("cerebrum.toml");
+        std::fs::write(&path, "preexisting content").expect("seed write should succeed");
+        let err = run_init(Some(path.to_str().unwrap()), false)
+            .expect_err("overwrite must be refused without --force");
+        assert!(
+            err.contains("refusing to overwrite"),
+            "error should mention the refusal, got: {err}"
+        );
+        // Original content must be untouched.
+        let still = std::fs::read_to_string(&path).expect("file should still be readable");
+        assert_eq!(still, "preexisting content");
+    }
+
+    #[test]
+    fn run_init_force_overwrites_existing_file() {
+        let dir = init_scratch("force");
+        let path = dir.join("cerebrum.toml");
+        std::fs::write(&path, "preexisting content").expect("seed write should succeed");
+        run_init(Some(path.to_str().unwrap()), true).expect("force overwrite should succeed");
+        let content = std::fs::read_to_string(&path).expect("file should be readable");
+        assert_eq!(content, INIT_TEMPLATE);
+    }
+
+    #[test]
+    fn run_init_creates_missing_parent_directories() {
+        let dir = init_scratch("mkdir");
+        let nested = dir.join("a").join("b").join("cerebrum.toml");
+        run_init(Some(nested.to_str().unwrap()), false).expect("nested write should succeed");
+        assert!(nested.exists(), "file should exist at nested path");
+        let content = std::fs::read_to_string(&nested).expect("file should be readable");
+        assert_eq!(content, INIT_TEMPLATE);
     }
 }
 

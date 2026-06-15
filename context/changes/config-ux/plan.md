@@ -347,24 +347,24 @@ None — all changes are in the startup path (runs once) or the merge function (
 
 #### Automated
 
-- [x] 1.1 Build succeeds: `cargo build`
-- [x] 1.2 Tests pass: `cargo test`
-- [x] 1.3 `--help` prints usage and exits 0
-- [x] 1.4 Unknown args still exit with code 2
+- [x] 1.1 Build succeeds: `cargo build` — 52c4cbe
+- [x] 1.2 Tests pass: `cargo test` — 52c4cbe
+- [x] 1.3 `--help` prints usage and exits 0 — 52c4cbe
+- [x] 1.4 Unknown args still exit with code 2 — 52c4cbe
 
 #### Manual
 
-- [x] 1.5 Help text is readable and accurate
+- [x] 1.5 Help text is readable and accurate — 52c4cbe
 
 ### Phase 2: --init Command + Template
 
 #### Automated
 
-- [ ] 2.1 Build succeeds: `cargo build`
-- [ ] 2.2 Tests pass: `cargo test`
-- [ ] 2.3 `--init` outputs valid TOML to stdout
-- [ ] 2.4 `--init /tmp/test.toml` creates the file
-- [ ] 2.5 `--init` on existing file exits 1
+- [x] 2.1 Build succeeds: `cargo build`
+- [x] 2.2 Tests pass: `cargo test`
+- [x] 2.3 `--init` outputs valid TOML to stdout
+- [x] 2.4 `--init /tmp/test.toml` creates the file
+- [x] 2.5 `--init` on existing file exits 1
 
 #### Manual
 
