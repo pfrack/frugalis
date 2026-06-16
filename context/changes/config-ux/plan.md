@@ -402,13 +402,13 @@ None — all changes are in the startup path (runs once) or the merge function (
 
 #### Automated
 
-- [ ] 5.1 Build succeeds: `cargo build`
-- [ ] 5.2 Tests pass: `cargo test`
-- [ ] 5.3 Each routing example parses as valid ConfigRoot
-- [ ] 5.4 CONFIG_PATH with example file doesn't panic
+- [x] 5.1 Build succeeds: `cargo build` — af0a9ec
+- [x] 5.2 Tests pass: `cargo test` — af0a9ec
+- [x] 5.3 Each routing example parses as valid ConfigRoot — af0a9ec
+- [x] 5.4 CONFIG_PATH with example file doesn't panic — af0a9ec
 
 #### Manual
 
-- [ ] 5.5 No-CONFIG_PATH startup shows init hint log
-- [ ] 5.6 CONFIG_PATH startup shows routes active log
-- [ ] 5.7 Route summary shows all 5 category names
+- [x] 5.5 No-CONFIG_PATH startup shows init hint log — af0a9ec
+- [x] 5.6 CONFIG_PATH startup shows routes active log — af0a9ec
+- [x] 5.7 Route summary shows all 5 category names — af0a9ec
