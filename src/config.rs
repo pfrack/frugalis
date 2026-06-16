@@ -953,8 +953,11 @@ pub(crate) fn merge_configs(base: &mut ConfigRoot, overlay: ConfigRoot) {
     if let Some(v) = overlay.model_costs {
         base.model_costs = Some(v);
     }
-    if let Some(v) = overlay.routing {
-        base.routing = Some(v);
+    if let Some(overlay_routing) = overlay.routing {
+        let base_routing = base.routing.get_or_insert_with(HashMap::new);
+        for (key, entry) in overlay_routing {
+            base_routing.insert(key, entry);
+        }
     }
     if let Some(v) = overlay.patterns_dir {
         base.patterns_dir = Some(v);
@@ -1923,6 +1926,124 @@ port = 20000
         assert_eq!(server.port, 20000);
         assert_eq!(server.log_level, "info");
         assert_eq!(server.log_format, "compact");
+    }
+
+    #[test]
+    fn merge_configs_routing_per_key_merge() {
+        // Base has DEFAULT + FILE_READING. Overlay has only FILE_READING with
+        // a different model. After merge: DEFAULT is preserved (untouched),
+        // FILE_READING uses the overlay's model.
+        let mut base: ConfigRoot = toml::from_str(
+            r#"
+[routing.DEFAULT]
+model = "base-default"
+endpoint = "https://base.example/v1/chat/completions"
+provider_type = "openai_compatible"
+
+[routing.FILE_READING]
+model = "base-file-reading"
+endpoint = "https://base.example/v1/chat/completions"
+provider_type = "openai_compatible"
+"#,
+        )
+        .expect("valid TOML");
+
+        let overlay: ConfigRoot = toml::from_str(
+            r#"
+[routing.FILE_READING]
+model = "overlay-file-reading"
+endpoint = "https://overlay.example/v1/chat/completions"
+provider_type = "openai_compatible"
+"#,
+        )
+        .expect("valid TOML");
+
+        merge_configs(&mut base, overlay);
+        let routing = base.routing.expect("routing should be present after merge");
+        // DEFAULT preserved from base
+        let default = routing.get("DEFAULT").expect("DEFAULT preserved from base");
+        assert_eq!(default.model, "base-default");
+        assert_eq!(default.endpoint, "https://base.example/v1/chat/completions");
+        // FILE_READING replaced by overlay
+        let file_reading = routing
+            .get("FILE_READING")
+            .expect("FILE_READING present after merge");
+        assert_eq!(file_reading.model, "overlay-file-reading");
+        assert_eq!(
+            file_reading.endpoint,
+            "https://overlay.example/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn merge_configs_routing_full_overlay() {
+        // Overlay specifies every route in the base — verify all are replaced
+        // (per-key merge still produces the same end state as full-replacement
+        // when the overlay covers every key).
+        let mut base: ConfigRoot = toml::from_str(
+            r#"
+[routing.DEFAULT]
+model = "base-default"
+endpoint = "https://base.example/v1/chat/completions"
+provider_type = "openai_compatible"
+
+[routing.FILE_READING]
+model = "base-fr"
+endpoint = "https://base.example/v1/chat/completions"
+provider_type = "openai_compatible"
+"#,
+        )
+        .expect("valid TOML");
+
+        let overlay: ConfigRoot = toml::from_str(
+            r#"
+[routing.DEFAULT]
+model = "new-default"
+endpoint = "https://new.example/v1/chat/completions"
+provider_type = "openai_compatible"
+
+[routing.FILE_READING]
+model = "new-fr"
+endpoint = "https://new.example/v1/chat/completions"
+provider_type = "openai_compatible"
+"#,
+        )
+        .expect("valid TOML");
+
+        merge_configs(&mut base, overlay);
+        let routing = base.routing.expect("routing should be present after merge");
+        assert_eq!(routing.get("DEFAULT").unwrap().model, "new-default");
+        assert_eq!(routing.get("FILE_READING").unwrap().model, "new-fr");
+    }
+
+    #[test]
+    fn merge_configs_routing_initialize_from_none() {
+        // Base has no routing. Overlay has one route. After merge: base routing
+        // exists with the overlay's entry (the None base case for get_or_insert).
+        let mut base: ConfigRoot = toml::from_str(
+            r#"
+[server]
+port = 10000
+log_level = "info"
+log_format = "compact"
+"#,
+        )
+        .expect("valid TOML");
+
+        let overlay: ConfigRoot = toml::from_str(
+            r#"
+[routing.SYNTAX_FIX]
+model = "sf-model"
+endpoint = "https://sf.example/v1/chat/completions"
+provider_type = "openai_compatible"
+"#,
+        )
+        .expect("valid TOML");
+
+        merge_configs(&mut base, overlay);
+        let routing = base.routing.expect("routing initialized from None");
+        assert_eq!(routing.len(), 1);
+        assert_eq!(routing.get("SYNTAX_FIX").unwrap().model, "sf-model");
     }
 
     // ── Phase 3: External Pattern File Tests ──

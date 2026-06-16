@@ -375,15 +375,15 @@ None — all changes are in the startup path (runs once) or the merge function (
 
 #### Automated
 
-- [x] 3.1 Build succeeds: `cargo build`
-- [x] 3.2 Tests pass: `cargo test`
-- [x] 3.3 Module compiles without warnings
+- [x] 3.1 Build succeeds: `cargo build` — de20236
+- [x] 3.2 Tests pass: `cargo test` — de20236
+- [x] 3.3 Module compiles without warnings — de20236
 
 #### Manual
 
-- [x] 3.4 Wizard works for each provider type
-- [x] 3.5 Generated config works with --validate
-- [x] 3.6 Custom provider path works
+- [x] 3.4 Wizard works for each provider type — de20236
+- [x] 3.5 Generated config works with --validate — de20236
+- [x] 3.6 Custom provider path works — de20236
 
 ### Phase 4: Per-Key Additive Merge for Routing
 
