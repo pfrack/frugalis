@@ -384,28 +384,28 @@ pub(crate) fn parse_env_int(var: &str, default: i32, min: Option<i32>, max: Opti
 pub(crate) fn hardcoded_routing(
     categories: &[CategoryConfig],
 ) -> (HashMap<String, RouteEntry>, RouteEntry) {
-    let endpoint = "https://integrate.api.nvidia.com/v1/chat/completions";
+    let endpoint = "http://localhost:11434/v1/chat/completions";
     let mut routing = HashMap::new();
 
     for cat in categories {
         routing.insert(
             cat.name.clone(),
             RouteEntry {
-                model: DEFAULT_MODEL.to_string(),
+                model: DEFAULT_MODEL_LOCAL.to_string(),
                 endpoint: endpoint.to_string(),
                 cost_per_1m_input_tokens: None,
-                provider_type: "nvidia_nim".to_string(),
-                api_key_env: Some("NVIDIA_API_KEY".to_string()),
+                provider_type: "ollama".to_string(),
+                api_key_env: None,
             },
         );
     }
 
     let fallback = RouteEntry {
-        model: DEFAULT_MODEL.to_string(),
+        model: DEFAULT_MODEL_LOCAL.to_string(),
         endpoint: endpoint.to_string(),
         cost_per_1m_input_tokens: None,
-        provider_type: "nvidia_nim".to_string(),
-        api_key_env: Some("NVIDIA_API_KEY".to_string()),
+        provider_type: "ollama".to_string(),
+        api_key_env: None,
     };
     (routing, fallback)
 }
@@ -1314,17 +1314,17 @@ api_key_env = ""
                 cat.name
             );
             let entry = routing.get(cat.name.as_str()).unwrap();
-            assert_eq!(entry.model, DEFAULT_MODEL);
-            assert!(entry.endpoint.contains("integrate.api.nvidia.com"));
-            assert_eq!(entry.provider_type, "nvidia_nim");
-            assert_eq!(entry.api_key_env, Some("NVIDIA_API_KEY".to_string()));
+            assert_eq!(entry.model, DEFAULT_MODEL_LOCAL);
+            assert!(entry.endpoint.contains("localhost:11434"));
+            assert_eq!(entry.provider_type, "ollama");
+            assert_eq!(entry.api_key_env, None);
             assert_eq!(entry.cost_per_1m_input_tokens, None);
         }
 
-        assert_eq!(fallback.model, DEFAULT_MODEL);
-        assert!(fallback.endpoint.contains("integrate.api.nvidia.com"));
-        assert_eq!(fallback.provider_type, "nvidia_nim");
-        assert_eq!(fallback.api_key_env, Some("NVIDIA_API_KEY".to_string()));
+        assert_eq!(fallback.model, DEFAULT_MODEL_LOCAL);
+        assert!(fallback.endpoint.contains("localhost:11434"));
+        assert_eq!(fallback.provider_type, "ollama");
+        assert_eq!(fallback.api_key_env, None);
     }
 
     #[test]
@@ -1332,7 +1332,7 @@ api_key_env = ""
         let (_, fallback) = hardcoded_routing(&test_categories());
         assert_eq!(
             fallback.endpoint,
-            "https://integrate.api.nvidia.com/v1/chat/completions"
+            "http://localhost:11434/v1/chat/completions"
         );
     }
 
@@ -1372,7 +1372,7 @@ api_key_env = ""
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 0);
-        assert_eq!(fallback.model, DEFAULT_MODEL);
+        assert_eq!(fallback.model, DEFAULT_MODEL_LOCAL);
 
         std::env::remove_var("CONFIG_PATH");
 
@@ -1387,7 +1387,7 @@ api_key_env = ""
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 0);
-        assert_eq!(fallback.model, DEFAULT_MODEL);
+        assert_eq!(fallback.model, DEFAULT_MODEL_LOCAL);
 
         std::env::remove_var("CONFIG_PATH");
     }
@@ -2371,7 +2371,13 @@ patterns_file = "nonexistent.patterns"
         let root: ConfigRoot = toml::from_str(content).expect("openrouter example should parse");
         let routing = root.routing.expect("routing section should be present");
         // The 5 expected route categories
-        for key in ["FILE_READING", "SYNTAX_FIX", "COMPLEX_REASONING", "CASUAL", "DEFAULT"] {
+        for key in [
+            "FILE_READING",
+            "SYNTAX_FIX",
+            "COMPLEX_REASONING",
+            "CASUAL",
+            "DEFAULT",
+        ] {
             let entry = routing
                 .get(key)
                 .unwrap_or_else(|| panic!("missing route key {key} in openrouter example"));
@@ -2391,7 +2397,13 @@ patterns_file = "nonexistent.patterns"
         let routing = root.routing.expect("routing section should be present");
         // Endpoints must be present in every entry — the legacy file omitted
         // them, producing empty-string endpoints. Verify the rewrite fixed it.
-        for key in ["FILE_READING", "SYNTAX_FIX", "COMPLEX_REASONING", "CASUAL", "DEFAULT"] {
+        for key in [
+            "FILE_READING",
+            "SYNTAX_FIX",
+            "COMPLEX_REASONING",
+            "CASUAL",
+            "DEFAULT",
+        ] {
             let entry = routing
                 .get(key)
                 .unwrap_or_else(|| panic!("missing route key {key} in nvidia-nim example"));

@@ -24,30 +24,30 @@
 
 [routing.DEFAULT]
 model = "<your-default-model>"
-endpoint = "https://api.openai.com/v1/chat/completions"
+endpoint = "https://api.example.invalid/v1/chat/completions"
 provider_type = "openai_compatible"
 api_key_env = "OPENAI_API_KEY"
 
 [routing.FILE_READING]
 model = "<your-fast-cheap-model>"
-endpoint = "https://api.openai.com/v1/chat/completions"
+endpoint = "https://api.example.invalid/v1/chat/completions"
 provider_type = "openai_compatible"
 api_key_env = "OPENAI_API_KEY"
 
 [routing.SYNTAX_FIX]
 model = "<your-fast-cheap-model>"
-endpoint = "https://api.openai.com/v1/chat/completions"
+endpoint = "https://api.example.invalid/v1/chat/completions"
 provider_type = "openai_compatible"
 api_key_env = "OPENAI_API_KEY"
 
 [routing.COMPLEX_REASONING]
 model = "<your-strongest-model>"
-endpoint = "https://api.openai.com/v1/chat/completions"
+endpoint = "https://api.example.invalid/v1/chat/completions"
 provider_type = "openai_compatible"
 api_key_env = "OPENAI_API_KEY"
 
 [routing.CASUAL]
 model = "<your-fast-cheap-model>"
-endpoint = "https://api.openai.com/v1/chat/completions"
+endpoint = "https://api.example.invalid/v1/chat/completions"
 provider_type = "openai_compatible"
 api_key_env = "OPENAI_API_KEY"

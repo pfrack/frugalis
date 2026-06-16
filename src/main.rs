@@ -111,13 +111,17 @@ const INIT_TEMPLATE: &str = include_str!("../init_template.toml");
 fn run_init(path: Option<&str>, force: bool) -> Result<(), String> {
     match path {
         Some(p) => {
-            let path = std::path::Path::new(p);
-            if path.exists() && !force {
+            // Reject flag-shaped paths to avoid silently swallowing unknown
+            // flags (e.g. `cerebrum --init --validate` would otherwise drop
+            // `--validate` and treat --init as having no path). The check is
+            // intentionally narrow — paths that happen to contain `--` in
+            // the middle are unaffected.
+            if p.starts_with('-') {
                 return Err(format!(
-                    "refusing to overwrite existing file: {} (use --force to overwrite)",
-                    p
+                    "refusing path that starts with '-': {p} (looks like a flag, not a path)"
                 ));
             }
+            let path = std::path::Path::new(p);
             if let Some(parent) = path.parent() {
                 if !parent.as_os_str().is_empty() {
                     std::fs::create_dir_all(parent).map_err(|e| {
@@ -125,9 +129,27 @@ fn run_init(path: Option<&str>, force: bool) -> Result<(), String> {
                     })?;
                 }
             }
-            std::fs::write(path, INIT_TEMPLATE)
-                .map_err(|e| format!("failed to write {}: {}", p, e))?;
-            eprintln!("Wrote starter config to {}", p);
+            // Atomic create-or-overwrite: avoids the TOCTOU race between
+            // `path.exists()` and `std::fs::write` (a symlink could be
+            // installed in the gap when --force is used). `create_new` and
+            // `truncate` are mutually exclusive — the combination enforces
+            // the same external behavior as the old exists/write pair.
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .create_new(!force)
+                .truncate(force)
+                .open(path)
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        format!("refusing to overwrite existing file: {p} (use --force to overwrite)")
+                    } else {
+                        format!("failed to write {p}: {e}")
+                    }
+                })?;
+            std::io::Write::write_all(&mut file, INIT_TEMPLATE.as_bytes())
+                .map_err(|e| format!("failed to write {p}: {e}"))?;
+            eprintln!("Wrote starter config to {p}");
         }
         None => {
             print!("{}", INIT_TEMPLATE);
@@ -168,10 +190,21 @@ async fn main() {
                     force = true;
                     j += 1;
                 }
-                let path = args.get(j).filter(|a| !a.starts_with("--")).cloned();
-                if path.is_some() {
-                    j += 1;
-                }
+                // Resolve the path arg. If the next arg starts with `--`, treat
+                // it as an unknown flag (don't silently drop it as we used to)
+                // so the user gets a clear error at the point of confusion
+                // and `run_init` is never called with `Init(None)` from a typo.
+                let path = match args.get(j) {
+                    Some(s) if s.starts_with("--") => {
+                        eprintln!("unknown argument: {s}");
+                        std::process::exit(2);
+                    }
+                    Some(s) => {
+                        j += 1;
+                        Some(s.clone())
+                    }
+                    None => None,
+                };
                 if args.get(j).map(|a| a.as_str()) == Some("--force") {
                     force = true;
                     j += 1;
@@ -406,21 +439,36 @@ ENVIRONMENT:
                     missing.push(cat.name.clone());
                 }
             }
-        if !missing.is_empty() {
-            warn!("Categories {:?} missing routing entries; falling back to empty categories and hardcoded routing", missing);
-            categories = vec![];
-            let (new_map, new_fallback) = config::hardcoded_routing(&categories);
-            routing_map = new_map;
-            fallback_entry = new_fallback;
+            if !missing.is_empty() {
+                warn!("Categories {:?} missing routing entries; falling back to empty categories and hardcoded routing", missing);
+                categories = vec![];
+                let (new_map, new_fallback) = config::hardcoded_routing(&categories);
+                routing_map = new_map;
+                fallback_entry = new_fallback;
+            }
         }
-    }
 
-    let mut route_keys: Vec<String> = routing_map.keys().cloned().collect();
-    route_keys.push("DEFAULT".to_string());
-    route_keys.sort();
-    info!("Routes active: {}", route_keys.join(", "));
+        // Log each active route with its resolved model and endpoint so
+        // operators can verify their CONFIG_PATH overlay took effect (per
+        // the plan: "log which routes are active so users can verify their
+        // overlay took effect"). DEFAULT is logged from `fallback_entry`
+        // since `routing_from_value` strips it from the routing map; the
+        // `hardcoded_routing` fallback path does not strip it, so we dedupe
+        // to avoid printing DEFAULT twice.
+        let mut route_keys: Vec<&String> = routing_map.keys().collect();
+        route_keys.sort();
+        for key in route_keys {
+            let entry = &routing_map[key];
+            info!("Route {} -> {} @ {}", key, entry.model, entry.endpoint);
+        }
+        if !routing_map.contains_key("DEFAULT") {
+            info!(
+                "Route DEFAULT -> {} @ {}",
+                fallback_entry.model, fallback_entry.endpoint
+            );
+        }
 
-    let model_costs = config::build_model_costs(&config_root, &routing_map);
+        let model_costs = config::build_model_costs(&config_root, &routing_map);
         let baseline_model = config_root
             .baseline_model
             .clone()
@@ -1248,13 +1296,13 @@ async fn completion_handler(
 
     #[cfg(feature = "otel")]
     if let Some(ref metrics) = state.metrics {
-            metrics.upstream_duration_seconds.record(
-                upstream_start.elapsed().as_secs_f64(),
-                &[
-                    KeyValue::new("provider", classification.provider_type.clone()),
-                    KeyValue::new("status", upstream_response.status().as_u16().to_string()),
-                ],
-            );
+        metrics.upstream_duration_seconds.record(
+            upstream_start.elapsed().as_secs_f64(),
+            &[
+                KeyValue::new("provider", classification.provider_type.clone()),
+                KeyValue::new("status", upstream_response.status().as_u16().to_string()),
+            ],
+        );
     }
 
     if client_wants_stream {

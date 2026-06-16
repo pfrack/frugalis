@@ -164,10 +164,7 @@ pub fn run_quickstart() -> Result<(), String> {
         "Use the same model for all 5 routing categories? [Y/n]",
         Some("Y"),
     )?;
-    let same_model = !matches!(
-        same_model_raw.trim().to_lowercase().as_str(),
-        "n" | "no"
-    );
+    let same_model = !matches!(same_model_raw.trim().to_lowercase().as_str(), "n" | "no");
 
     let models: Vec<(String, String)> = if same_model {
         let model_raw = prompt(
@@ -217,11 +214,7 @@ pub fn run_quickstart() -> Result<(), String> {
 
     let api_key_env: Option<String> = match api_key_env_default {
         Some(default) => {
-            let env_raw = prompt(
-                &mut input,
-                "Env var holding your API key",
-                Some(&default),
-            )?;
+            let env_raw = prompt(&mut input, "Env var holding your API key", Some(&default))?;
             let env_trimmed = env_raw.trim();
             if env_trimmed.is_empty() {
                 None
@@ -232,11 +225,7 @@ pub fn run_quickstart() -> Result<(), String> {
         None => None,
     };
 
-    let output_path_raw = prompt(
-        &mut input,
-        "Output path",
-        Some("./cerebrum-config.toml"),
-    )?;
+    let output_path_raw = prompt(&mut input, "Output path", Some("./cerebrum-config.toml"))?;
     let output_path_str = output_path_raw.trim();
     let output_path_str = if output_path_str.is_empty() {
         "./cerebrum-config.toml"
@@ -245,22 +234,14 @@ pub fn run_quickstart() -> Result<(), String> {
     };
     let output_path = PathBuf::from(output_path_str);
 
-    let toml = build_quickstart_toml(
-        &endpoint,
-        &provider_type,
-        api_key_env.as_deref(),
-        &models,
-    );
+    let toml = build_quickstart_toml(&endpoint, &provider_type, api_key_env.as_deref(), &models);
 
     println!("\nGenerated config:\n{toml}");
 
     if output_path.exists() {
         let confirm_raw = prompt(
             &mut input,
-            &format!(
-                "{} already exists. Overwrite? [y/N]",
-                output_path.display()
-            ),
+            &format!("{} already exists. Overwrite? [y/N]", output_path.display()),
             Some("N"),
         )?;
         if !matches!(confirm_raw.trim().to_lowercase().as_str(), "y" | "yes") {
@@ -282,7 +263,11 @@ pub fn run_quickstart() -> Result<(), String> {
     Ok(())
 }
 
-fn prompt<R: BufRead>(input: &mut R, question: &str, default: Option<&str>) -> Result<String, String> {
+fn prompt<R: BufRead>(
+    input: &mut R,
+    question: &str,
+    default: Option<&str>,
+) -> Result<String, String> {
     let default_hint = match default {
         Some(d) if !d.is_empty() => format!(" [{d}]"),
         _ => String::new(),
@@ -296,7 +281,7 @@ fn prompt<R: BufRead>(input: &mut R, question: &str, default: Option<&str>) -> R
         .read_line(&mut line)
         .map_err(|e| format!("failed to read from stdin: {e}"))?;
     if read == 0 {
-        return Err("unexpected end of input (Ctrl-D?)".to_string());
+        return Err(format!("unexpected end of input while reading '{question}'"));
     }
     Ok(line)
 }
@@ -313,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn build_quickstart_toml_with_api_key() {
+    fn test_build_quickstart_toml_with_api_key() {
         let toml = build_quickstart_toml(
             "https://example.com/v1/chat/completions",
             "openai_compatible",
@@ -330,7 +315,10 @@ mod tests {
             .get("DEFAULT")
             .and_then(|v| v.as_table())
             .expect("DEFAULT should exist");
-        assert_eq!(default.get("model").and_then(|v| v.as_str()), Some("test/model"));
+        assert_eq!(
+            default.get("model").and_then(|v| v.as_str()),
+            Some("test/model")
+        );
         assert_eq!(
             default.get("endpoint").and_then(|v| v.as_str()),
             Some("https://example.com/v1/chat/completions")
@@ -346,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn build_quickstart_toml_omits_api_key_when_none() {
+    fn test_build_quickstart_toml_omits_api_key_when_none() {
         let toml = build_quickstart_toml(
             "http://localhost:11434/v1/chat/completions",
             "ollama",
@@ -367,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn build_quickstart_toml_contains_all_five_categories() {
+    fn test_build_quickstart_toml_contains_all_five_categories() {
         let toml = build_quickstart_toml(
             "https://example.com/v1/chat/completions",
             "openai_compatible",
@@ -383,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn build_quickstart_toml_different_models_per_category() {
+    fn test_build_quickstart_toml_different_models_per_category() {
         // Per-category mode: COMPLEX_REASONING uses one model, the rest use another.
         let models = vec![
             ("FILE_READING".to_string(), "fast-model".to_string()),
@@ -425,7 +413,7 @@ mod tests {
     /// `io::stdin()` directly, we instead exercise the building blocks
     /// (build_quickstart_toml + file write) to validate the contract.
     #[test]
-    fn generated_toml_writes_to_file_and_round_trips() {
+    fn test_generated_toml_writes_to_file_and_round_trips() {
         let dir = std::env::temp_dir().join(format!(
             "cerebrum-quickstart-test-{}",
             std::time::SystemTime::now()
@@ -452,5 +440,33 @@ mod tests {
         assert!(parsed.get("routing").is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Verifies the prompt() helper's EOF path returns an error that
+    /// includes the question text (F7 fix). Drives `prompt` with a
+    /// `Cursor` over empty bytes — equivalent to a closed stdin.
+    #[test]
+    fn test_prompt_eof_includes_question_in_error() {
+        use std::io::Cursor;
+        let empty: &[u8] = b"";
+        let mut reader = Cursor::new(empty);
+        let result = prompt(&mut reader, "Which provider?", None);
+        assert!(result.is_err(), "expected EOF to return Err");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Which provider?"),
+            "EOF error should include the question text, got: {err}"
+        );
+    }
+
+    /// Sanity check: prompt() returns the read line on the success path.
+    /// Locks the round-trip contract: stdin line → result.unwrap().
+    #[test]
+    fn test_prompt_returns_input_line() {
+        use std::io::Cursor;
+        let input: &[u8] = b"hello world\n";
+        let mut reader = Cursor::new(input);
+        let result = prompt(&mut reader, "Greeting", None);
+        assert_eq!(result.unwrap(), "hello world\n");
     }
 }
