@@ -71,6 +71,7 @@ mod dashboard;
 mod fewshot_classifier;
 mod intent_classifier;
 mod persistence;
+mod quickstart;
 mod routing;
 
 use intent_classifier::IntentClassify;
@@ -233,9 +234,13 @@ ENVIRONMENT:
     }
 
     if let CliMode::Quickstart = mode {
-        // Phase 3 will implement this
-        eprintln!("--quickstart is not yet implemented");
-        std::process::exit(1);
+        match quickstart::run_quickstart() {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     let config_path_option = std::env::var("CONFIG_PATH").ok();

@@ -360,30 +360,30 @@ None — all changes are in the startup path (runs once) or the merge function (
 
 #### Automated
 
-- [x] 2.1 Build succeeds: `cargo build`
-- [x] 2.2 Tests pass: `cargo test`
-- [x] 2.3 `--init` outputs valid TOML to stdout
-- [x] 2.4 `--init /tmp/test.toml` creates the file
-- [x] 2.5 `--init` on existing file exits 1
+- [x] 2.1 Build succeeds: `cargo build` — 0a00c39
+- [x] 2.2 Tests pass: `cargo test` — 0a00c39
+- [x] 2.3 `--init` outputs valid TOML to stdout — 0a00c39
+- [x] 2.4 `--init /tmp/test.toml` creates the file — 0a00c39
+- [x] 2.5 `--init` on existing file exits 1 — 0a00c39
 
 #### Manual
 
-- [ ] 2.6 Template comments are clear and actionable
-- [ ] 2.7 Filled template works as CONFIG_PATH
+- [x] 2.6 Template comments are clear and actionable
+- [x] 2.7 Filled template works as CONFIG_PATH
 
 ### Phase 3: --quickstart Interactive Wizard
 
 #### Automated
 
-- [ ] 3.1 Build succeeds: `cargo build`
-- [ ] 3.2 Tests pass: `cargo test`
-- [ ] 3.3 Module compiles without warnings
+- [x] 3.1 Build succeeds: `cargo build`
+- [x] 3.2 Tests pass: `cargo test`
+- [x] 3.3 Module compiles without warnings
 
 #### Manual
 
-- [ ] 3.4 Wizard works for each provider type
-- [ ] 3.5 Generated config works with --validate
-- [ ] 3.6 Custom provider path works
+- [x] 3.4 Wizard works for each provider type
+- [x] 3.5 Generated config works with --validate
+- [x] 3.6 Custom provider path works
 
 ### Phase 4: Per-Key Additive Merge for Routing
 
