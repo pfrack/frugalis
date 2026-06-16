@@ -244,6 +244,7 @@ ENVIRONMENT:
     }
 
     let config_path_option = std::env::var("CONFIG_PATH").ok();
+    let config_path_was_set = config_path_option.is_some();
 
     // ── Validation mode ──
     if let CliMode::Validate = mode {
@@ -334,6 +335,10 @@ ENVIRONMENT:
     });
     let auth_config = Arc::new(auth_config);
 
+    if !config_path_was_set {
+        info!("No CONFIG_PATH set — using embedded defaults. Run `cerebrum --init` to generate a starter config.");
+    }
+
     let regex_config = config::load_regex_classifier_config_from_value(&config_root);
 
     // Load global classifiers config
@@ -401,16 +406,21 @@ ENVIRONMENT:
                     missing.push(cat.name.clone());
                 }
             }
-            if !missing.is_empty() {
-                warn!("Categories {:?} missing routing entries; falling back to empty categories and hardcoded routing", missing);
-                categories = vec![];
-                let (new_map, new_fallback) = config::hardcoded_routing(&categories);
-                routing_map = new_map;
-                fallback_entry = new_fallback;
-            }
+        if !missing.is_empty() {
+            warn!("Categories {:?} missing routing entries; falling back to empty categories and hardcoded routing", missing);
+            categories = vec![];
+            let (new_map, new_fallback) = config::hardcoded_routing(&categories);
+            routing_map = new_map;
+            fallback_entry = new_fallback;
         }
+    }
 
-        let model_costs = config::build_model_costs(&config_root, &routing_map);
+    let mut route_keys: Vec<String> = routing_map.keys().cloned().collect();
+    route_keys.push("DEFAULT".to_string());
+    route_keys.sort();
+    info!("Routes active: {}", route_keys.join(", "));
+
+    let model_costs = config::build_model_costs(&config_root, &routing_map);
         let baseline_model = config_root
             .baseline_model
             .clone()

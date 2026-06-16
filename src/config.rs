@@ -2358,4 +2358,66 @@ patterns_file = "nonexistent.patterns"
             "should report missing pattern file: {all}"
         );
     }
+
+    // ── Phase 5: Routing example parse tests ──
+    // Each routing example in routing_examples/ must parse as a valid
+    // ConfigRoot (with a [routing.*] table). Validates the rewrite from
+    // the legacy flat format ([CATEGORY]) to the nested format
+    // ([routing.CATEGORY]) compatible with CONFIG_PATH overlays.
+
+    #[test]
+    fn routing_example_openrouter_parses_as_config_root() {
+        let content = include_str!("../routing_examples/routing-openrouter.toml");
+        let root: ConfigRoot = toml::from_str(content).expect("openrouter example should parse");
+        let routing = root.routing.expect("routing section should be present");
+        // The 5 expected route categories
+        for key in ["FILE_READING", "SYNTAX_FIX", "COMPLEX_REASONING", "CASUAL", "DEFAULT"] {
+            let entry = routing
+                .get(key)
+                .unwrap_or_else(|| panic!("missing route key {key} in openrouter example"));
+            assert!(!entry.model.is_empty(), "{key} model should be set");
+            assert!(!entry.endpoint.is_empty(), "{key} endpoint should be set");
+            assert!(
+                !entry.provider_type.is_empty(),
+                "{key} provider_type should be set"
+            );
+        }
+    }
+
+    #[test]
+    fn routing_example_nvidia_nim_parses_as_config_root() {
+        let content = include_str!("../routing_examples/routing-nvidia-nim.toml");
+        let root: ConfigRoot = toml::from_str(content).expect("nvidia-nim example should parse");
+        let routing = root.routing.expect("routing section should be present");
+        // Endpoints must be present in every entry — the legacy file omitted
+        // them, producing empty-string endpoints. Verify the rewrite fixed it.
+        for key in ["FILE_READING", "SYNTAX_FIX", "COMPLEX_REASONING", "CASUAL", "DEFAULT"] {
+            let entry = routing
+                .get(key)
+                .unwrap_or_else(|| panic!("missing route key {key} in nvidia-nim example"));
+            assert!(
+                !entry.endpoint.is_empty(),
+                "{key} endpoint should be present (legacy version omitted it): {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn routing_example_manual_tests_parses_as_config_root() {
+        let content = include_str!("../routing_examples/routing-manual-tests.toml");
+        let root: ConfigRoot = toml::from_str(content).expect("manual-tests example should parse");
+        let routing = root.routing.expect("routing section should be present");
+        assert!(routing.contains_key("DEFAULT"));
+        // FALLBACK (legacy key) must be gone
+        assert!(!routing.contains_key("FALLBACK"));
+    }
+
+    #[test]
+    fn routing_example_unreachable_parses_as_config_root() {
+        let content = include_str!("../routing_examples/routing_unreachable.toml");
+        let root: ConfigRoot = toml::from_str(content).expect("unreachable example should parse");
+        let routing = root.routing.expect("routing section should be present");
+        assert!(!routing.contains_key("FALLBACK"));
+        assert!(routing.contains_key("DEFAULT"));
+    }
 }

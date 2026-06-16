@@ -389,14 +389,14 @@ None — all changes are in the startup path (runs once) or the merge function (
 
 #### Automated
 
-- [ ] 4.1 Build succeeds: `cargo build`
-- [ ] 4.2 Tests pass including new merge test: `cargo test`
-- [ ] 4.3 Existing merge tests still pass
-- [ ] 4.4 New `merge_configs_routing_per_key_merge` test passes
+- [x] 4.1 Build succeeds: `cargo build` — 6887291
+- [x] 4.2 Tests pass including new merge test: `cargo test` — 6887291
+- [x] 4.3 Existing merge tests still pass — 6887291
+- [x] 4.4 New `merge_configs_routing_per_key_merge` test passes — 6887291
 
 #### Manual
 
-- [ ] 4.5 Single-route overlay preserves other routes via --validate
+- [x] 4.5 Single-route overlay preserves other routes via --validate — 6887291
 
 ### Phase 5: Fix routing_examples/ + Startup Messaging
 

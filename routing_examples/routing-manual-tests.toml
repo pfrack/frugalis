@@ -1,33 +1,36 @@
-# Routing configuration matching manual-test/run.sh expectations
-# NVIDIA NIM models with integrate.api.nvidia.com endpoint
-# Copy to routing.toml and set NVIDIA_NIM_API_KEY env var
+# Routing overlay matching manual-test/run.sh expectations (NVIDIA NIM).
+# Usage: CONFIG_PATH=this-file.toml cerebrum
+# Requires NVIDIA_API_KEY env var to be set.
+#
+# Cerebrum's merge semantics for [routing] are per-key additive — unmentioned
+# routes inherit from the built-in defaults.
 
-[FILE_READING]
+[routing.FILE_READING]
 model = "meta/llama-3.1-70b-instruct"
-provider_type = "nvidia_nim"
 endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
-[COMPLEX_REASONING]
+[routing.COMPLEX_REASONING]
 model = "meta/llama-3.3-70b-instruct"
-provider_type = "nvidia_nim"
 endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
-[SYNTAX_FIX]
+[routing.SYNTAX_FIX]
 model = "qwen/qwen3-coder-480b-a35b-instruct"
-provider_type = "nvidia_nim"
 endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
-[CASUAL]
+[routing.CASUAL]
 model = "meta/llama-3.1-8b-instruct"
-provider_type = "nvidia_nim"
 endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
-[FALLBACK]
+[routing.DEFAULT]
 model = "nvidia/nemotron-3-nano-30b-a3b"
-provider_type = "nvidia_nim"
 endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
