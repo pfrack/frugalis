@@ -55,6 +55,8 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-12 | in-memory-db-fallback | persistence always available: 3-tier backend config (`memory` / `sqlite` / `postgres`) via `DB_BACKEND` env; enables zero-dep dev startup and real persistence in tests | S-13 | FR-005, NFR (testing) | proposed |
 | S-13 | move-all-config-to-file | Config: eliminate all hardcoded values — 25 hardcoded Rust values + 19 env var reads moved to config.toml; env vars reduced to API_KEYS + auth creds + DATABASE_URL only; categories and regex patterns fully configurable | S-09a, **S-14** | FR-002, FR-003 | done |
 | S-14 | config-format-upgrade | Config: upgrade format to support YAML + external pattern files; add `--validate` and `--migrate-config` CLI tools | **S-13** | FR-002, FR-003 | done |
+| S-15 | translate-openai-to-anthropic | route existing `/v1/chat/completions` traffic to Anthropic-protocol upstreams (Claude API, DeepSeek, Kimi, Z.ai) with full body + streaming translation | S-01e | FR-003 | researched |
+| S-16 | translate-anthropic-to-openai | new `/v1/messages` endpoint accepting Anthropic Messages protocol, translating to OpenAI Chat Completions for upstream routing | S-15 | FR-003 | researched |
 
 ## Streams
 
@@ -68,6 +70,7 @@ Navigation aid — groups items that share a Prerequisites chain. Canonical orde
 | D | Critical Logging | `F-04` → `S-06` | Ensures all critical paths have observability logs and a dedicated UI page. |
 | E | Observability | `S-10` → `S-11` | Production hardening followed by OpenTelemetry integration for distributed tracing, metrics export, and log correlation. |
 | F | Config | `S-09a` → `S-14` → `S-13` | Config boundary formalization (S-09a) → serde refactor + multi-format upgrade (S-14) → unified TOML config for ALL settings (S-13). |
+| G | Protocol Translation | `S-01e` → `S-15` → `S-16` | Bidirectional Anthropic ↔ OpenAI protocol translation. S-15 (OpenAI→Anthropic) first because it enhances the existing endpoint and produces the shared translation module. S-16 (Anthropic→OpenAI) adds the new `/v1/messages` endpoint using the shared module. |
 
 ## Baseline
 
@@ -406,6 +409,30 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Risk:** Medium — serde refactor must preserve exact semantics of manual TOML parsing; YAML edge cases need testing; pattern file resolution adds I/O at startup. But approach is incremental (Phase 1 serde refactor keeps existing loader signatures) and all changes are covered by tests.
 - **Status:** done (research complete: `context/changes/config-format-upgrade/research-config-format.md`)
 
+### S-15: Protocol translation — OpenAI client → Anthropic upstream
+
+- **Outcome:** The existing `POST /v1/chat/completions` endpoint can route to Anthropic-protocol upstreams. When `provider_type = "anthropic"`, the request body is translated from OpenAI Chat Completions format to Anthropic Messages format, forwarded with correct headers (`x-api-key`, `anthropic-version: 2023-06-01`), and the response (including SSE streaming) is translated back to OpenAI format. Enables existing OpenAI-speaking clients to use Claude API, DeepSeek /anthropic, Kimi, Z.ai, and Fireworks AI through cerebrum.
+- **Change ID:** `translate-openai-to-anthropic`
+- **PRD refs:** FR-003 (routing)
+- **Prerequisites:** S-01e (end-to-end proxy working)
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** —
+- **Risk:** Medium — adds a translation layer in the request/response path. Streaming translation (Anthropic SSE → OpenAI chunks) is straightforward since Anthropic provides structured typed events. The shared translation module produced here becomes the foundation for S-16. Research complete: `context/changes/translate-openai-to-anthropic/research.md`.
+- **Status:** researched
+
+### S-16: Protocol translation — Anthropic client → OpenAI upstream
+
+- **Outcome:** A new `POST /v1/messages` endpoint accepts Anthropic Messages API format (as sent by Claude Code), translates to OpenAI Chat Completions, routes to an OpenAI-compatible upstream, and translates the response back to Anthropic SSE. Includes a stateful streaming emitter that converts OpenAI flat SSE chunks into Anthropic's structured event sequence (`message_start` → `content_block_start` → `content_block_delta` → `content_block_stop` → `message_delta` → `message_stop`). Enables Claude Code to use NVIDIA NIM, OpenRouter, Groq, Cerebras, and Ollama through cerebrum.
+- **Change ID:** `translate-anthropic-to-openai`
+- **PRD refs:** FR-003 (routing)
+- **Prerequisites:** S-15 (shared translation module exists)
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** —
+- **Risk:** Medium-High — the stateful SSE emitter (tracking open block type, block indices, tool call state) is the most complex piece. Must handle thinking blocks, tool_use streaming, and block transitions correctly. Research complete: `context/changes/translate-anthropic-to-openai/research.md`.
+- **Status:** researched
+
 ### S-10: Post-Review Cleanup, Hardening & Production Reliability
 
 - **Outcome:** All code review findings from 2026-06-08 and 2026-06-09 plus production hardening gaps addressed in 12 ordered phases: (1) SSE streaming log timing fix, (2) `completion_handler` decomposition and error deduplication, (3) `QueryError`/`timeout`/`timeout_secs`/`EnvGuard` cleanup, (4) `serial_test` for UB elimination, (5) `sqlx::migrate!()` embedded migrations, (6) LLM API key refresh, (7) auth constant-time comparison hardening, (8) streaming and JSON edge-case fixes, (9) dead code cleanup, (10) graceful shutdown + slow_tests + DB validation, (11) configurable limits and env parsing, (12) Prometheus metrics + health enhancements + docs.
@@ -447,6 +474,8 @@ Foundations below assume these are present and do NOT re-scaffold them.
 | S-12 | in-memory-db-fallback | Persistence: 3-tier backend config (memory/sqlite/postgres); `[persistence]` section in unified TOML | S-13 | FR-005, NFR | proposed |
 | S-13 | move-all-config-to-file | Config: eliminate all hardcoded values — 25 hardcoded Rust values + 19 env var reads moved to config.toml; env vars reduced to API_KEYS + auth creds + DATABASE_URL only; categories and regex patterns fully configurable | yes | Research complete: `context/changes/move-all-config-to-file/research.md`. Prerequisites: S-09a, S-12 already implemented. |
 | S-14 | config-format-upgrade | Config: upgrade format to support YAML + external pattern files; add `--validate` and `--migrate-config` CLI tools | yes | Research complete: `context/changes/config-format-upgrade/research-config-format.md`. Prerequisite: S-13. |
+| S-15 | translate-openai-to-anthropic | Protocol: Translate OpenAI Chat requests → Anthropic Messages for upstream routing to Claude/DeepSeek/Kimi/Z.ai | yes | Research complete: `context/changes/translate-openai-to-anthropic/research.md`. Prerequisite: S-01e (done). |
+| S-16 | translate-anthropic-to-openai | Protocol: New `/v1/messages` endpoint translating Anthropic → OpenAI for upstream routing to NIM/OpenRouter/Groq | yes | Research complete: `context/changes/translate-anthropic-to-openai/research.md`. Prerequisite: S-15. |
 
 ## Open Roadmap Questions
 
@@ -520,7 +549,7 @@ The 3-week MVP budget under a 6-week hard deadline makes calendar time the #1 bl
 
 ## Your next move
 
-**► `/10x-plan move-all-config-to-file` on S-13: Move All Config to File**
+**► `/10x-plan translate-openai-to-anthropic` on S-15: Protocol Translation — OpenAI → Anthropic**
 
-**Why this one:** Research complete — 25 hardcoded values + 19 env var reads identified and categorized. Config.toml schema designed. Classification pipeline refactoring plan ready. All prerequisites (S-09a, S-12) already implemented. Ready for implementation planning.
+**Why this one:** Research complete. Prerequisite S-01e already implemented. Enhances the existing `/v1/chat/completions` endpoint (no new route surface). Produces the shared translation module that S-16 builds on. Immediately unlocks Claude API, DeepSeek, Kimi, Z.ai, and Fireworks AI as upstream providers.
 *** End Updated File ***- **S-09a: With both `RegexClassifier` and `LLMClassifier` backends operational, the config boundary between generic and classifier-specific settings is formalized. Per-backend enable/disable and ordering flags control chain construction at startup.** — Archived 2026-06-09 → `context/archive/2026-06-07-classifier-config-boundary/`. Lesson: —.
