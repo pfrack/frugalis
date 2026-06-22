@@ -176,6 +176,193 @@ paths:
                   message:
                     type: string
                 required: [error, status, message]
+  /v1/messages:
+    post:
+      summary: Classify intent and route to upstream Anthropic-compatible model
+      description: |
+        Anthropic Messages API pass-through. Accepts Anthropic-format requests,
+        classifies intent via the existing classifier, and forwards verbatim
+        to an Anthropic-compatible upstream. No protocol translation — both
+        client and upstream speak Anthropic.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model:
+                  type: string
+                  description: |
+                    Overridden by the proxy's classification result. The client's
+                    model field is replaced with the classifier-selected model.
+                max_tokens:
+                  type: integer
+                  description: Required by Anthropic API; passed through verbatim.
+                messages:
+                  type: array
+                  description: |
+                    Conversation history. Each message's `content` is a string
+                    OR an array of typed content blocks (text, image,
+                    tool_result, etc.). Only `type: "text"` blocks contribute
+                    to the classification prompt.
+                  items:
+                    type: object
+                    properties:
+                      role:
+                        type: string
+                        enum: [user, assistant]
+                      content:
+                        oneOf:
+                          - type: string
+                          - type: array
+                            items:
+                              type: object
+                              properties:
+                                type:
+                                  type: string
+                                  enum: [text, image, tool_use, tool_result, thinking]
+                                text:
+                                  type: string
+                              required: [type]
+                    required: [role, content]
+                system:
+                  description: Optional system prompt; passed through verbatim.
+                  oneOf:
+                    - type: string
+                    - type: array
+                      items:
+                        type: object
+                stream:
+                  type: boolean
+                  default: false
+                  description: When true, the response is streamed as Anthropic SSE
+                temperature:
+                  type: number
+                top_p:
+                  type: number
+                top_k:
+                  type: integer
+                stop_sequences:
+                  type: array
+                  items:
+                    type: string
+                tools:
+                  type: array
+                  items:
+                    type: object
+                tool_choice:
+                  type: object
+                thinking:
+                  type: object
+                metadata:
+                  type: object
+              required: [model, max_tokens, messages]
+      responses:
+        "200":
+          description: Upstream model response (Anthropic-format, pass-through)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    description: |
+                      Anthropic Messages API response object (pass-through).
+                      Example: {"id": "msg_1", "type": "message", "role":
+                      "assistant", "content": [{"type": "text", "text":
+                      "Hello!"}], ...}
+                  - type: object
+                    properties:
+                      status:
+                        type: string
+                        enum: [classified]
+                      category:
+                        type: string
+                        enum: [COMPLEX_REASONING, FILE_READING, SYNTAX_FIX, CASUAL]
+                      model:
+                        type: string
+                      tier:
+                        type: string
+                        enum: [Regex, FewShot, Fallback]
+                    required: [status, category, model, tier]
+                    description: Classification-only response when no upstream is configured
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Anthropic SSE event stream. Upstream bytes are forwarded
+                  directly. A `: keepalive` comment is injected every
+                  `keepalive_interval_secs` seconds of silence. Non-2xx upstream
+                  responses emit an `event: error` SSE event before closing.
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum: [error]
+                  error:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum: [invalid_request_error]
+                      message:
+                        type: string
+                    required: [type, message]
+                required: [type, error]
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+        "415":
+          description: Unsupported media type
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum: [error]
+                  error:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum: [invalid_request_error]
+                      message:
+                        type: string
+        "502":
+          description: Upstream API unreachable or no endpoint configured
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum: [error]
+                  error:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum: [api_error]
+                      message:
+                        type: string
+                    required: [type, message]
+                required: [type, error]
   /v1/feedback:
     post:
       summary: Submit classification feedback for few-shot retraining
