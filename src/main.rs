@@ -713,19 +713,25 @@ async fn health() -> (StatusCode, &'static str) {
     (StatusCode::OK, "ok")
 }
 
-/// Shared logging helper. Extracts the snippet, builds the inference record,
-/// and enqueues a fire-and-forget DB write.
+/// Shared logging helper. Builds the inference record from the pre-extracted
+/// `prompt` and enqueues a fire-and-forget DB write. Callers must extract the
+/// prompt themselves (via `persistence::extract_last_user_message` for OpenAI
+/// traffic or `persistence::extract_last_user_message_anthropic` for Anthropic
+/// traffic) so the persistence log records the same prompt the classifier saw.
+#[allow(clippy::too_many_arguments)]
 fn log_classification(
     state: &AppState,
     classification: &intent_classifier::ClassificationResult,
-    body_str: &str,
+    _body_str: &str,
+    prompt: &str,
     start: std::time::Instant,
     log_status: &str,
 ) {
     if let Some(persistence) = &state.persistence {
         let duration_ms = start.elapsed().as_millis() as i32;
-        let snippet = persistence::extract_snippet(body_str);
-        let prompt = persistence::extract_last_user_message(body_str);
+        // Snippet is the 200-char privacy-safe truncation of the FULL prompt,
+        // not the body — bodies may contain system prompts, tool calls, etc.
+        let snippet: String = prompt.chars().take(200).collect();
         let prompt_char_count = if prompt.is_empty() {
             None
         } else {
@@ -802,7 +808,7 @@ async fn classify_and_log(
     })
     .to_string();
     if let Some(log_status) = log_status {
-        log_classification(state, &classification, body_str, start, log_status);
+        log_classification(state, &classification, body_str, &prompt, start, log_status);
     }
 
     json_response(StatusCode::OK, response_body)
@@ -823,6 +829,24 @@ fn upstream_error_json(status: u16, message: &str) -> String {
         "error": "upstream_error",
         "status": status,
         "message": message,
+    })
+    .to_string()
+}
+
+/// Anthropic-shaped error body for the proxy's own errors (auth failure,
+/// bad request, no endpoint). Anthropic-speaking clients expect
+/// `{"type": "error", "error": {"type": "...", "message": "..."}}` so we
+/// match that envelope rather than the OpenAI-shaped `upstream_error_json`.
+/// `error_type` is the Anthropic error type, e.g. `"authentication_error"`,
+/// `"invalid_request_error"`, `"api_error"`. Status passthrough happens at
+/// the HTTP layer (this body is wrapped in a `StatusCode` from the caller).
+fn anthropic_error_json(error_type: &str, message: &str) -> String {
+    serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": error_type,
+            "message": message,
+        }
     })
     .to_string()
 }
@@ -947,18 +971,22 @@ async fn handle_buffered_response(
 /// Set up SSE streaming response with keepalive and logging.
 /// The `Unpin` bound is required because the byte_stream is moved into a spawned task.
 /// Spawned tasks must own all captured data (trait objects require `Unpin` for safe pinning).
+/// `prompt` is the pre-extracted user prompt for the persistence log (passed
+/// explicitly so callers can use protocol-specific extractors — OpenAI vs.
+/// Anthropic — without re-parsing the body).
 fn handle_streaming_response(
     state: Arc<AppState>,
     classification: intent_classifier::ClassificationResult,
     body_str: String,
+    prompt: String,
     start: Instant,
     byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
     keepalive_interval_secs: u64,
-) -> Response<Body> {
+) -> Response {
     let channel_capacity = state.streaming_channel_capacity;
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(channel_capacity);
 
-    log_classification(&state, &classification, &body_str, start, "streaming");
+    log_classification(&state, &classification, &body_str, &prompt, start, "streaming");
 
     tokio::spawn(async move {
         let keepalive_secs = keepalive_interval_secs;
@@ -997,7 +1025,7 @@ fn handle_streaming_response(
                 }
             }
         }
-        log_classification(&state, &classification, &body_str, start, stream_status);
+        log_classification(&state, &classification, &body_str, &prompt, start, stream_status);
     });
 
     let body =
@@ -1174,6 +1202,12 @@ async fn completion_handler(
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
+    // Extract the prompt once and reuse it for both classification and the
+    // persistence log. When X-Cerebrum-Category/Model headers bypass the
+    // classifier, we still log an empty prompt rather than re-extracting
+    // — the classifier never ran, so there is nothing meaningful to log.
+    let prompt = persistence::extract_last_user_message(&body_str);
+
     let classification = if let (Some(category), Some(model)) =
         (x_category.as_ref(), x_model.as_ref())
     {
@@ -1194,12 +1228,11 @@ async fn completion_handler(
                     None => intent_classifier::ClassificationResult::fallback(),
                 };
                 let response_body = classification_only_json(&fallback);
-                log_classification(&state, &fallback, &body_str, start, "ok");
+                log_classification(&state, &fallback, &body_str, "", start, "ok");
                 return json_response(StatusCode::OK, response_body);
             }
         }
     } else {
-        let prompt = persistence::extract_last_user_message(&body_str);
         match state.classifier.as_ref() {
             Some(c) => c.classify(&prompt).await,
             None => intent_classifier::ClassificationResult::fallback(),
@@ -1221,7 +1254,7 @@ async fn completion_handler(
         Some(c) => c,
         None => {
             let response_body = classification_only_json(&classification);
-            log_classification(&state, &classification, &body_str, start, "ok");
+            log_classification(&state, &classification, &body_str, &prompt, start, "ok");
             return json_response(StatusCode::OK, response_body);
         }
     };
@@ -1231,20 +1264,20 @@ async fn completion_handler(
             Ok(key) if !key.is_empty() => key,
             _ => {
                 warn!("upstream API key env var '{env_name}' is missing or empty; degrading to classification-only response");
-                log_classification(&state, &classification, &body_str, start, "ok");
+                log_classification(&state, &classification, &body_str, &prompt, start, "ok");
                 return json_response(StatusCode::OK, classification_only_json(&classification));
             }
         },
         None => {
             warn!("no api_key_env configured for category '{}'; degrading to classification-only response", classification.category);
             let response_body = classification_only_json(&classification);
-            log_classification(&state, &classification, &body_str, start, "ok");
+            log_classification(&state, &classification, &body_str, &prompt, start, "ok");
             return json_response(StatusCode::OK, response_body);
         }
     };
 
     if classification.endpoint.is_empty() {
-        log_classification(&state, &classification, &body_str, start, "upstream_error");
+        log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
         #[cfg(feature = "otel")]
         rm.set_status(StatusCode::BAD_GATEWAY);
         return json_response(
@@ -1261,7 +1294,7 @@ async fn completion_handler(
         &state.auth_providers,
     ) {
         Err(msg) => {
-            log_classification(&state, &classification, &body_str, start, "bad_request");
+            log_classification(&state, &classification, &body_str, &prompt, start, "bad_request");
             #[cfg(feature = "otel")]
             rm.set_status(StatusCode::BAD_REQUEST);
             return json_response(StatusCode::BAD_REQUEST, upstream_error_json(400, &msg));
@@ -1284,7 +1317,7 @@ async fn completion_handler(
                     ],
                 );
             }
-            log_classification(&state, &classification, &body_str, start, "upstream_error");
+            log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
             #[cfg(feature = "otel")]
             rm.set_status(StatusCode::BAD_GATEWAY);
             return json_response(
@@ -1308,7 +1341,7 @@ async fn completion_handler(
     if client_wants_stream {
         if !upstream_response.status().is_success() {
             let resp = handle_streaming_error(upstream_response).await;
-            log_classification(&state, &classification, &body_str, start, "upstream_error");
+            log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
             #[cfg(feature = "otel")]
             rm.set_status(resp.status());
             return resp;
@@ -1320,6 +1353,7 @@ async fn completion_handler(
             state,
             classification,
             body_str,
+            prompt,
             start,
             upstream_response.bytes_stream(),
             keepalive_interval_secs,
@@ -1333,7 +1367,245 @@ async fn completion_handler(
     } else {
         "upstream_error"
     };
-    log_classification(&state, &classification, &body_str, start, log_status);
+    log_classification(&state, &classification, &body_str, &prompt, start, log_status);
+
+    #[cfg(feature = "otel")]
+    rm.set_status(status);
+
+    json_response(status, body)
+}
+
+/// Anthropic Messages API pass-through handler.
+///
+/// Mirrors `completion_handler` but for the Anthropic protocol:
+/// - `extract_last_user_message_anthropic` handles string-or-array `content`
+/// - Auth headers flow through `auth_headers_for` which now emits
+///   `x-api-key` + `anthropic-version: 2023-06-01` for `provider_type: "anthropic"`
+/// - Upstream streaming is byte-forwarded verbatim (Anthropic SSE format passes
+///   through unchanged — both client and upstream speak Anthropic)
+/// - Proxy's own errors use the Anthropic envelope
+///   (`{"type":"error","error":{"type":"...","message":"..."}}`)
+///
+/// Pass-through is intentional: protocol translation (Anthropic ↔ OpenAI) is
+/// a separate concern handled by sibling changes.
+async fn messages_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let start = std::time::Instant::now();
+
+    #[cfg(feature = "otel")]
+    let mut rm = RequestMetrics::new(state.metrics.clone(), "POST", "/v1/messages");
+
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !content_type.starts_with("application/json") {
+        #[cfg(feature = "otel")]
+        rm.set_status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        return json_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            anthropic_error_json("invalid_request_error", "expected application/json"),
+        );
+    }
+
+    let body_str: String = match std::str::from_utf8(&body) {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            #[cfg(feature = "otel")]
+            rm.set_status(StatusCode::BAD_REQUEST);
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                anthropic_error_json("invalid_request_error", "invalid UTF-8 body"),
+            );
+        }
+    };
+
+    let x_category = headers
+        .get("x-cerebrum-category")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let x_model = headers
+        .get("x-cerebrum-model")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    // Extract the prompt with the Anthropic extractor (handles string OR
+    // array-of-blocks content). Reuse it for both classification and the
+    // persistence log.
+    let prompt = persistence::extract_last_user_message_anthropic(&body_str);
+
+    let classification = if let (Some(category), Some(model)) =
+        (x_category.as_ref(), x_model.as_ref())
+    {
+        let routing = state.routing.read().await;
+        match routing.get(category) {
+            Some(entry) => intent_classifier::ClassificationResult {
+                category: category.clone(),
+                model: model.clone(),
+                endpoint: entry.endpoint.clone(),
+                tier: intent_classifier::ClassificationTier::Fallback,
+                provider_type: entry.provider_type.clone(),
+                api_key_env: entry.api_key_env.clone(),
+            },
+            None => {
+                warn!("X-Cerebrum-Category '{category}' not found in routing configuration; degrading to classification JSON");
+                let fallback = match state.classifier.as_ref() {
+                    Some(c) => c.classify("").await,
+                    None => intent_classifier::ClassificationResult::fallback(),
+                };
+                let response_body = classification_only_json(&fallback);
+                log_classification(&state, &fallback, &body_str, "", start, "ok");
+                return json_response(StatusCode::OK, response_body);
+            }
+        }
+    } else {
+        match state.classifier.as_ref() {
+            Some(c) => c.classify(&prompt).await,
+            None => intent_classifier::ClassificationResult::fallback(),
+        }
+    };
+
+    #[cfg(feature = "otel")]
+    if let Some(ref metrics) = state.metrics {
+        metrics.classification_total.add(
+            1,
+            &[
+                KeyValue::new("category", classification.category.clone()),
+                KeyValue::new("tier", format!("{:?}", classification.tier)),
+            ],
+        );
+    }
+
+    let client = match &state.http_client {
+        Some(c) => c,
+        None => {
+            let response_body = classification_only_json(&classification);
+            log_classification(&state, &classification, &body_str, &prompt, start, "ok");
+            return json_response(StatusCode::OK, response_body);
+        }
+    };
+
+    let api_key = match &classification.api_key_env {
+        Some(env_name) => match std::env::var(env_name) {
+            Ok(key) if !key.is_empty() => key,
+            _ => {
+                warn!("upstream API key env var '{env_name}' is missing or empty; degrading to classification-only response");
+                log_classification(&state, &classification, &body_str, &prompt, start, "ok");
+                return json_response(StatusCode::OK, classification_only_json(&classification));
+            }
+        },
+        None => {
+            warn!("no api_key_env configured for category '{}'; degrading to classification-only response", classification.category);
+            let response_body = classification_only_json(&classification);
+            log_classification(&state, &classification, &body_str, &prompt, start, "ok");
+            return json_response(StatusCode::OK, response_body);
+        }
+    };
+
+    if classification.endpoint.is_empty() {
+        log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
+        #[cfg(feature = "otel")]
+        rm.set_status(StatusCode::BAD_GATEWAY);
+        return json_response(
+            StatusCode::BAD_GATEWAY,
+            anthropic_error_json("api_error", "no endpoint configured"),
+        );
+    }
+
+    // Reuse the OpenAI `build_upstream_request` — the protocol difference
+    // is handled by `auth_headers_for` (which now emits the anthropic-version
+    // header when provider_type == "anthropic"). Body bytes are passed
+    // through verbatim except for the `model` field override.
+    let (client_wants_stream, upstream_req) = match build_upstream_request(
+        client,
+        &classification,
+        &body,
+        &api_key,
+        &state.auth_providers,
+    ) {
+        Err(msg) => {
+            log_classification(&state, &classification, &body_str, &prompt, start, "bad_request");
+            #[cfg(feature = "otel")]
+            rm.set_status(StatusCode::BAD_REQUEST);
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                anthropic_error_json("invalid_request_error", &msg),
+            );
+        }
+        Ok(r) => r,
+    };
+
+    #[cfg_attr(not(feature = "otel"), allow(unused_variables))]
+    let upstream_start = std::time::Instant::now();
+    let upstream_response = match upstream_req.send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            #[cfg(feature = "otel")]
+            if let Some(ref metrics) = state.metrics {
+                metrics.upstream_duration_seconds.record(
+                    upstream_start.elapsed().as_secs_f64(),
+                    &[
+                        KeyValue::new("provider", classification.provider_type.clone()),
+                        KeyValue::new("status", "502"),
+                    ],
+                );
+            }
+            log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
+            #[cfg(feature = "otel")]
+            rm.set_status(StatusCode::BAD_GATEWAY);
+            return json_response(
+                StatusCode::BAD_GATEWAY,
+                anthropic_error_json("api_error", &e.to_string()),
+            );
+        }
+    };
+
+    #[cfg(feature = "otel")]
+    if let Some(ref metrics) = state.metrics {
+        metrics.upstream_duration_seconds.record(
+            upstream_start.elapsed().as_secs_f64(),
+            &[
+                KeyValue::new("provider", classification.provider_type.clone()),
+                KeyValue::new("status", upstream_response.status().as_u16().to_string()),
+            ],
+        );
+    }
+
+    if client_wants_stream {
+        if !upstream_response.status().is_success() {
+            let resp = handle_streaming_error(upstream_response).await;
+            log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
+            #[cfg(feature = "otel")]
+            rm.set_status(resp.status());
+            return resp;
+        }
+
+        let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
+
+        return handle_streaming_response(
+            state,
+            classification,
+            body_str,
+            prompt,
+            start,
+            upstream_response.bytes_stream(),
+            keepalive_interval_secs,
+        );
+    }
+
+    let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
+    let (status, body) = handle_buffered_response(upstream_response, max_upstream_body_bytes).await;
+    let log_status = if status == StatusCode::OK {
+        "ok"
+    } else {
+        "upstream_error"
+    };
+    log_classification(&state, &classification, &body_str, &prompt, start, log_status);
 
     #[cfg(feature = "otel")]
     rm.set_status(status);
@@ -1430,6 +1702,7 @@ async fn feedback_handler(
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
     let proxy_routes = Router::new()
         .route("/chat/completions", post(completion_handler))
+        .route("/messages", post(messages_handler))
         .route("/classify", post(classify_handler))
         .route("/feedback", post(feedback_handler))
         .route_layer(auth::proxy_auth_layer(auth_config.clone()));

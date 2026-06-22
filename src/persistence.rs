@@ -1110,14 +1110,84 @@ pub fn extract_last_user_message(body: &str) -> String {
     }
 }
 
+/// Extract the full last user message from an Anthropic Messages API request body.
+///
+/// Parses `body` as `{"messages": [...]}`, finds the last message whose `role`
+/// is `"user"`, and returns its text content capped at 10,000 characters.
+/// Anthropic's `content` field is polymorphic:
+/// - `"content": "string"` — simple text content (returned verbatim)
+/// - `"content": [{"type": "text", "text": "..."}, {"type": "image", ...}]`
+///   — array of blocks; only `type == "text"` blocks contribute to the
+///   extracted prompt (images, tool_results, etc. are skipped). Multiple text
+///   blocks are joined with a single space.
+///
+/// On any parse failure, missing user message, or non-string/non-array content,
+/// returns `""` and emits a WARN log. Caps message array at 1,000 (DoS
+/// protection, matching the OpenAI extractor's limit). Never panics.
+pub fn extract_last_user_message_anthropic(body: &str) -> String {
+    let result: Option<String> = (|| {
+        let v: serde_json::Value = serde_json::from_str(body).ok()?;
+        let messages = v.get("messages")?.as_array()?;
+        // Prevent DoS via unbounded message arrays.
+        if messages.len() > 1000 {
+            warn!(
+                "ignoring Anthropic request with {} messages (limit 1000)",
+                messages.len()
+            );
+            return Some(String::new());
+        }
+        let last_user = messages
+            .iter()
+            .rev()
+            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))?;
+        let content = last_user.get("content")?;
+        // Anthropic content is polymorphic: it may be a plain string OR an
+        // array of typed blocks. For classification we only care about text.
+        match content {
+            serde_json::Value::String(s) => Some(s.chars().take(10_000).collect()),
+            serde_json::Value::Array(blocks) => {
+                let mut parts = Vec::new();
+                for block in blocks {
+                    let block_type = block.get("type").and_then(|t| t.as_str());
+                    if block_type == Some("text") {
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                            parts.push(text);
+                        }
+                    }
+                }
+                Some(parts.join(" ").chars().take(10_000).collect())
+            }
+            _ => None,
+        }
+    })();
+
+    match result {
+        Some(s) => s,
+        None => {
+            warn!("could not extract user message from Anthropic request body; storing empty prompt");
+            String::new()
+        }
+    }
+}
+
 /// Extract a 200-char privacy-safe snippet from an OpenAI-compatible request body.
 ///
 /// Delegates to [`extract_last_user_message`] for JSON parsing and last-user-message
 /// logic, then truncates to 200 characters. On any parse failure returns `""`.
 /// Never panics, never blocks the response path.
+#[cfg(test)]
 pub fn extract_snippet(body: &str) -> String {
     let full = extract_last_user_message(body);
     full.chars().take(200).collect()
+}
+
+/// Extract a 200-char privacy-safe snippet from a pre-extracted prompt string.
+/// Truncates to 200 characters. Used internally by callers that already have
+/// the full prompt extracted (e.g. via `extract_last_user_message` or
+/// `extract_last_user_message_anthropic`).
+#[allow(dead_code)]
+pub fn truncate_snippet(prompt: &str) -> String {
+    prompt.chars().take(200).collect()
 }
 
 /// Convert character count to estimated dollar cost.
@@ -1385,6 +1455,63 @@ mod tests {
         }
         let body = format!(r#"{{"messages":[{}]}}"#, messages.join(","));
         assert_eq!(extract_last_user_message(&body), "");
+    }
+
+    // ── extract_last_user_message_anthropic ────────────────────────────────────
+
+    #[test]
+    fn persistence_extract_anthropic_returns_string_content() {
+        let body = r#"{"messages":[{"role":"user","content":"hello anthropic"}]}"#;
+        assert_eq!(extract_last_user_message_anthropic(body), "hello anthropic");
+    }
+
+    #[test]
+    fn persistence_extract_anthropic_returns_text_blocks_joined() {
+        let body = r#"{"messages":[{"role":"user","content":[
+            {"type":"text","text":"first part"},
+            {"type":"text","text":"second part"}
+        ]}]}"#;
+        assert_eq!(
+            extract_last_user_message_anthropic(body),
+            "first part second part"
+        );
+    }
+
+    #[test]
+    fn persistence_extract_anthropic_ignores_image_blocks() {
+        let body = r#"{"messages":[{"role":"user","content":[
+            {"type":"text","text":"describe this"},
+            {"type":"image","source":{"type":"base64","data":"AAAA"}}
+        ]}]}"#;
+        assert_eq!(extract_last_user_message_anthropic(body), "describe this");
+    }
+
+    #[test]
+    fn persistence_extract_anthropic_returns_empty_on_empty_messages_array() {
+        let body = r#"{"messages":[]}"#;
+        assert_eq!(extract_last_user_message_anthropic(body), "");
+    }
+
+    #[test]
+    fn persistence_extract_anthropic_returns_empty_on_invalid_json() {
+        assert_eq!(extract_last_user_message_anthropic("not json"), "");
+    }
+
+    #[test]
+    fn persistence_extract_anthropic_picks_last_user_message() {
+        let body = r#"{"messages":[
+            {"role":"user","content":"first"},
+            {"role":"assistant","content":"reply"},
+            {"role":"user","content":"second"}
+        ]}"#;
+        assert_eq!(extract_last_user_message_anthropic(body), "second");
+    }
+
+    #[test]
+    fn persistence_extract_anthropic_caps_at_10000_chars() {
+        let long = "x".repeat(15000);
+        let body = format!(r#"{{"messages":[{{"role":"user","content":"{long}"}}]}}"#);
+        assert_eq!(extract_last_user_message_anthropic(&body).len(), 10000);
     }
 
     // ── Retry behavior ────────────────────────────────────────────────────────
