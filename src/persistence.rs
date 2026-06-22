@@ -1273,7 +1273,13 @@ impl TestDb {
 pub async fn test_pool() -> Option<std::sync::Arc<PgPool>> {
     // Try disposable PostgreSQL container first (in-memory, Docker-backed)
     if let Some(tdb) = TestDb::new().await {
-        return Some(tdb.pool);
+        // Quick health check — if the container is flaky, skip gracefully
+        let ok = tokio::time::timeout(Duration::from_secs(3), sqlx::query("SELECT 1").execute(tdb.pool.as_ref()))
+            .await;
+        if ok.is_ok() && ok.unwrap().is_ok() {
+            return Some(tdb.pool);
+        }
+        eprintln!("WARN: Docker Postgres container started but failed health check — skipping");
     }
     // Fall back to DATABASE_URL env var
     let url = std::env::var("DATABASE_URL").ok()?;

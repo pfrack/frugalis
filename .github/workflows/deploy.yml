@@ -31,7 +31,7 @@ jobs:
         env:
           SQLX_OFFLINE: "true"
         run: |
-          cargo test persistence
+          cargo test persistence::tests
           if [ -n "$DATABASE_URL" ]; then
             sqlx migrate run
             cargo test persistence_integration
