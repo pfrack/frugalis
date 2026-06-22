@@ -368,8 +368,8 @@ None — all changes are in the startup path (runs once) or the merge function (
 
 #### Manual
 
-- [x] 2.6 Template comments are clear and actionable
-- [x] 2.7 Filled template works as CONFIG_PATH
+- [x] 2.6 Template comments are clear and actionable — 0a00c39
+- [x] 2.7 Filled template works as CONFIG_PATH — 0a00c39
 
 ### Phase 3: --quickstart Interactive Wizard
 
