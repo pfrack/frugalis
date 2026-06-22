@@ -25,11 +25,37 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ============================================================================
+# Shared infrastructure — needed by every mode (auto, anthropic, fewshot, default).
+# lib.sh defines TOKEN, MESSAGES_URL, color vars, log_pass/log_fail, classify, etc.
+# ============================================================================
+source "$SCRIPT_DIR/lib.sh"
+
+# Default endpoint for interactive /v1/chat/completions tests.
+URL="${URL:-http://$HOST/v1/chat/completions}"
+
+# ============================================================================
 # Mode detection
 # ============================================================================
 AUTO_MODE=false
-if [ $# -gt 0 ] && ([ "$1" = "--auto" ] || [ "$1" = "-a" ]); then
-    AUTO_MODE=true
+ANTHROPIC_MODE=false
+FEWSHOT_MODE=false
+for arg in "$@"; do
+    case "$arg" in
+        --auto)       AUTO_MODE=true ;;
+        --anthropic)  ANTHROPIC_MODE=true ;;
+        --fewshot|-f) FEWSHOT_MODE=true ;;
+    esac
+done
+
+# DISPATCH_MODE is consumed at the end of the file. The interactive
+# /v1/chat/completions section runs only when it is empty. AUTO_MODE
+# exits early at the top of its own block.
+DISPATCH_MODE=""
+if [ "$ANTHROPIC_MODE" = true ]; then
+    DISPATCH_MODE="anthropic"
+fi
+if [ "$FEWSHOT_MODE" = true ]; then
+    DISPATCH_MODE="fewshot"
 fi
 
 # ============================================================================
@@ -1218,20 +1244,12 @@ fi
 # ============================================================================
 # Interactive manual testing mode (default)
 # ============================================================================
-# This is the original run.sh functionality
+# lib.sh was sourced at the top of the file, so TOKEN, MESSAGES_URL, color
+# vars, etc. are already set. The interactive /v1/chat/completions tests run
+# only when DISPATCH_MODE is empty (i.e. neither --anthropic nor --fewshot
+# was passed). The dispatch for those modes happens at the end of the file.
 
-if [ -z "$TOKEN" ]; then
-    echo "ERROR: PROXY_API_BEARER_TOKEN is not set" >&2
-    echo "Set it via: export PROXY_API_BEARER_TOKEN=your_token" >&2
-    exit 1
-fi
-
-# Colors (redefine in case not in auto mode)
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
+# Reset pass/fail counters for interactive mode.
 PASS=0
 FAIL=0
 
@@ -1344,18 +1362,21 @@ run_test_headers() {
 }
 
 # Interactive mode header
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " Cerebrum Manual Route Tests (Shared Category Config Validation)"
-echo " Target: $URL"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "Make sure the server is running with:"
-echo "  RUST_LOG=info cargo run"
-echo ""
-echo "Press Ctrl+C to abort any test, or wait for completion."
-echo ""
+if [ -z "$DISPATCH_MODE" ]; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo " Cerebrum Manual Route Tests (Shared Category Config Validation)"
+    echo " Target: $URL"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Make sure the server is running with:"
+    echo "  RUST_LOG=info cargo run"
+    echo ""
+    echo "Press Ctrl+C to abort any test, or wait for completion."
+    echo ""
+fi
 
+if [ -z "$DISPATCH_MODE" ]; then
 # ── COMPLEX_REASONING (expects NVIDIA meta/llama-3.3-70b-instruct) ──
 echo "── COMPLEX_REASONING ──"
 run_test "architect a system" \
@@ -1448,14 +1469,17 @@ else
 fi
 
 # ── Summary ──
+if [ -z "$DISPATCH_MODE" ]; then
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 printf " Results: ${GREEN}%d passed${NC}, ${RED}%d failed${NC}\n" "$PASS" "$FAIL"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
+fi
 
-if [ $FAIL -gt 0 ]; then
+if [ -z "$DISPATCH_MODE" ] && [ $FAIL -gt 0 ]; then
     exit 1
+fi
 fi
 
 # ============================================================================
@@ -1636,10 +1660,7 @@ run_fewshot_manual_tests() {
 }
 
 # Allow running just the fewshot tests
-if [ "$1" = "--fewshot" ] || [ "$1" = "-f" ]; then
-    run_fewshot_manual_tests
-    exit $?
-fi
+# (handled at end of file — see DISPATCH_MODE block)
 
 # ============================================================================
 # Anthropic Pass-Through (POST /v1/messages) Manual Tests
@@ -1812,9 +1833,17 @@ run_anthropic_manual_tests() {
 }
 
 # Allow running just the anthropic-passthrough tests
-if [ "$1" = "--anthropic" ] || [ "$1" = "-a" ]; then
-    run_anthropic_manual_tests
-    exit $?
-fi
+# (handled below — see DISPATCH_MODE block)
+
+# ============================================================================
+# Dispatch to interactive modes AFTER all function definitions are loaded.
+# AUTO_MODE exits at the top of its own block. The interactive
+# /v1/chat/completions tests have already run by the time we get here
+# (or were skipped via DISPATCH_MODE guards).
+# ============================================================================
+case "$DISPATCH_MODE" in
+    anthropic) run_anthropic_manual_tests ;;
+    fewshot)   run_fewshot_manual_tests ;;
+esac
 
 
