@@ -267,18 +267,18 @@ Add `/v1/messages` to the OpenAPI spec following the lessons.md rule.
 
 #### Automated
 
-- [x] 1.1 All existing tests still pass: `cargo test`
-- [x] 1.2 New unit tests pass: `cargo test extract_last_user_message_anthropic`
-- [x] 1.3 New auth test passes: `cargo test auth_headers_for`
-- [x] 1.4 Clippy clean: `cargo clippy -- -D warnings`
+- [x] 1.1 All existing tests still pass: `cargo test` — d819486
+- [x] 1.2 New unit tests pass: `cargo test extract_last_user_message_anthropic` — d819486
+- [x] 1.3 New auth test passes: `cargo test auth_headers_for` — d819486
+- [x] 1.4 Clippy clean: `cargo clippy -- -D warnings` — d819486
 
 ### Phase 2: Messages Handler + Route Wiring
 
 #### Automated
 
-- [x] 2.1 Compiles clean: `cargo build`
-- [x] 2.2 Clippy clean: `cargo clippy -- -D warnings`
-- [x] 2.3 Existing tests pass: `cargo test`
+- [x] 2.1 Compiles clean: `cargo build` — d819486
+- [x] 2.2 Clippy clean: `cargo clippy -- -D warnings` — d819486
+- [x] 2.3 Existing tests pass: `cargo test` — d819486
 
 #### Manual
 
@@ -288,8 +288,8 @@ Add `/v1/messages` to the OpenAPI spec following the lessons.md rule.
 
 #### Automated
 
-- [ ] 3.1 All new integration tests pass: `cargo test messages_handler`
-- [ ] 3.2 Full suite green: `cargo test`
+- [x] 3.1 All new integration tests pass: `cargo test messages_handler`
+- [x] 3.2 Full suite green: `cargo test`
 
 ### Phase 4: OpenAPI Spec Update
 
