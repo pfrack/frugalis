@@ -901,50 +901,42 @@ fn build_upstream_request(
     Ok((client_wants_stream, req))
 }
 
-/// Buffer an upstream response. For OpenAI traffic, non-2xx responses are
-/// wrapped in the `upstream_error_json` envelope so the client always sees a
-/// consistent JSON shape. For Anthropic traffic (`anthropic_errors = true`),
-/// non-2xx responses pass through verbatim — the Anthropic upstream already
-/// produces an Anthropic-format error body, and re-wrapping it would
-/// double-encode the message and break the client's error contract.
 async fn handle_buffered_response(
     mut upstream_response: reqwest::Response,
     max_upstream_body_bytes: usize,
-    anthropic_errors: bool,
 ) -> (StatusCode, String) {
     let upstream_status = upstream_response.status();
     if !upstream_status.is_success() {
-        // Cap the upstream error body to 2 KB to bound latency and memory on
-        // large error payloads (lesson: "Handle upstream error bodies without
-        // full buffering where possible").
         const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
         let mut error_bytes = Vec::new();
         let error_body = loop {
             match upstream_response.chunk().await {
                 Ok(Some(chunk)) => {
                     if error_bytes.len() + chunk.len() > MAX_ERROR_BODY_BYTES {
-                        break String::from_utf8_lossy(&error_bytes).into_owned();
+                        let error_text = String::from_utf8_lossy(&error_bytes)
+                            .chars()
+                            .take(512)
+                            .collect::<String>()
+                            .replace(['\n', '\r'], " ");
+                        break upstream_error_json(upstream_status.as_u16(), &error_text);
                     }
                     error_bytes.extend_from_slice(&chunk);
                 }
-                Ok(None) => break String::from_utf8_lossy(&error_bytes).into_owned(),
-                Err(e) => break e.to_string(),
+                Ok(None) => {
+                    let error_text = String::from_utf8_lossy(&error_bytes)
+                        .chars()
+                        .take(512)
+                        .collect::<String>()
+                        .replace(['\n', '\r'], " ");
+                    break upstream_error_json(upstream_status.as_u16(), &error_text);
+                }
+                Err(e) => break upstream_error_json(502, &e.to_string()),
             }
         };
-        let status =
-            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        if anthropic_errors {
-            // Pass through verbatim — the upstream already speaks Anthropic.
-            return (status, error_body);
-        }
-        // OpenAI: re-encode the upstream error text in our envelope so the
-        // client sees a consistent shape regardless of upstream quirks.
-        let error_text = error_body
-            .chars()
-            .take(512)
-            .collect::<String>()
-            .replace(['\n', '\r'], " ");
-        return (status, upstream_error_json(upstream_status.as_u16(), &error_text));
+        return (
+            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            error_body,
+        );
     }
 
     let mut upstream_body_bytes: Vec<u8> = Vec::new();
@@ -1369,7 +1361,7 @@ async fn completion_handler(
     }
 
     let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
-    let (status, body) = handle_buffered_response(upstream_response, max_upstream_body_bytes, false).await;
+    let (status, body) = handle_buffered_response(upstream_response, max_upstream_body_bytes).await;
     let log_status = if status == StatusCode::OK {
         "ok"
     } else {
@@ -1607,7 +1599,7 @@ async fn messages_handler(
     }
 
     let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
-    let (status, body) = handle_buffered_response(upstream_response, max_upstream_body_bytes, true).await;
+    let (status, body) = handle_buffered_response(upstream_response, max_upstream_body_bytes).await;
     let log_status = if status == StatusCode::OK {
         "ok"
     } else {
@@ -3233,301 +3225,6 @@ mod tests {
         );
         let app = build_app(auth_config, app_state);
         (app, server)
-    }
-
-    /// Anthropic-flavored variant of `test_app_with_http_client`. Routes the
-    /// mock at `/v1/messages` and tags the route with `provider_type: "anthropic"`
-    /// so the proxy emits `x-api-key` + `anthropic-version` headers instead
-    /// of `Authorization: Bearer …`. The mock assertions in the tests below
-    /// rely on this header contract.
-    pub(crate) fn test_app_with_anthropic_http_client(
-        env_var_name: &str,
-        max_upstream_body_bytes: usize,
-    ) -> (Router, httpmock::MockServer) {
-        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        use std::collections::HashMap;
-        let cats = test_categories();
-        let server = httpmock::MockServer::start();
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .expect("test reqwest client should build");
-        let auth_config = Arc::new(auth::AuthConfig::from_values(
-            "proxy-token",
-            "user",
-            "password",
-        ));
-        let endpoint = server.url("/v1/messages");
-        let mut routing = HashMap::new();
-        routing.insert(
-            cats[1].name.clone(),
-            intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: endpoint.clone(),
-                cost_per_1m_input_tokens: None,
-                provider_type: "anthropic".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
-            },
-        );
-        routing.insert(
-            cats[3].name.clone(),
-            intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint,
-                cost_per_1m_input_tokens: None,
-                provider_type: "anthropic".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
-            },
-        );
-        let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
-            cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
-        };
-        let regex_classifier = intent_classifier::RegexClassifier::from_values(
-            routing,
-            fallback,
-            30,
-            cats,
-            &test_negative_patterns(),
-        );
-        let app_state = make_test_app_state(
-            regex_classifier,
-            Some(client),
-            intent_classifier::ModelCosts::empty(),
-            String::new(),
-            max_upstream_body_bytes,
-        );
-        let app = build_app(auth_config, app_state);
-        (app, server)
-    }
-
-    // ── /v1/messages (Anthropic pass-through) integration tests ──────────────
-
-    #[tokio::test]
-    async fn test_messages_handler_requires_auth() {
-        // Auth must fail before any handler logic runs — same contract as
-        // /v1/chat/completions and /v1/feedback, covered by the proxy_auth_layer.
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/messages")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"model":"claude-3.5","messages":[{"role":"user","content":"hi"}]}"#,
-                    ))
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_messages_handler_non_streaming_passthrough() {
-        let env = "TEST_ANTHROPIC_NS";
-        let _guard = EnvGuard(env);
-        std::env::set_var(env, "sk-ant-test");
-        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
-        let mock = server.mock(|when, then| {
-            when.method("POST")
-                .path("/v1/messages")
-                .header("x-api-key", "sk-ant-test")
-                .header("anthropic-version", "2023-06-01");
-            then.status(200)
-                .header("content-type", "application/json")
-                .body(
-                    r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hello"}]}"#,
-                );
-        });
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/messages")
-                    .header(header::AUTHORIZATION, "Bearer proxy-token")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#,
-                    ))
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should succeed");
-        assert_eq!(response.status(), StatusCode::OK);
-        mock.assert();
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body_str = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(
-            body_str.contains("hello"),
-            "expected upstream text in response, got: {body_str}"
-        );
-        assert!(
-            body_str.contains("msg_1"),
-            "expected upstream id in response, got: {body_str}"
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_messages_handler_streaming_passthrough() {
-        let env = "TEST_ANTHROPIC_STREAM";
-        let _guard = EnvGuard(env);
-        std::env::set_var(env, "sk-ant-test");
-        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
-        let mock = server.mock(|when, then| {
-            when.method("POST").path("/v1/messages");
-            then.status(200)
-                .header("content-type", "text/event-stream")
-                .body("event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n");
-        });
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/messages")
-                    .header(header::AUTHORIZATION, "Bearer proxy-token")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"model":"claude-3.5","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"fix this bug"}]}"#,
-                    ))
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should succeed");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok()),
-            Some("text/event-stream"),
-            "expected text/event-stream content type"
-        );
-        mock.assert();
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
-        let body_str = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(
-            body_str.contains("message_start"),
-            "expected upstream SSE bytes forwarded, got: {body_str}"
-        );
-        assert!(
-            body_str.contains("content_block_delta"),
-            "expected second SSE event forwarded, got: {body_str}"
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_messages_handler_upstream_error_forwards_body() {
-        let env = "TEST_ANTHROPIC_ERR";
-        let _guard = EnvGuard(env);
-        std::env::set_var(env, "sk-ant-test");
-        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
-        let mock = server.mock(|when, then| {
-            when.method("POST").path("/v1/messages");
-            then.status(429)
-                .header("content-type", "application/json")
-                .body(r#"{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}"#);
-        });
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/messages")
-                    .header(header::AUTHORIZATION, "Bearer proxy-token")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#,
-                    ))
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should succeed");
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        mock.assert();
-        let json = parse_json_body(response).await;
-        assert_eq!(
-            json.get("type").and_then(|v| v.as_str()),
-            Some("error"),
-            "expected upstream Anthropic error envelope, got: {json}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_messages_handler_classification_only_when_no_http_client() {
-        // No http_client configured → proxy returns classification JSON
-        // instead of attempting an upstream call (parity with /v1/chat/completions).
-        let response = test_app_with_classifier()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/messages")
-                    .header(header::AUTHORIZATION, "Bearer proxy-token")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#,
-                    ))
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should succeed");
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = parse_json_body(response).await;
-        assert_eq!(
-            json.get("status").and_then(|v| v.as_str()),
-            Some("classified"),
-            "expected classified status, got: {json}"
-        );
-        assert_eq!(
-            json.get("category").and_then(|v| v.as_str()),
-            Some("SYNTAX_FIX"),
-            "expected SYNTAX_FIX category from 'fix this bug', got: {json}"
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_messages_handler_overrides_model_to_classifier_choice() {
-        let env = "TEST_ANTHROPIC_MODEL";
-        let _guard = EnvGuard(env);
-        std::env::set_var(env, "sk-ant-test");
-        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
-        // Mock verifies the body has the classifier-selected "sf-model" (from
-        // SYNTAX_FIX routing), NOT the client's "claude-3.5". Mock only fires
-        // when the body_contains matcher passes.
-        let mock = server.mock(|when, then| {
-            when.method("POST")
-                .path("/v1/messages")
-                .body_contains("\"model\":\"sf-model\"");
-            then.status(200)
-                .header("content-type", "application/json")
-                .body(r#"{"id":"msg_1","type":"message"}"#);
-        });
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/messages")
-                    .header(header::AUTHORIZATION, "Bearer proxy-token")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#,
-                    ))
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should succeed");
-        assert_eq!(response.status(), StatusCode::OK);
-        mock.assert();
     }
 
     /// Build app state and router with an arbitrary `DbBackend` for integration tests.

@@ -267,37 +267,37 @@ Add `/v1/messages` to the OpenAPI spec following the lessons.md rule.
 
 #### Automated
 
-- [x] 1.1 All existing tests still pass: `cargo test` — d819486
-- [x] 1.2 New unit tests pass: `cargo test extract_last_user_message_anthropic` — d819486
-- [x] 1.3 New auth test passes: `cargo test auth_headers_for` — d819486
-- [x] 1.4 Clippy clean: `cargo clippy -- -D warnings` — d819486
+- [x] 1.1 All existing tests still pass: `cargo test`
+- [x] 1.2 New unit tests pass: `cargo test extract_last_user_message_anthropic`
+- [x] 1.3 New auth test passes: `cargo test auth_headers_for`
+- [x] 1.4 Clippy clean: `cargo clippy -- -D warnings`
 
 ### Phase 2: Messages Handler + Route Wiring
 
 #### Automated
 
-- [x] 2.1 Compiles clean: `cargo build` — d819486
-- [x] 2.2 Clippy clean: `cargo clippy -- -D warnings` — d819486
-- [x] 2.3 Existing tests pass: `cargo test` — d819486
+- [x] 2.1 Compiles clean: `cargo build`
+- [x] 2.2 Clippy clean: `cargo clippy -- -D warnings`
+- [x] 2.3 Existing tests pass: `cargo test`
 
 #### Manual
 
-- [x] 2.4 Endpoint responds to POST at `/v1/messages` — covered by `test_anthropic_requires_auth` + `test_anthropic_classifies_anthropic_format` (manual-test/run.sh --auto) and the interactive `./run.sh --anthropic` mode — 94ddd11
+- [ ] 2.4 Endpoint responds to POST at `/v1/messages`
 
 ### Phase 3: Integration Tests
 
 #### Automated
 
-- [x] 3.1 All new integration tests pass: `cargo test messages_handler` — 232d35c
-- [x] 3.2 Full suite green: `cargo test` — 232d35c
+- [ ] 3.1 All new integration tests pass: `cargo test messages_handler`
+- [ ] 3.2 Full suite green: `cargo test`
 
 ### Phase 4: OpenAPI Spec Update
 
 #### Automated
 
-- [x] 4.1 YAML is valid — c5df955
-- [x] 4.2 Existing tests still pass: `cargo test` — c5df955
+- [ ] 4.1 YAML is valid
+- [ ] 4.2 Existing tests still pass: `cargo test`
 
 #### Manual
 
-- [x] 4.3 Spec is consistent with actual endpoint behavior — `test_anthropic_openapi_documents_endpoint` asserts the spec has `/v1/messages` with the Anthropic error envelope fields, and the actual endpoint's 415 response is validated in `test_anthropic_error_envelope_shape` — 94ddd11
+- [ ] 4.3 Spec is consistent with actual endpoint behavior

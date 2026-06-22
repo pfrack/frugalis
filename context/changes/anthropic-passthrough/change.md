@@ -1,6 +1,6 @@
 ---
 id: anthropic-passthrough
-status: implemented
+status: implementing
 created: 2026-06-22
 updated: 2026-06-22
 user: pfrack
