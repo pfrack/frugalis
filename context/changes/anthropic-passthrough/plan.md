@@ -282,7 +282,7 @@ Add `/v1/messages` to the OpenAPI spec following the lessons.md rule.
 
 #### Manual
 
-- [x] 2.4 Endpoint responds to POST at `/v1/messages` — covered by `test_anthropic_requires_auth` + `test_anthropic_classifies_anthropic_format` (manual-test/run.sh --auto) and the interactive `./run.sh --anthropic` mode
+- [x] 2.4 Endpoint responds to POST at `/v1/messages` — covered by `test_anthropic_requires_auth` + `test_anthropic_classifies_anthropic_format` (manual-test/run.sh --auto) and the interactive `./run.sh --anthropic` mode — 94ddd11
 
 ### Phase 3: Integration Tests
 
@@ -300,4 +300,4 @@ Add `/v1/messages` to the OpenAPI spec following the lessons.md rule.
 
 #### Manual
 
-- [x] 4.3 Spec is consistent with actual endpoint behavior — `test_anthropic_openapi_documents_endpoint` asserts the spec has `/v1/messages` with the Anthropic error envelope fields, and the actual endpoint's 415 response is validated in `test_anthropic_error_envelope_shape`
+- [x] 4.3 Spec is consistent with actual endpoint behavior — `test_anthropic_openapi_documents_endpoint` asserts the spec has `/v1/messages` with the Anthropic error envelope fields, and the actual endpoint's 415 response is validated in `test_anthropic_error_envelope_shape` — 94ddd11
