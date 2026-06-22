@@ -1,12 +1,15 @@
-name: Deploy to Render
+name: CI
 
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 concurrency:
-  group: render-production
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -44,26 +47,3 @@ jobs:
         env:
           SQLX_OFFLINE: "true"
         run: cargo build --release
-
-  deploy:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out code
-        uses: actions/checkout@v4
-
-      - name: Trigger deploy via webhook
-        env:
-          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
-        run: |
-          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
-            echo "Missing required secret: RENDER_DEPLOY_HOOK"
-            exit 1
-          fi
-
-          echo "Triggering Render deployment..."
-          curl -X POST "$RENDER_DEPLOY_HOOK" \
-            -H "Content-Type: application/json" \
-            -d "{\"ref\":\"$(git rev-parse HEAD)\"}"
-
-          echo "Deploy hook triggered successfully"
