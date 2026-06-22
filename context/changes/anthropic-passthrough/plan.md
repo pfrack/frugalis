@@ -295,8 +295,8 @@ Add `/v1/messages` to the OpenAPI spec following the lessons.md rule.
 
 #### Automated
 
-- [x] 4.1 YAML is valid
-- [x] 4.2 Existing tests still pass: `cargo test`
+- [x] 4.1 YAML is valid — c5df955
+- [x] 4.2 Existing tests still pass: `cargo test` — c5df955
 
 #### Manual
 
