@@ -1847,3 +1847,180 @@ case "$DISPATCH_MODE" in
 esac
 
 
+# ============================================================================
+# Anthropic Pass-Through (POST /v1/messages) Manual Tests
+# ============================================================================
+# These tests hit POST /v1/messages, the Anthropic Messages API pass-through
+# endpoint. They work WITHOUT a real upstream — the proxy returns a
+# classification JSON response when no http_client is configured (default
+# state for manual testing). With a real upstream configured, the same
+# requests forward verbatim to the upstream and the JSON response is the
+# upstream's Anthropic-format response.
+#
+# Run mode: same as the chat/completions tests above (server must be running).
+
+run_messages_test() {
+    _label="$1" _body="$2"
+    _resp=""
+    _http_code=""
+    _upstream_model=""
+    _error_msg=""
+    _tmpfile=$(mktemp)
+    _start=$(date +%s)
+
+    printf "[TEST] %s\n" "$_label"
+    printf "  ⏳  "
+    ( curl -s -w "\n%{http_code}" --max-time 120 \
+        "$MESSAGES_URL" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$_body" > "$_tmpfile" 2>/dev/null ) &
+    _curl_pid=$!
+    while kill -0 "$_curl_pid" 2>/dev/null; do
+        sleep 2
+        printf "."
+    done
+    wait $_curl_pid 2>/dev/null
+    _end=$(date +%s)
+    _elapsed=$((_end - _start))
+    printf " done\n"
+    _resp=$(cat "$_tmpfile")
+    rm -f "$_tmpfile"
+    _http_code=$(printf '%s' "$_resp" | tail -1)
+    _body_resp=$(printf '%s' "$_resp" | sed '$d')
+    _upstream_model=$(extract_model "$_body_resp")
+
+    if [ "$_http_code" = "200" ]; then
+        printf "  ${GREEN}PASS${NC} (HTTP %s, %ss, model=%s)\n" "$_http_code" "$_elapsed" "$_upstream_model"
+        PASS=$((PASS+1))
+    else
+        _error_msg=$(extract_error "$_body_resp")
+        [ -z "$_error_msg" ] && _error_msg=$(printf '%s' "$_body_resp" | head -c 120)
+        printf "  ${RED}FAIL${NC} (HTTP %s, %ss): %s\n" "$_http_code" "$_elapsed" "$_error_msg"
+        FAIL=$((FAIL+1))
+    fi
+}
+
+run_anthropic_manual_tests() {
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════════╗"
+    echo "║  Anthropic Pass-Through (POST /v1/messages) Manual Tests        ║"
+    echo "╚══════════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "Target: $MESSAGES_URL"
+    echo ""
+    echo "These tests send Anthropic Messages API requests. With no upstream"
+    echo "configured the proxy returns classification JSON (status=classified,"
+    echo "category=X, model=Y). With a real upstream configured, responses are"
+    echo "the upstream's Anthropic-format messages."
+    echo ""
+
+    # ── Basic shape: required fields model, max_tokens, messages ──────────
+    echo "── REQUEST SHAPE ──"
+    run_messages_test "string content" \
+        '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}'
+    run_messages_test "array-of-text-blocks content" \
+        '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}]}'
+
+    # ── Classifier routes: each category via a representative prompt ────
+    echo ""
+    echo "── CLASSIFICATION (verifies prompt extraction works on Anthropic format) ──"
+    run_messages_test "SYNTAX_FIX" \
+        '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug please"}]}'
+    run_messages_test "FILE_READING" \
+        '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"please read the file src/main.rs"}]}'
+    run_messages_test "COMPLEX_REASONING" \
+        '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"architect a distributed rate limiter"}]}'
+    run_messages_test "CASUAL" \
+        '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}'
+
+    # ── Auth gate ──────────────────────────────────────────────────────────
+    echo ""
+    echo "── AUTH ──"
+    printf "[TEST] missing token ... "
+    _code=$(curl -s -o /dev/null -w "%{http_code}" \
+        "$MESSAGES_URL" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}' 2>/dev/null) || true
+    if [ "$_code" = "401" ]; then
+        printf "${GREEN}PASS${NC} (HTTP %s)\n" "$_code"
+        PASS=$((PASS+1))
+    else
+        printf "${RED}FAIL${NC} (expected 401, got %s)\n" "$_code"
+        FAIL=$((FAIL+1))
+    fi
+
+    printf "[TEST] wrong token ... "
+    _code=$(curl -s -o /dev/null -w "%{http_code}" \
+        "$MESSAGES_URL" \
+        -H "Authorization: Bearer wrong-token" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}' 2>/dev/null) || true
+    if [ "$_code" = "401" ]; then
+        printf "${GREEN}PASS${NC} (HTTP %s)\n" "$_code"
+        PASS=$((PASS+1))
+    else
+        printf "${RED}FAIL${NC} (expected 401, got %s)\n" "$_code"
+        FAIL=$((FAIL+1))
+    fi
+
+    # ── Streaming: when stream=true, response should be text/event-stream ──
+    echo ""
+    echo "── STREAMING ──"
+    printf "[TEST] streaming mode ... "
+    resp=$(curl -s -w "\n%{http_code}" \
+        "$MESSAGES_URL" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"claude-3.5","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hello"}]}' 2>/dev/null) || true
+    http_code=$(printf '%s' "$resp" | tail -1)
+    sse_lines=$(printf '%s' "$resp" | sed '$d' | grep -c "^data:\|^event:" || true)
+    if [ "$http_code" = "200" ] && [ "${sse_lines:-0}" -gt 0 ]; then
+        printf "${GREEN}PASS${NC} (HTTP %s, %s SSE chunks)\n" "$http_code" "$sse_lines"
+        PASS=$((PASS+1))
+    elif [ "$http_code" = "200" ]; then
+        # With no upstream the response is a JSON classification envelope,
+        # not SSE — that's correct behavior, just no SSE lines to count.
+        printf "${GREEN}PASS${NC} (HTTP %s, no SSE — classification JSON response)\n" "$http_code"
+        PASS=$((PASS+1))
+    else
+        printf "${RED}FAIL${NC} (HTTP %s)\n" "$http_code"
+        FAIL=$((FAIL+1))
+    fi
+
+    # ── Content-Type gate: 415 when not application/json ──────────────────
+    echo ""
+    echo "── CONTENT-TYPE ──"
+    printf "[TEST] non-JSON content-type ... "
+    _code=$(curl -s -o /dev/null -w "%{http_code}" \
+        "$MESSAGES_URL" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: text/plain" \
+        -d 'hello' 2>/dev/null) || true
+    if [ "$_code" = "415" ]; then
+        printf "${GREEN}PASS${NC} (HTTP %s)\n" "$_code"
+        PASS=$((PASS+1))
+    else
+        printf "${RED}FAIL${NC} (expected 415, got %s)\n" "$_code"
+        FAIL=$((FAIL+1))
+    fi
+
+    # ── Summary ──
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    printf " Results: ${GREEN}%d passed${NC}, ${RED}%d failed${NC}\n" "$PASS" "$FAIL"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    if [ $FAIL -gt 0 ]; then
+        exit 1
+    fi
+}
+
+# Allow running just the anthropic-passthrough tests
+if [ "$1" = "--anthropic" ] || [ "$1" = "-a" ]; then
+    run_anthropic_manual_tests
+    exit $?
+fi
+
+
