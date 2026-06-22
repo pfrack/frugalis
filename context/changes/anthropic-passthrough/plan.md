@@ -288,15 +288,15 @@ Add `/v1/messages` to the OpenAPI spec following the lessons.md rule.
 
 #### Automated
 
-- [x] 3.1 All new integration tests pass: `cargo test messages_handler`
-- [x] 3.2 Full suite green: `cargo test`
+- [x] 3.1 All new integration tests pass: `cargo test messages_handler` — 232d35c
+- [x] 3.2 Full suite green: `cargo test` — 232d35c
 
 ### Phase 4: OpenAPI Spec Update
 
 #### Automated
 
-- [ ] 4.1 YAML is valid
-- [ ] 4.2 Existing tests still pass: `cargo test`
+- [x] 4.1 YAML is valid
+- [x] 4.2 Existing tests still pass: `cargo test`
 
 #### Manual
 
