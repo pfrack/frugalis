@@ -1262,6 +1262,28 @@ impl TestDb {
     }
 }
 
+/// Test helper: create a test database pool.
+///
+/// Priority:
+/// 1. Ephemeral PostgreSQL container via testcontainers (Docker required)
+/// 2. DATABASE_URL env var with a short connect timeout (3s)
+///
+/// Returns `None` when neither is available.
+#[cfg(test)]
+pub async fn test_pool() -> Option<std::sync::Arc<PgPool>> {
+    // Try disposable PostgreSQL container first (in-memory, Docker-backed)
+    if let Some(tdb) = TestDb::new().await {
+        return Some(tdb.pool);
+    }
+    // Fall back to DATABASE_URL env var
+    let url = std::env::var("DATABASE_URL").ok()?;
+    tokio::time::timeout(Duration::from_secs(3), sqlx::PgPool::connect(&url))
+        .await
+        .ok()?
+        .ok()
+        .map(std::sync::Arc::new)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2379,26 +2401,4 @@ mod tests {
         };
         assert_eq!(config.task_semaphore.available_permits(), 7);
     }
-}
-
-/// Test helper: create a test database pool.
-///
-/// Priority:
-/// 1. Ephemeral PostgreSQL container via testcontainers (Docker required)
-/// 2. DATABASE_URL env var with a short connect timeout (3s)
-///
-/// Returns `None` when neither is available.
-#[cfg(test)]
-pub async fn test_pool() -> Option<std::sync::Arc<PgPool>> {
-    // Try disposable PostgreSQL container first (in-memory, Docker-backed)
-    if let Some(tdb) = TestDb::new().await {
-        return Some(tdb.pool);
-    }
-    // Fall back to DATABASE_URL env var
-    let url = std::env::var("DATABASE_URL").ok()?;
-    tokio::time::timeout(Duration::from_secs(3), sqlx::PgPool::connect(&url))
-        .await
-        .ok()?
-        .ok()
-        .map(std::sync::Arc::new)
 }

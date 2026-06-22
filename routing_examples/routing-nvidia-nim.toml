@@ -1,27 +1,36 @@
 # NVIDIA NIM Free Model Routing Configuration
-# This file configures the intent classifier to use only free NVIDIA NIM models
+# Usage: CONFIG_PATH=this-file.toml cerebrum
+# Requires NVIDIA_API_KEY env var to be set.
+#
+# Cerebrum's merge semantics for [routing] are per-key additive — unmentioned
+# routes inherit from the built-in defaults.
 
-# FILE_READING - Use NVIDIA's free model for file reading operations
-[FILE_READING]
+[routing.FILE_READING]
 model = "nvidia/llama-3.1-nemotron-70b-instruct"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 provider_type = "nvidia_nim"
+api_key_env = "NVIDIA_API_KEY"
 
-# COMPLEX_REASONING - Use NVIDIA's free model for complex reasoning
-[COMPLEX_REASONING]
+[routing.COMPLEX_REASONING]
 model = "nvidia/llama-3.1-nemotron-70b-instruct"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 provider_type = "nvidia_nim"
+api_key_env = "NVIDIA_API_KEY"
 
-# SYNTAX_FIX - Use NVIDIA's free model for syntax fixes
-[SYNTAX_FIX]
+[routing.SYNTAX_FIX]
 model = "nvidia/llama-3.1-nemotron-70b-instruct"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 provider_type = "nvidia_nim"
+api_key_env = "NVIDIA_API_KEY"
 
-# CASUAL - Use NVIDIA's free model for casual interactions
-[CASUAL]
+[routing.CASUAL]
 model = "nvidia/llama-3.1-nemotron-70b-instruct"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 provider_type = "nvidia_nim"
+api_key_env = "NVIDIA_API_KEY"
 
-# FALLBACK - Use NVIDIA's free model as fallback
-[FALLBACK]
+[routing.DEFAULT]
 model = "nvidia/llama-3.1-nemotron-70b-instruct"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 provider_type = "nvidia_nim"
+api_key_env = "NVIDIA_API_KEY"

@@ -48,3 +48,7 @@ impl ModelCosts {
 
 pub const DEFAULT_MODEL: &str = "meta/llama-3.1-8b-instruct";
 pub const DEFAULT_MODEL_COMPLEX: &str = "meta/llama-3.3-70b-instruct";
+/// Default model for the embedded fallback (`hardcoded_routing`). Targets
+/// Ollama's canonical model name so a fresh install with no `CONFIG_PATH`
+/// works locally without requiring any API key.
+pub const DEFAULT_MODEL_LOCAL: &str = "llama3.1";

@@ -64,7 +64,7 @@ pub fn init(service_name: &str) -> Option<(OtelGuard, Metrics)> {
     {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("OTLP SpanExporter failed to build: {e}");
+            tracing::warn!("OTLP SpanExporter failed to build: {e}");
             return None;
         }
     };
@@ -81,7 +81,7 @@ pub fn init(service_name: &str) -> Option<(OtelGuard, Metrics)> {
     {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("OTLP LogExporter failed to build: {e}");
+            tracing::warn!("OTLP LogExporter failed to build: {e}");
             return None;
         }
     };
@@ -98,7 +98,7 @@ pub fn init(service_name: &str) -> Option<(OtelGuard, Metrics)> {
     {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("OTLP MetricExporter failed to build: {e}");
+            tracing::warn!("OTLP MetricExporter failed to build: {e}");
             return None;
         }
     };

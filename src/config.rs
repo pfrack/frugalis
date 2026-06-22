@@ -384,28 +384,28 @@ pub(crate) fn parse_env_int(var: &str, default: i32, min: Option<i32>, max: Opti
 pub(crate) fn hardcoded_routing(
     categories: &[CategoryConfig],
 ) -> (HashMap<String, RouteEntry>, RouteEntry) {
-    let endpoint = "https://integrate.api.nvidia.com/v1/chat/completions";
+    let endpoint = "http://localhost:11434/v1/chat/completions";
     let mut routing = HashMap::new();
 
     for cat in categories {
         routing.insert(
             cat.name.clone(),
             RouteEntry {
-                model: DEFAULT_MODEL.to_string(),
+                model: DEFAULT_MODEL_LOCAL.to_string(),
                 endpoint: endpoint.to_string(),
                 cost_per_1m_input_tokens: None,
-                provider_type: "nvidia_nim".to_string(),
-                api_key_env: Some("NVIDIA_API_KEY".to_string()),
+                provider_type: "ollama".to_string(),
+                api_key_env: None,
             },
         );
     }
 
     let fallback = RouteEntry {
-        model: DEFAULT_MODEL.to_string(),
+        model: DEFAULT_MODEL_LOCAL.to_string(),
         endpoint: endpoint.to_string(),
         cost_per_1m_input_tokens: None,
-        provider_type: "nvidia_nim".to_string(),
-        api_key_env: Some("NVIDIA_API_KEY".to_string()),
+        provider_type: "ollama".to_string(),
+        api_key_env: None,
     };
     (routing, fallback)
 }
@@ -953,8 +953,11 @@ pub(crate) fn merge_configs(base: &mut ConfigRoot, overlay: ConfigRoot) {
     if let Some(v) = overlay.model_costs {
         base.model_costs = Some(v);
     }
-    if let Some(v) = overlay.routing {
-        base.routing = Some(v);
+    if let Some(overlay_routing) = overlay.routing {
+        let base_routing = base.routing.get_or_insert_with(HashMap::new);
+        for (key, entry) in overlay_routing {
+            base_routing.insert(key, entry);
+        }
     }
     if let Some(v) = overlay.patterns_dir {
         base.patterns_dir = Some(v);
@@ -1311,17 +1314,17 @@ api_key_env = ""
                 cat.name
             );
             let entry = routing.get(cat.name.as_str()).unwrap();
-            assert_eq!(entry.model, DEFAULT_MODEL);
-            assert!(entry.endpoint.contains("integrate.api.nvidia.com"));
-            assert_eq!(entry.provider_type, "nvidia_nim");
-            assert_eq!(entry.api_key_env, Some("NVIDIA_API_KEY".to_string()));
+            assert_eq!(entry.model, DEFAULT_MODEL_LOCAL);
+            assert!(entry.endpoint.contains("localhost:11434"));
+            assert_eq!(entry.provider_type, "ollama");
+            assert_eq!(entry.api_key_env, None);
             assert_eq!(entry.cost_per_1m_input_tokens, None);
         }
 
-        assert_eq!(fallback.model, DEFAULT_MODEL);
-        assert!(fallback.endpoint.contains("integrate.api.nvidia.com"));
-        assert_eq!(fallback.provider_type, "nvidia_nim");
-        assert_eq!(fallback.api_key_env, Some("NVIDIA_API_KEY".to_string()));
+        assert_eq!(fallback.model, DEFAULT_MODEL_LOCAL);
+        assert!(fallback.endpoint.contains("localhost:11434"));
+        assert_eq!(fallback.provider_type, "ollama");
+        assert_eq!(fallback.api_key_env, None);
     }
 
     #[test]
@@ -1329,7 +1332,7 @@ api_key_env = ""
         let (_, fallback) = hardcoded_routing(&test_categories());
         assert_eq!(
             fallback.endpoint,
-            "https://integrate.api.nvidia.com/v1/chat/completions"
+            "http://localhost:11434/v1/chat/completions"
         );
     }
 
@@ -1369,7 +1372,7 @@ api_key_env = ""
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 0);
-        assert_eq!(fallback.model, DEFAULT_MODEL);
+        assert_eq!(fallback.model, DEFAULT_MODEL_LOCAL);
 
         std::env::remove_var("CONFIG_PATH");
 
@@ -1384,7 +1387,7 @@ api_key_env = ""
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 0);
-        assert_eq!(fallback.model, DEFAULT_MODEL);
+        assert_eq!(fallback.model, DEFAULT_MODEL_LOCAL);
 
         std::env::remove_var("CONFIG_PATH");
     }
@@ -1925,6 +1928,124 @@ port = 20000
         assert_eq!(server.log_format, "compact");
     }
 
+    #[test]
+    fn merge_configs_routing_per_key_merge() {
+        // Base has DEFAULT + FILE_READING. Overlay has only FILE_READING with
+        // a different model. After merge: DEFAULT is preserved (untouched),
+        // FILE_READING uses the overlay's model.
+        let mut base: ConfigRoot = toml::from_str(
+            r#"
+[routing.DEFAULT]
+model = "base-default"
+endpoint = "https://base.example/v1/chat/completions"
+provider_type = "openai_compatible"
+
+[routing.FILE_READING]
+model = "base-file-reading"
+endpoint = "https://base.example/v1/chat/completions"
+provider_type = "openai_compatible"
+"#,
+        )
+        .expect("valid TOML");
+
+        let overlay: ConfigRoot = toml::from_str(
+            r#"
+[routing.FILE_READING]
+model = "overlay-file-reading"
+endpoint = "https://overlay.example/v1/chat/completions"
+provider_type = "openai_compatible"
+"#,
+        )
+        .expect("valid TOML");
+
+        merge_configs(&mut base, overlay);
+        let routing = base.routing.expect("routing should be present after merge");
+        // DEFAULT preserved from base
+        let default = routing.get("DEFAULT").expect("DEFAULT preserved from base");
+        assert_eq!(default.model, "base-default");
+        assert_eq!(default.endpoint, "https://base.example/v1/chat/completions");
+        // FILE_READING replaced by overlay
+        let file_reading = routing
+            .get("FILE_READING")
+            .expect("FILE_READING present after merge");
+        assert_eq!(file_reading.model, "overlay-file-reading");
+        assert_eq!(
+            file_reading.endpoint,
+            "https://overlay.example/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn merge_configs_routing_full_overlay() {
+        // Overlay specifies every route in the base — verify all are replaced
+        // (per-key merge still produces the same end state as full-replacement
+        // when the overlay covers every key).
+        let mut base: ConfigRoot = toml::from_str(
+            r#"
+[routing.DEFAULT]
+model = "base-default"
+endpoint = "https://base.example/v1/chat/completions"
+provider_type = "openai_compatible"
+
+[routing.FILE_READING]
+model = "base-fr"
+endpoint = "https://base.example/v1/chat/completions"
+provider_type = "openai_compatible"
+"#,
+        )
+        .expect("valid TOML");
+
+        let overlay: ConfigRoot = toml::from_str(
+            r#"
+[routing.DEFAULT]
+model = "new-default"
+endpoint = "https://new.example/v1/chat/completions"
+provider_type = "openai_compatible"
+
+[routing.FILE_READING]
+model = "new-fr"
+endpoint = "https://new.example/v1/chat/completions"
+provider_type = "openai_compatible"
+"#,
+        )
+        .expect("valid TOML");
+
+        merge_configs(&mut base, overlay);
+        let routing = base.routing.expect("routing should be present after merge");
+        assert_eq!(routing.get("DEFAULT").unwrap().model, "new-default");
+        assert_eq!(routing.get("FILE_READING").unwrap().model, "new-fr");
+    }
+
+    #[test]
+    fn merge_configs_routing_initialize_from_none() {
+        // Base has no routing. Overlay has one route. After merge: base routing
+        // exists with the overlay's entry (the None base case for get_or_insert).
+        let mut base: ConfigRoot = toml::from_str(
+            r#"
+[server]
+port = 10000
+log_level = "info"
+log_format = "compact"
+"#,
+        )
+        .expect("valid TOML");
+
+        let overlay: ConfigRoot = toml::from_str(
+            r#"
+[routing.SYNTAX_FIX]
+model = "sf-model"
+endpoint = "https://sf.example/v1/chat/completions"
+provider_type = "openai_compatible"
+"#,
+        )
+        .expect("valid TOML");
+
+        merge_configs(&mut base, overlay);
+        let routing = base.routing.expect("routing initialized from None");
+        assert_eq!(routing.len(), 1);
+        assert_eq!(routing.get("SYNTAX_FIX").unwrap().model, "sf-model");
+    }
+
     // ── Phase 3: External Pattern File Tests ──
 
     #[test]
@@ -2236,5 +2357,79 @@ patterns_file = "nonexistent.patterns"
             all.contains("nonexistent.patterns") || all.contains("cannot read"),
             "should report missing pattern file: {all}"
         );
+    }
+
+    // ── Phase 5: Routing example parse tests ──
+    // Each routing example in routing_examples/ must parse as a valid
+    // ConfigRoot (with a [routing.*] table). Validates the rewrite from
+    // the legacy flat format ([CATEGORY]) to the nested format
+    // ([routing.CATEGORY]) compatible with CONFIG_PATH overlays.
+
+    #[test]
+    fn routing_example_openrouter_parses_as_config_root() {
+        let content = include_str!("../routing_examples/routing-openrouter.toml");
+        let root: ConfigRoot = toml::from_str(content).expect("openrouter example should parse");
+        let routing = root.routing.expect("routing section should be present");
+        // The 5 expected route categories
+        for key in [
+            "FILE_READING",
+            "SYNTAX_FIX",
+            "COMPLEX_REASONING",
+            "CASUAL",
+            "DEFAULT",
+        ] {
+            let entry = routing
+                .get(key)
+                .unwrap_or_else(|| panic!("missing route key {key} in openrouter example"));
+            assert!(!entry.model.is_empty(), "{key} model should be set");
+            assert!(!entry.endpoint.is_empty(), "{key} endpoint should be set");
+            assert!(
+                !entry.provider_type.is_empty(),
+                "{key} provider_type should be set"
+            );
+        }
+    }
+
+    #[test]
+    fn routing_example_nvidia_nim_parses_as_config_root() {
+        let content = include_str!("../routing_examples/routing-nvidia-nim.toml");
+        let root: ConfigRoot = toml::from_str(content).expect("nvidia-nim example should parse");
+        let routing = root.routing.expect("routing section should be present");
+        // Endpoints must be present in every entry — the legacy file omitted
+        // them, producing empty-string endpoints. Verify the rewrite fixed it.
+        for key in [
+            "FILE_READING",
+            "SYNTAX_FIX",
+            "COMPLEX_REASONING",
+            "CASUAL",
+            "DEFAULT",
+        ] {
+            let entry = routing
+                .get(key)
+                .unwrap_or_else(|| panic!("missing route key {key} in nvidia-nim example"));
+            assert!(
+                !entry.endpoint.is_empty(),
+                "{key} endpoint should be present (legacy version omitted it): {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn routing_example_manual_tests_parses_as_config_root() {
+        let content = include_str!("../routing_examples/routing-manual-tests.toml");
+        let root: ConfigRoot = toml::from_str(content).expect("manual-tests example should parse");
+        let routing = root.routing.expect("routing section should be present");
+        assert!(routing.contains_key("DEFAULT"));
+        // FALLBACK (legacy key) must be gone
+        assert!(!routing.contains_key("FALLBACK"));
+    }
+
+    #[test]
+    fn routing_example_unreachable_parses_as_config_root() {
+        let content = include_str!("../routing_examples/routing_unreachable.toml");
+        let root: ConfigRoot = toml::from_str(content).expect("unreachable example should parse");
+        let routing = root.routing.expect("routing section should be present");
+        assert!(!routing.contains_key("FALLBACK"));
+        assert!(routing.contains_key("DEFAULT"));
     }
 }

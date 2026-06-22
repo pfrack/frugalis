@@ -1,32 +1,36 @@
-# Routing configuration using OpenRouter
-# Copy to routing.toml and set OPENROUTER_API_KEY env var
+# Routing overlay using OpenRouter.
+# Usage: CONFIG_PATH=this-file.toml cerebrum
+# Requires OPENROUTER_API_KEY env var to be set.
+#
+# Cerebrum's merge semantics for [routing] are per-key additive — unmentioned
+# routes inherit from the built-in defaults.
 
-[FILE_READING]
+[routing.FILE_READING]
 model = "deepseek/deepseek-chat"
-provider_type = "openai_compatible"
 endpoint = "https://openrouter.ai/api/v1/chat/completions"
+provider_type = "openai_compatible"
 api_key_env = "OPENROUTER_API_KEY"
 
-[COMPLEX_REASONING]
+[routing.COMPLEX_REASONING]
 model = "anthropic/claude-3.5-sonnet"
-provider_type = "openai_compatible"
 endpoint = "https://openrouter.ai/api/v1/chat/completions"
+provider_type = "openai_compatible"
 api_key_env = "OPENROUTER_API_KEY"
 
-[SYNTAX_FIX]
+[routing.SYNTAX_FIX]
 model = "openai/gpt-4o-mini"
-provider_type = "openai_compatible"
 endpoint = "https://openrouter.ai/api/v1/chat/completions"
+provider_type = "openai_compatible"
 api_key_env = "OPENROUTER_API_KEY"
 
-[CASUAL]
+[routing.CASUAL]
 model = "meta-llama/llama-3.1-8b-instruct"
-provider_type = "openai_compatible"
 endpoint = "https://openrouter.ai/api/v1/chat/completions"
+provider_type = "openai_compatible"
 api_key_env = "OPENROUTER_API_KEY"
 
-[FALLBACK]
+[routing.DEFAULT]
 model = "openai/gpt-4o-mini"
-provider_type = "openai_compatible"
 endpoint = "https://openrouter.ai/api/v1/chat/completions"
+provider_type = "openai_compatible"
 api_key_env = "OPENROUTER_API_KEY"

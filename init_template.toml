@@ -1,0 +1,53 @@
+# Cerebrum Starter Config
+# ----------------------
+# This file is meant to be used as a CONFIG_PATH overlay:
+#
+#     CONFIG_PATH=/path/to/this-file.toml cerebrum
+#
+# Cerebrum's merge semantics for [routing] are per-key additive: only the
+# categories you list here will override the embedded defaults. Unmentioned
+# routes inherit from the built-in defaults, so you only need to fill in
+# the routes you actually want to change.
+#
+# Placeholder values below (e.g. "<your-model>") are NOT valid; replace them
+# with real model names, endpoints, and env var names before running.
+#
+# Provider types Cerebrum recognizes today:
+#   - openai_compatible   generic OpenAI-format /v1/chat/completions endpoint
+#   - anthropic           Anthropic Messages API
+#   - ollama              local Ollama (no api_key required)
+#   - local               local passthrough (no api_key, no provider)
+#   - nvidia_nim          NVIDIA NIM (OpenAI-compatible at integrate.api.nvidia.com)
+#
+# Each route references an env var by NAME (e.g. "OPENAI_API_KEY") — set that
+# env var before starting cerebrum. cerebrum does not store the secret itself.
+
+[routing.DEFAULT]
+model = "<your-default-model>"
+endpoint = "https://api.example.invalid/v1/chat/completions"
+provider_type = "openai_compatible"
+api_key_env = "OPENAI_API_KEY"
+
+[routing.FILE_READING]
+model = "<your-fast-cheap-model>"
+endpoint = "https://api.example.invalid/v1/chat/completions"
+provider_type = "openai_compatible"
+api_key_env = "OPENAI_API_KEY"
+
+[routing.SYNTAX_FIX]
+model = "<your-fast-cheap-model>"
+endpoint = "https://api.example.invalid/v1/chat/completions"
+provider_type = "openai_compatible"
+api_key_env = "OPENAI_API_KEY"
+
+[routing.COMPLEX_REASONING]
+model = "<your-strongest-model>"
+endpoint = "https://api.example.invalid/v1/chat/completions"
+provider_type = "openai_compatible"
+api_key_env = "OPENAI_API_KEY"
+
+[routing.CASUAL]
+model = "<your-fast-cheap-model>"
+endpoint = "https://api.example.invalid/v1/chat/completions"
+provider_type = "openai_compatible"
+api_key_env = "OPENAI_API_KEY"

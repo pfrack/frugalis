@@ -136,17 +136,24 @@ Three constraints the implementer needs to know before touching the code:
   counter. Tier inspection cannot distinguish "regex matched" from
   "LLM matched".
 
-- **`format_sse_error_event` helper contract.** The helper takes a
-  pre-truncated, pre-escaped error message string and returns the SSE
-  event body `event: error\ndata: {"error":"<msg>"}\n\n`. The 2 KB cap
-  and 512-char truncate (upstream) and the status passthrough,
-  `Content-Type`, `Cache-Control` (downstream on the response) are NOT
-  the helper's concern. Both call sites — `handle_streaming_error` and
-  the inline mid-stream branch in `handle_streaming_response` — must
-  apply the same escape rule (`\\` → `\\\\`, `"` → `\\"`, `\n` → ` `,
-  `\r` → ` `) on `error_msg` before calling the helper. The helper's
-  own unit tests cover the 2 invariants that are its concern: JSON
-  escape correctness and the SSE event format.
+- **`format_sse_error_event` helper contract (canonical, post-implementation).**
+  The helper takes a **raw** error message string and returns the SSE
+  event body `event: error\ndata: {"error":"<msg>"}\n\n`. The escape
+  rule (`\\` → `\\\\`, `"` → `\\"`, `\n` → ` `, `\r` → ` `) is applied
+  **internally** by the helper — call sites pass the un-escaped error
+  string. The 2 KB body cap and 512-char truncate are upstream of
+  `handle_streaming_error` (the only call site that needs them); the
+  status passthrough, `Content-Type`, and `Cache-Control` are
+  downstream on the response (only `handle_streaming_error` sets
+  them). The helper's own concerns are: (a) JSON escape correctness
+  and (b) the SSE event format. Both call sites —
+  `handle_streaming_error` and the inline mid-stream branch in
+  `handle_streaming_response` — pass the raw error string. The
+  helper's unit tests cover its 2 invariants. (Earlier prose in this
+  plan described the call sites as applying the escape before calling
+  the helper; the implementation resolved to the cleaner "helper owns
+  the escape" model. The docstring at `src/main.rs:830-841` and the
+  helper body at `:842-848` make this explicit.)
 
 - **`build_app_with_persistence` refactor ripple.** Changing the
   signature to accept `Arc<DbBackend>` (so `Memory` can be injected in
@@ -358,9 +365,16 @@ run in default CI.
 - `test_log_classification_failure_does_not_block_response` —
   point the `DbBackend` at a backend whose `log_inference` returns
   an error (or use a wrapper that returns Err); send a request;
-  assert (a) response status is 200 (proxy succeeds), (b) warn log
-  is emitted at the configured `tracing` level, (c) the bounded
-  semaphore on the `PersistenceConfig` is released (no deadlock).
+  assert (a) response status is 200 (proxy succeeds), (b) `fail_next`
+  flag is consumed by the log task within the wait window
+  (proves the log task actually ran; the records-empty side effect
+  alone is ambiguous between "log task ran and failed" and "log
+  task never ran"), (c) the bounded semaphore on the
+  `PersistenceConfig` is released (no deadlock). Production code
+  emits the failure at `error!` level (see `src/persistence.rs:1157`),
+  not `warn!` — the plan's "warn" wording is a typo. Log capture
+  via `tracing-test` is out of scope; the `fail_next` consumption
+  check is the honest regression guard.
   This may require a custom test-only `DbBackend` variant or a
   test-only flag on `MemoryBackend` to simulate failure; the
   implementer picks the cleanest path.
@@ -1127,15 +1141,96 @@ The `format_sse_error_event` helper is `pub(crate)` or
 
 #### Automated
 
-- [ ] 6.1 `test-plan.md` §6.1–§6.5 all read as concrete (no remaining `TBD — see §3 Phase 1` placeholders)
-- [ ] 6.2 `change.md` `status` field is the final value per the test-plan vocabulary
-- [ ] 6.3 `cargo build --release` succeeds
-- [ ] 6.4 `cargo test` passes (all fast tests)
-- [ ] 6.5 `cargo test slow_tests -- --test-threads=1` passes
-- [ ] 6.6 `cargo clippy --all-targets -- -D warnings` reports no issues
-- [ ] 6.7 `cargo fmt --check` reports no issues
+- [x] 6.1 `test-plan.md` §6.1–§6.5 all read as concrete (no remaining `TBD — see §3 Phase 1` placeholders) — ce14ec7
+- [x] 6.2 `change.md` `status` field is the final value per the test-plan vocabulary — ce14ec7
+- [x] 6.3 `cargo build --release` succeeds — ce14ec7
+- [x] 6.4 `cargo test` passes (all fast tests) — ce14ec7
+- [x] 6.5 `cargo test slow_tests -- --test-threads=1` passes — ce14ec7
+- [x] 6.6 `cargo clippy --all-targets -- -D warnings` reports no issues — ce14ec7
+- [x] 6.7 `cargo fmt --check` reports no issues — ce14ec7
 
 #### Manual
 
-- [ ] 6.8 `test-plan.md` §6.1–§6.5 each have a "Reference test" line pointing to a real test from this rollout
-- [ ] 6.9 Phase 3's production code changes are limited to `handle_streaming_error` and `handle_streaming_response` inline branch
+- [x] 6.8 `test-plan.md` §6.1–§6.5 each have a "Reference test" line pointing to a real test from this rollout — ce14ec7
+- [x] 6.9 Phase 3's production code changes are limited to `handle_streaming_error` and `handle_streaming_response` inline branch — ce14ec7
+
+## Addenda (post-rollout corrections)
+
+### Addendum 1: Stale line-number citations
+
+The line-number citations in the plan were correct at plan-creation
+time (commit `1cc87bfe`, 2026-06-13). By the time the rollout shipped,
+the file had grown from adjacent changes (Phase 5 added
+`parse_json_body` + 7 refactored tests + 4 new shape tests;
+Phase 1 added `CountingClassifier`; Phase 2 added
+`build_app_with_persistence_backend` + 3 snippet tests;
+Phase 3 added `format_sse_error_event` + 6 unit tests + 4+ integration
+tests + 5-invariant docstring), pushing the line numbers of every
+subsequent section down. The actual post-rollout locations are:
+
+| Plan citation | Actual location (post-rollout) |
+|---------------|-------------------------------|
+| `src/main.rs:3003-3185` (mod slow_tests block) | `src/main.rs:3936-4353` |
+| `src/main.rs:3047` (existing `test_streaming_keepalive_injected`) | `src/main.rs:4141` |
+| `src/main.rs:3148` (tightened assertion) | `src/main.rs:4181-4184` |
+| `src/main.rs:3025` (`spawn_slow_sse_server`) | `src/main.rs:3958` |
+| `src/main.rs:1243` (`test_app_with_classifier`) | `src/main.rs:1438` |
+| `src/main.rs:1333` (`test_chain_with_regex_and_fewshot`) | `src/main.rs:1521` |
+| `src/main.rs:2206` (`build_app_with_persistence`) | `src/main.rs:2834` (now a thin wrapper) |
+| `src/main.rs:749-783` (`handle_streaming_error`) | `src/main.rs:874-912` |
+| `src/main.rs:712-720` (inline mid-stream branch) | `src/main.rs:790-806` |
+| `src/main.rs:2639` (existing F2 test) | `src/main.rs:3206` |
+| `src/intent_classifier.rs:854-998` (5 existing stub-chain tests) | unchanged |
+| `src/persistence.rs:1080-1088` (`extract_snippet`) | `src/persistence.rs:1118-1121` |
+| `src/persistence.rs:40-50` (`MemoryBackend::new`) | `src/persistence.rs:40-55` |
+| `src/intent_classifier.rs:89-94` (`ClassificationTier`) | `src/intent_classifier.rs:97-102` |
+| `src/intent_classifier.rs:134-167` (`ClassifierChain`) | `src/intent_classifier.rs:142-155` |
+
+All contracts are satisfied; only the line numbers shifted. The
+cookbook entries in `context/foundation/test-plan.md` §6.1-§6.5 use
+the post-rollout line numbers.
+
+### Addendum 2: Phase 1.4 deferred
+
+Phase 1.4 (the optional extension to wrap the existing 2-backend
+`test_chain_with_regex_and_fewshot` at `src/main.rs:1521` with a
+`CountingClassifier` for side-effect observation) was **not**
+implemented. The 3-backend integration test
+`test_chain_3_backend_escalates_to_llm` at `src/main.rs:1611` covers
+the same "regex short-circuited the chain" contract via
+`httpmock::MockServer::hits()` + `CountingClassifier` counters, so
+the substantive invariant is locked. The 2-backend test still uses
+a real `FewShotClassifier` (no counter on the fewshot tier), which
+is a minor defense-in-depth gap. Re-evaluate if a future change
+makes the 2-backend path the production-default (currently it's
+the 3-backend path that exercises the full chain).
+
+### Addendum 3: Test count bookkeeping
+
+The Phase 5 commit message says "Test count: 211 → 215" (implying 4
+new tests). The actual rollout added ~28 new tests across Phases
+1-5 (Phase 1: 4, Phase 2: 3, Phase 3: 13, Phase 4: 4, Phase 5: 4).
+The baseline was ~187 (not 211). The final 215 + 5 slow total is
+correct. The "211" figure was a bookkeeping typo in the Phase 5
+commit message; not a real defect.
+
+### Addendum 4: format_sse_error_event control-char coverage
+
+The original plan §Critical Implementation Details §2 said the
+helper escapes `\\`, `"`, `\n`, `\r`. The implementation
+subsequently extended the rule to all C0 control chars
+(0x00-0x1F) for RFC 8259 §7 compliance — see the F8 finding in
+`context/changes/testing-critical-path-regression-guards/reviews/impl-review.md`.
+The docstring at `src/main.rs:829-865` and 5 new unit tests at
+`src/main.rs:3319-3366` document the extended coverage.
+
+### Addendum 5: handle_streaming_error docstring F2 label
+
+The function-level docstring at `src/main.rs:850-873` originally
+opened with "the F2 review fixes" (a finding number reference).
+Per `lessons.md:26-31`, references should be by lessons.md rule,
+not by finding number. The docstring now references the rule by
+name ("Re-run review after a follow-up change touches the same
+handler") and the inline `// Invariant N:` comments have been
+renamed to descriptive names. See the F5 finding in
+`context/changes/testing-critical-path-regression-guards/reviews/impl-review.md`.

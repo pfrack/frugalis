@@ -1,31 +1,35 @@
-# routing.toml with unreachable endpoints to test error logging
+# Routing overlay with unreachable endpoints to test error logging.
+# Usage: CONFIG_PATH=this-file.toml cerebrum
+#
+# Cerebrum's merge semantics for [routing] are per-key additive — unmentioned
+# routes inherit from the built-in defaults.
 
-[FILE_READING]
+[routing.FILE_READING]
 model = "meta/llama-3.1-70b-instruct"
-provider_type = "nvidia_nim"
 endpoint = "http://127.0.0.1:99999/v1/chat/completions"
+provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
-[COMPLEX_REASONING]
+[routing.COMPLEX_REASONING]
 model = "meta/llama-3.3-70b-instruct"
-provider_type = "nvidia_nim"
 endpoint = "http://10.255.255.1/v1/chat/completions"
+provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
-[SYNTAX_FIX]
+[routing.SYNTAX_FIX]
 model = "qwen/qwen3-coder-480b-a35b-instruct"
-provider_type = "nvidia_nim"
 endpoint = "http://192.0.2.1:8080/v1/chat/completions"
+provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
-[CASUAL]
+[routing.CASUAL]
 model = "meta/llama-3.1-8b-instruct"
-provider_type = "nvidia_nim"
 endpoint = "http://localhost:12345/v1/chat/completions"
+provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"
 
-[FALLBACK]
+[routing.DEFAULT]
 model = "nvidia/nemotron-3-nano-30b-a3b"
-provider_type = "nvidia_nim"
 endpoint = "http://example.invalid/v1/chat/completions"
+provider_type = "nvidia_nim"
 api_key_env = "NVIDIA_API_KEY"

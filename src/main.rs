@@ -35,11 +35,7 @@ struct RequestMetrics {
 
 #[cfg(feature = "otel")]
 impl RequestMetrics {
-    fn new(
-        metrics: Option<telemetry::Metrics>,
-        method: &'static str,
-        route: &'static str,
-    ) -> Self {
+    fn new(metrics: Option<telemetry::Metrics>, method: &'static str, route: &'static str) -> Self {
         Self {
             metrics,
             method,
@@ -75,6 +71,7 @@ mod dashboard;
 mod fewshot_classifier;
 mod intent_classifier;
 mod persistence;
+mod quickstart;
 mod routing;
 
 use intent_classifier::IntentClassify;
@@ -103,16 +100,127 @@ pub struct AppState {
     pub metrics: Option<telemetry::Metrics>,
 }
 
+/// Embedded init template loaded at compile time. Used by `--init` to
+/// produce a commented starter config the user can fill in.
+const INIT_TEMPLATE: &str = include_str!("../init_template.toml");
+
+/// Write the init template to the given path, or print it to stdout if no
+/// path is given. Refuses to overwrite an existing file unless `force` is
+/// true. Creates parent directories as needed. Returns an error suitable
+/// for `eprintln!` on failure (empty on success).
+fn run_init(path: Option<&str>, force: bool) -> Result<(), String> {
+    match path {
+        Some(p) => {
+            // Reject flag-shaped paths to avoid silently swallowing unknown
+            // flags (e.g. `cerebrum --init --validate` would otherwise drop
+            // `--validate` and treat --init as having no path). The check is
+            // intentionally narrow — paths that happen to contain `--` in
+            // the middle are unaffected.
+            if p.starts_with('-') {
+                return Err(format!(
+                    "refusing path that starts with '-': {p} (looks like a flag, not a path)"
+                ));
+            }
+            let path = std::path::Path::new(p);
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        format!("failed to create parent directory for {}: {}", p, e)
+                    })?;
+                }
+            }
+            // Atomic create-or-overwrite: avoids the TOCTOU race between
+            // `path.exists()` and `std::fs::write` (a symlink could be
+            // installed in the gap when --force is used). `create_new` and
+            // `truncate` are mutually exclusive — the combination enforces
+            // the same external behavior as the old exists/write pair.
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .create_new(!force)
+                .truncate(force)
+                .open(path)
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        format!("refusing to overwrite existing file: {p} (use --force to overwrite)")
+                    } else {
+                        format!("failed to write {p}: {e}")
+                    }
+                })?;
+            std::io::Write::write_all(&mut file, INIT_TEMPLATE.as_bytes())
+                .map_err(|e| format!("failed to write {p}: {e}"))?;
+            eprintln!("Wrote starter config to {p}");
+        }
+        None => {
+            print!("{}", INIT_TEMPLATE);
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     // Parse CLI arguments
+    enum CliMode {
+        Run,
+        Validate,
+        Help,
+        Init(Option<String>),
+        Quickstart,
+    }
+
     let args: Vec<String> = std::env::args().collect();
-    let mut enable_validate = false;
+    let mut mode = CliMode::Run;
+    let mut force = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--validate" => {
-                enable_validate = true;
+                mode = CliMode::Validate;
+                i += 1;
+            }
+            "--help" => {
+                mode = CliMode::Help;
+                i += 1;
+            }
+            "--init" => {
+                let mut j = i + 1;
+                // --force may appear before or after the path; handle both.
+                if args.get(j).map(|a| a.as_str()) == Some("--force") {
+                    force = true;
+                    j += 1;
+                }
+                // Resolve the path arg. If the next arg starts with `--`, treat
+                // it as an unknown flag (don't silently drop it as we used to)
+                // so the user gets a clear error at the point of confusion
+                // and `run_init` is never called with `Init(None)` from a typo.
+                let path = match args.get(j) {
+                    Some(s) if s.starts_with("--") => {
+                        eprintln!("unknown argument: {s}");
+                        std::process::exit(2);
+                    }
+                    Some(s) => {
+                        j += 1;
+                        Some(s.clone())
+                    }
+                    None => None,
+                };
+                if args.get(j).map(|a| a.as_str()) == Some("--force") {
+                    force = true;
+                    j += 1;
+                }
+                i = j;
+                mode = CliMode::Init(path);
+            }
+            "--quickstart" => {
+                mode = CliMode::Quickstart;
+                i += 1;
+            }
+            "--force" => {
+                // Standalone --force (outside --init). Consumed for forward
+                // compatibility with other commands; ignored if no command
+                // acts on it.
+                force = true;
                 i += 1;
             }
             _ => {
@@ -122,10 +230,57 @@ async fn main() {
         }
     }
 
+    // Early-exit commands (before config loading or tracing init)
+    if let CliMode::Help = mode {
+        print!(
+            "\
+cerebrum — intent-aware routing gateway
+
+USAGE:
+    cerebrum [OPTIONS]
+
+OPTIONS:
+    --help         Show this help
+    --init [PATH]  Generate a starter config (default: stdout)
+    --force        With --init, overwrite an existing file at PATH
+    --quickstart   Interactive setup wizard
+    --validate     Validate configuration and exit
+
+ENVIRONMENT:
+    CONFIG_PATH              Path to config overlay (TOML or YAML)
+    PROXY_API_BEARER_TOKEN   Required for proxy routes
+    DASHBOARD_BASIC_USER     Required for dashboard access
+    DASHBOARD_BASIC_PASSWORD Required for dashboard access
+"
+        );
+        std::process::exit(0);
+    }
+
+    if let CliMode::Init(path_opt) = &mode {
+        match run_init(path_opt.as_deref(), force) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if let CliMode::Quickstart = mode {
+        match quickstart::run_quickstart() {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     let config_path_option = std::env::var("CONFIG_PATH").ok();
+    let config_path_was_set = config_path_option.is_some();
 
     // ── Validation mode ──
-    if enable_validate {
+    if let CliMode::Validate = mode {
         let result = config::run_validation(config_path_option.as_deref());
         match result {
             Ok(()) => {
@@ -213,6 +368,10 @@ async fn main() {
     });
     let auth_config = Arc::new(auth_config);
 
+    if !config_path_was_set {
+        info!("No CONFIG_PATH set — using embedded defaults. Run `cerebrum --init` to generate a starter config.");
+    }
+
     let regex_config = config::load_regex_classifier_config_from_value(&config_root);
 
     // Load global classifiers config
@@ -239,10 +398,7 @@ async fn main() {
     let (classifier, routing, model_costs, baseline_model, fewshot_classifier) = {
         let categories_res = config::load_categories_from_value(&config_root);
         let categories_ok = categories_res.is_ok();
-        let mut categories = match categories_res {
-            Ok(c) => c,
-            Err(_) => vec![],
-        };
+        let mut categories = categories_res.unwrap_or_default();
 
         // Resolve external pattern files for each category
         let patterns_dir = config_root
@@ -290,6 +446,26 @@ async fn main() {
                 routing_map = new_map;
                 fallback_entry = new_fallback;
             }
+        }
+
+        // Log each active route with its resolved model and endpoint so
+        // operators can verify their CONFIG_PATH overlay took effect (per
+        // the plan: "log which routes are active so users can verify their
+        // overlay took effect"). DEFAULT is logged from `fallback_entry`
+        // since `routing_from_value` strips it from the routing map; the
+        // `hardcoded_routing` fallback path does not strip it, so we dedupe
+        // to avoid printing DEFAULT twice.
+        let mut route_keys: Vec<&String> = routing_map.keys().collect();
+        route_keys.sort();
+        for key in route_keys {
+            let entry = &routing_map[key];
+            info!("Route {} -> {} @ {}", key, entry.model, entry.endpoint);
+        }
+        if !routing_map.contains_key("DEFAULT") {
+            info!(
+                "Route DEFAULT -> {} @ {}",
+                fallback_entry.model, fallback_entry.endpoint
+            );
         }
 
         let model_costs = config::build_model_costs(&config_root, &routing_map);
@@ -510,7 +686,9 @@ async fn main() {
         match shutdown_result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => warn!("OTel shutdown task panicked: {e}"),
-            Err(_) => warn!("OTel shutdown timed out after 5s; exiting with telemetry possibly unflushed"),
+            Err(_) => {
+                warn!("OTel shutdown timed out after 5s; exiting with telemetry possibly unflushed")
+            }
         }
     }
 }
@@ -798,8 +976,14 @@ fn handle_streaming_response(
                             // Use the same SSE error event format as
                             // `handle_streaming_error` (non-2xx upstream) so
                             // the two error paths produce byte-compatible
-                            // frames — a single SSE error contract.
-                            let sse_error = format_sse_error_event(&_e.to_string());
+                            // frames — a single SSE error contract. Apply the
+                            // same 512-char truncate to bound the SSE event
+                            // size (the inline branch's `_e` is a
+                            // `reqwest::Error`; while typically < 1 KB, a
+                            // pathological upstream could produce a longer
+                            // string).
+                            let error_text: String = _e.to_string().chars().take(512).collect();
+                            let sse_error = format_sse_error_event(&error_text);
                             let _ = tx.send(Bytes::from(sse_error)).await;
                             break;
                         }
@@ -834,36 +1018,58 @@ fn handle_streaming_response(
 /// Build the SSE error event body for an upstream error message:
 /// `event: error\ndata: {"error":"<msg>"}\n\n`.
 ///
-/// Applies the JSON-escape rule (`\\` → `\\\\`, `"` → `\\"`, `\n`/`\r`
-/// → space) to the embedded message. The 2 KB body cap and 512-char
-/// truncate (upstream on `handle_streaming_error`) and the status
-/// passthrough + `Content-Type: text/event-stream` + `Cache-Control:
-/// no-cache` (downstream on the response) are NOT this helper's concern.
+/// Applies the JSON-escape rule to the embedded message:
+/// - `\\` → `\\\\` (backslash escape, JSON-required)
+/// - `"` → `\\"` (double-quote escape, JSON-required)
+/// - All C0 control chars (`\0x00`-`\0x1F`, including `\n`, `\r`,
+///   `\t`, `\b`, `\f`, and other non-printable bytes) → ` ` (space)
+///
+/// The C0 → space replacement ensures the resulting `data:` payload
+/// is valid JSON (any literal C0 char would break `serde_json::from_str`
+/// or smuggle SSE frames into the event body) and is consistent with
+/// the plan's original `\n`/`\r` → space rule — extending it to the
+/// full C0 range closes the RFC 8259 §7 gap (tab, backspace, form
+/// feed, and other control chars) that was previously a no-escape
+/// hole. The 2 KB body cap and 512-char truncate (upstream on
+/// `handle_streaming_error`) and the status passthrough +
+/// `Content-Type: text/event-stream` + `Cache-Control: no-cache`
+/// (downstream on the response) are NOT this helper's concern.
 /// Helper invariants: (a) JSON-escape correctness of the embedded
 /// message, (b) SSE event format. Both call sites — `handle_streaming_error`
 /// (non-2xx upstream) and the inline mid-stream error branch in
 /// `handle_streaming_response` (chunk stream error) — call this helper
 /// with the raw upstream error string.
 pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
-    let escaped = error_msg
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace(['\n', '\r'], " ");
+    let mut escaped = String::with_capacity(error_msg.len());
+    for c in error_msg.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            c if (c as u32) < 0x20 => escaped.push(' '),
+            _ => escaped.push(c),
+        }
+    }
     format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", escaped)
 }
 
 /// Convert a non-2xx upstream response into an SSE error event for the client.
 ///
-/// 5 invariants protect this code path (the F2 review fixes; see
-/// `context/foundation/lessons.md` for the review history):
+/// 5 invariants protect this code path (the prior-review-fix lessons in
+/// `context/foundation/lessons.md`, specifically "Re-run review after a
+/// follow-up change touches the same handler" — the F1–F4 review fixes
+/// were lost twice across follow-up commits; this function is the
+/// regression guard that catches any future re-loss):
 /// 1. **Body cap (2 KB)** — upstream error bodies are bounded to 2 KB.
 ///    Large upstream bodies would amplify latency and memory pressure
 ///    on the proxy, and SSE clients don't need the full body to surface
 ///    an error.
-/// 2. **JSON escape** — `\`, `"`, `\n`, `\r` in the upstream error text
-///    are replaced with safe equivalents before serialization. Without
+/// 2. **JSON escape** — `\`, `"`, and all C0 control chars
+///    (`\0x00`-`\0x1F`, including `\n`, `\r`, `\t`, `\b`, `\f`, and
+///    other non-printable bytes) in the upstream error text are
+///    replaced with safe equivalents before serialization. Without
 ///    this, a malicious upstream could inject SSE frames or break the
 ///    JSON parse that downstream consumers use to detect error events.
+///    See `format_sse_error_event` for the escape rule.
 /// 3. **SSE event format** — the body is `event: error\ndata: {"error":"…"}\n\n`.
 ///    A valid SSE event with the `error` event name lets clients using
 ///    `EventSource`-style subscribe to error events distinctly from data
@@ -877,8 +1083,8 @@ pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
 ///    events (caching would replay a transient error long after it has
 ///    been resolved).
 async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Response {
-    // Invariant 1: bound the upstream error body to 2 KB to cap latency
-    // and memory on large error payloads.
+    // Bound the upstream error body to 2 KB to cap latency and memory on
+    // large error payloads.
     const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
     let mut error_bytes = Vec::new();
     loop {
@@ -894,18 +1100,17 @@ async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Res
         }
     }
     // Truncate to 512 chars before passing to the helper. The helper
-    // applies the JSON-escape rule (Invariant 2) and emits the SSE event
-    // body (Invariant 3).
+    // applies the JSON-escape rule and emits the SSE event body.
     let error_text = String::from_utf8_lossy(&error_bytes)
         .chars()
         .take(512)
         .collect::<String>();
     let sse_error = format_sse_error_event(&error_text);
     let mut resp = Response::new(Body::from(sse_error));
-    // Invariant 4: forward the upstream's status code to the client so
-    // it can react to the specific failure class.
+    // Forward the upstream's status code to the client so it can react
+    // to the specific failure class.
     *resp.status_mut() = upstream_response.status();
-    // Invariant 5: mark the response as an uncacheable SSE stream.
+    // Mark the response as an uncacheable SSE stream.
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("text/event-stream"),
@@ -1071,16 +1276,13 @@ async fn completion_handler(
         Err(e) => {
             #[cfg(feature = "otel")]
             if let Some(ref metrics) = state.metrics {
-                metrics
-                    .upstream_duration_seconds
-                    .record(
-                        upstream_start.elapsed().as_secs_f64(),
-                        &[
-                            KeyValue::new("provider", classification.provider_type.clone()),
-                            KeyValue::new("model", classification.model.clone()),
-                            KeyValue::new("status", "502"),
-                        ],
-                    );
+                metrics.upstream_duration_seconds.record(
+                    upstream_start.elapsed().as_secs_f64(),
+                    &[
+                        KeyValue::new("provider", classification.provider_type.clone()),
+                        KeyValue::new("status", "502"),
+                    ],
+                );
             }
             log_classification(&state, &classification, &body_str, start, "upstream_error");
             #[cfg(feature = "otel")]
@@ -1094,16 +1296,13 @@ async fn completion_handler(
 
     #[cfg(feature = "otel")]
     if let Some(ref metrics) = state.metrics {
-        metrics
-            .upstream_duration_seconds
-            .record(
-                upstream_start.elapsed().as_secs_f64(),
-                &[
-                    KeyValue::new("provider", classification.provider_type.clone()),
-                    KeyValue::new("model", classification.model.clone()),
-                    KeyValue::new("status", upstream_response.status().as_u16().to_string()),
-                ],
-            );
+        metrics.upstream_duration_seconds.record(
+            upstream_start.elapsed().as_secs_f64(),
+            &[
+                KeyValue::new("provider", classification.provider_type.clone()),
+                KeyValue::new("status", upstream_response.status().as_u16().to_string()),
+            ],
+        );
     }
 
     if client_wants_stream {
@@ -1135,6 +1334,9 @@ async fn completion_handler(
         "upstream_error"
     };
     log_classification(&state, &classification, &body_str, start, log_status);
+
+    #[cfg(feature = "otel")]
+    rm.set_status(status);
 
     json_response(status, body)
 }
@@ -1207,7 +1409,7 @@ async fn feedback_handler(
     drop(routing);
 
     // Clamp satisfaction to [0.0, 1.0] as per OpenAPI spec
-    let satisfaction = body.satisfaction.max(0.0).min(1.0);
+    let satisfaction = body.satisfaction.clamp(0.0, 1.0);
     fewshot
         .add_feedback(
             body.text,
@@ -1341,6 +1543,7 @@ mod tests {
         http::{header, Request},
     };
     use serial_test::serial;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::util::ServiceExt;
 
     /// Guard that removes an env var on drop to prevent test pollution.
@@ -2176,6 +2379,7 @@ mod tests {
             }
         };
 
+        let _mock_api_key_guard = EnvGuard("MOCK_API_KEY");
         std::env::set_var("MOCK_API_KEY", "sk-test");
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
 
@@ -2245,6 +2449,7 @@ mod tests {
             }
         };
 
+        let _mock_api_key_guard = EnvGuard("MOCK_API_KEY");
         std::env::set_var("MOCK_API_KEY", "sk-test");
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
 
@@ -2457,7 +2662,7 @@ mod tests {
         let records_handle = memory_backend.records.clone();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
         let backend = Arc::new(persistence::DbBackend::Memory(memory_backend));
-        let (app, server) = build_app_with_persistence_backend(backend, semaphore, None);
+        let (app, server) = build_app_with_persistence_backend(backend.clone(), semaphore, None);
 
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
@@ -2489,7 +2694,11 @@ mod tests {
         // Wait for the fire-and-forget log task to attempt + fail.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        // (b) The failed insert means the record was NOT persisted.
+        // (b) The failed insert means the record was NOT persisted AND
+        // `fail_next` was atomically consumed. The consumption check confirms
+        // the log task actually ran within the wait window (otherwise the
+        // `records.len() == 0` check above would be a false-positive
+        // indistinguishable from "log task never ran").
         // (The flag auto-resets, so a follow-up request would succeed.)
         let records = records_handle.read().await;
         assert_eq!(
@@ -2497,6 +2706,16 @@ mod tests {
             0,
             "the injected failure should prevent the record from being persisted"
         );
+        drop(records);
+        if let persistence::DbBackend::Memory(ref mb) = *backend {
+            assert!(
+                !mb.fail_next.load(std::sync::atomic::Ordering::SeqCst),
+                "fail_next must have been consumed by the log task within the wait window; \
+                 if this fires, the log task didn't run and the records.len() check above is meaningless"
+            );
+        } else {
+            panic!("test fixture invariant: backend must be DbBackend::Memory");
+        }
     }
 
     #[tokio::test]
@@ -3200,6 +3419,7 @@ mod tests {
     #[serial]
     async fn test_streaming_handler_non_2xx_returns_sse_error_event() {
         let env = "TEST_STREAM_ERR";
+        let _env_guard = EnvGuard(env);
         std::env::set_var(env, "sk-test");
         let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
@@ -3287,6 +3507,52 @@ mod tests {
         // = `"; } attack  {` (one space after `}`, one space after `;`,
         // two spaces between `attack` and `{` from \n and \r).
         assert_eq!(parsed, serde_json::json!({"error": "\"; } attack  {"}));
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_tab_with_space() {
+        // \t is a C0 control char (0x09) that the helper now replaces
+        // with a single space. Locks the F8 fix that extended the escape
+        // rule from [\n, \r] to the full C0 range.
+        let s = format_sse_error_event("a\tb");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_backspace_with_space() {
+        // \x08 is a C0 control char (0x08) that the helper now replaces
+        // with a single space.
+        let s = format_sse_error_event("a\x08\x08");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a  \"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_form_feed_with_space() {
+        // \x0C is a C0 control char that the helper now replaces with
+        // a single space.
+        let s = format_sse_error_event("a\x0Cb");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_other_control_chars_with_space() {
+        // \x01 and \x1F are at the C0 range extremes (both < 0x20 and
+        // not \n, \r, \t, \b, \f). The helper must replace them with
+        // a single space each, just like the named C0 chars.
+        let s = format_sse_error_event("a\x01b\x1Fc");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b c\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_preserves_printable_ascii() {
+        // Sanity: chars >= 0x20 (printable ASCII) must pass through
+        // unchanged. Catches a regression where the C0 replacement
+        // accidentally widened its range.
+        let s = format_sse_error_event("Hello, World! 123 ~`@#$%^&*()");
+        assert_eq!(
+            s,
+            "event: error\ndata: {\"error\":\"Hello, World! 123 ~`@#$%^&*()\"}\n\n"
+        );
     }
 
     // ── F2 integration tests (Phase 3 — handle_streaming_error 5 invariants) ──
@@ -3540,6 +3806,157 @@ mod tests {
         );
         mock.assert();
         // cleanup handled by EnvGuard
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_inline_mid_stream_error_uses_same_format() {
+        // Trigger the inline mid-stream error branch in
+        // `handle_streaming_response` (src/main.rs:790-800). The branch
+        // fires when reqwest's byte stream returns `Some(Err(_e))` after
+        // SSE headers have been sent. We engineer this by serving a
+        // response whose `Content-Length: 1000` mismatches the bytes
+        // actually written, then closing the socket — reqwest returns a
+        // body-read error and the inline branch emits the same SSE error
+        // event format as `handle_streaming_error`.
+        //
+        // This test must use a real TCP server (not httpmock) because
+        // httpmock cannot simulate a mid-stream body error.
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let env = "TEST_INLINE_ERR";
+        let _env_guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/v1/chat/completions");
+
+        let server_task = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            // Read the request (we don't care what's in it).
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            // Claim content-length: 1000 but write 10 bytes ("data: he")
+            // then close — reqwest will error trying to read the
+            // remaining 990 bytes the headers claimed.
+            let headers = "HTTP/1.1 200 OK\r\n\
+                           content-type: text/event-stream\r\n\
+                           content-length: 1000\r\n\r\n";
+            sock.write_all(headers.as_bytes()).await.expect("headers");
+            sock.flush().await.expect("flush headers");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            sock.write_all(b"data: he").await.expect("first chunk");
+            sock.flush().await.expect("flush first chunk");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // Close the socket abruptly — reqwest's next body read errors.
+            drop(sock);
+        });
+
+        // Build an app that routes SYNTAX_FIX to the real TCP server.
+        // Reuses the `make_test_app_state` helper from mod tests.
+        let cats = test_categories();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("test reqwest client should build");
+        let mut routing = std::collections::HashMap::new();
+        routing.insert(
+            cats[1].name.clone(),
+            intent_classifier::RouteEntry {
+                model: "sf-model".to_string(),
+                endpoint: url,
+                cost_per_1m_input_tokens: None,
+                provider_type: "openai_compatible".to_string(),
+                api_key_env: Some(env.to_string()),
+            },
+        );
+        let fallback = intent_classifier::RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
+        let app_state = make_test_app_state(
+            regex_classifier,
+            Some(client),
+            intent_classifier::ModelCosts::empty(),
+            String::new(),
+            10_485_760,
+        );
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let app = build_app(auth_config, app_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+
+        // The proxy returns 200 to the client even when the upstream
+        // errors mid-stream (the response body contains the SSE error
+        // event, not a 5xx).
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "proxy should return 200 to client on mid-stream upstream error"
+        );
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+
+        // The first chunk ("data: he") should be forwarded before the
+        // error branch fires. The inline branch then emits the same
+        // SSE error event format as handle_streaming_error.
+        assert!(
+            body.starts_with("data: he"),
+            "expected the upstream's first chunk to be forwarded before the error, got: {body:?}"
+        );
+        assert!(
+            body.contains("event: error\ndata: {\"error\":"),
+            "expected the inline branch to emit an SSE error event matching handle_streaming_error's format, got: {body:?}"
+        );
+        // The error data: payload must be parseable JSON (the helper's
+        // invariant 2). Parse the data: line and confirm it's a single
+        // object with an "error" string field.
+        let data_line = body
+            .split('\n')
+            .find(|line| line.starts_with("data: ") && line.contains("\"error\""))
+            .expect("expected an SSE data: line with the error event");
+        let json_str = data_line.trim_start_matches("data: ");
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_str).expect("SSE error data: must be valid JSON");
+        assert!(
+            parsed.get("error").and_then(|v| v.as_str()).is_some(),
+            "SSE error data: payload must contain an 'error' string field, got: {parsed}"
+        );
+
+        // Wait for the server task to finish cleanly (it drops the
+        // socket on its own once the response is complete).
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_task).await;
     }
 
     #[tokio::test]
@@ -3938,6 +4355,107 @@ mod tests {
                 "tier {tier:?} should serialize as {expected_label:?}"
             );
         }
+    }
+
+    // ── --init template tests (Phase 2) ──
+    // run_init writes the embedded template to a path or prints it to stdout.
+    // We test the file-writing path directly; the stdout path is exercised by
+    // the binary's CLI (see manual verification) and by INIT_TEMPLATE's own
+    // content assertions below.
+
+    /// Each test gets its own scratch directory under the OS temp dir to keep
+    /// parallel runs and CI reruns from clobbering each other.
+    fn init_scratch(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("cerebrum-init-{label}-{nanos}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir should be creatable");
+        dir
+    }
+
+    #[test]
+    fn init_template_contains_all_five_routing_sections() {
+        for section in [
+            "[routing.DEFAULT]",
+            "[routing.FILE_READING]",
+            "[routing.SYNTAX_FIX]",
+            "[routing.COMPLEX_REASONING]",
+            "[routing.CASUAL]",
+        ] {
+            assert!(
+                INIT_TEMPLATE.contains(section),
+                "init template should contain section {section}, got:\n{INIT_TEMPLATE}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_template_parses_as_valid_toml_syntax() {
+        // Placeholders like "<your-model>" are not valid for ConfigRoot (the
+        // schema requires a non-empty provider_type), but they ARE valid TOML
+        // syntax. Verify the syntax layer at least.
+        let value: toml::Value =
+            toml::from_str(INIT_TEMPLATE).expect("init template should be valid TOML syntax");
+        let table = value
+            .as_table()
+            .expect("init template should be a top-level TOML table");
+        let routing = table
+            .get("routing")
+            .and_then(|v| v.as_table())
+            .expect("init template should have a [routing] table");
+        assert_eq!(
+            routing.len(),
+            5,
+            "init template should declare exactly 5 routing entries, got: {routing:?}"
+        );
+    }
+
+    #[test]
+    fn run_init_writes_template_to_new_file() {
+        let dir = init_scratch("write");
+        let path = dir.join("cerebrum.toml");
+        run_init(Some(path.to_str().unwrap()), false).expect("write should succeed");
+        let content = std::fs::read_to_string(&path).expect("file should be readable");
+        assert_eq!(content, INIT_TEMPLATE);
+    }
+
+    #[test]
+    fn run_init_refuses_to_overwrite_existing_file() {
+        let dir = init_scratch("refuse");
+        let path = dir.join("cerebrum.toml");
+        std::fs::write(&path, "preexisting content").expect("seed write should succeed");
+        let err = run_init(Some(path.to_str().unwrap()), false)
+            .expect_err("overwrite must be refused without --force");
+        assert!(
+            err.contains("refusing to overwrite"),
+            "error should mention the refusal, got: {err}"
+        );
+        // Original content must be untouched.
+        let still = std::fs::read_to_string(&path).expect("file should still be readable");
+        assert_eq!(still, "preexisting content");
+    }
+
+    #[test]
+    fn run_init_force_overwrites_existing_file() {
+        let dir = init_scratch("force");
+        let path = dir.join("cerebrum.toml");
+        std::fs::write(&path, "preexisting content").expect("seed write should succeed");
+        run_init(Some(path.to_str().unwrap()), true).expect("force overwrite should succeed");
+        let content = std::fs::read_to_string(&path).expect("file should be readable");
+        assert_eq!(content, INIT_TEMPLATE);
+    }
+
+    #[test]
+    fn run_init_creates_missing_parent_directories() {
+        let dir = init_scratch("mkdir");
+        let nested = dir.join("a").join("b").join("cerebrum.toml");
+        run_init(Some(nested.to_str().unwrap()), false).expect("nested write should succeed");
+        assert!(nested.exists(), "file should exist at nested path");
+        let content = std::fs::read_to_string(&nested).expect("file should be readable");
+        assert_eq!(content, INIT_TEMPLATE);
     }
 }
 
