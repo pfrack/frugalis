@@ -446,25 +446,25 @@ Update `context/foundation/test-plan.md` §3-§6 to reference the new justfile t
 
 #### Automated
 
-- [x] 2.1 `docker compose up -d postgres` starts and healthcheck passes
-- [x] 2.2 `docker compose --profile otel up -d` starts both services
-- [x] 2.3 `curl http://localhost:13133` returns 200
+- [x] 2.1 `docker compose up -d postgres` starts and healthcheck passes — 04f949c
+- [x] 2.2 `docker compose --profile otel up -d` starts both services — 04f949c
+- [x] 2.3 `curl http://localhost:13133` returns 200 — 04f949c
 
 #### Manual
 
-- [ ] 2.4 `just test-persistence-integration` passes against compose postgres
-- [ ] 2.5 No port collisions verified (10000, 5432, 4317, 4318, 13133)
+- [x] 2.4 `just test-persistence-integration` passes against compose postgres — 04f949c
+- [x] 2.5 No port collisions verified (10000, 5432, 4317, 4318, 13133) — 04f949c
 
 ### Phase 3: justfile
 
 #### Automated
 
-- [ ] 3.1 `just` lists all recipes (exit 0)
-- [ ] 3.2 `just fmt-check` passes
-- [ ] 3.3 `just lint-strict` passes
-- [ ] 3.4 `just test` passes (all fast tests)
-- [ ] 3.5 `just build-release` produces `target/release/cerebrum`
-- [ ] 3.6 `just ci` runs full gate sequence and passes
+- [x] 3.1 `just` lists all recipes (exit 0)
+- [x] 3.2 `just fmt-check` passes
+- [x] 3.3 `just lint-strict` passes
+- [x] 3.4 `just test` passes (all fast tests)
+- [x] 3.5 `just build-release` produces `target/release/cerebrum`
+- [x] 3.6 `just ci` runs full gate sequence and passes
 
 #### Manual
 
