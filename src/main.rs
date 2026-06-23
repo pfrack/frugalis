@@ -71,6 +71,7 @@ mod dashboard;
 mod fewshot_classifier;
 mod intent_classifier;
 mod persistence;
+mod protocol_translation;
 mod quickstart;
 mod routing;
 
@@ -1118,7 +1119,26 @@ pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
 ///    — the client must parse the body as SSE and must not cache error
 ///    events (caching would replay a transient error long after it has
 ///    been resolved).
-async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Response {
+async fn handle_streaming_error(upstream_response: reqwest::Response) -> Response {
+    handle_streaming_error_with_transform(upstream_response, |body, _status| body).await
+}
+
+/// Handle a non-2xx upstream response for an Anthropic upstream.
+/// Translates the Anthropic error body to OpenAI error envelope,
+/// returns an SSE error event (matching the format used by
+/// `handle_streaming_error`) with the upstream's status code.
+async fn handle_anthropic_streaming_error(upstream_response: reqwest::Response) -> Response {
+    handle_streaming_error_with_transform(upstream_response, |body, status| {
+        protocol_translation::translate_error(&body, status)
+    }).await
+}
+
+/// Shared implementation for streaming error handling. Takes a transform
+/// closure that converts the raw error body into the desired SSE error text.
+async fn handle_streaming_error_with_transform(
+    mut upstream_response: reqwest::Response,
+    transform: impl FnOnce(String, u16) -> String,
+) -> Response {
     // Bound the upstream error body to 2 KB to cap latency and memory on
     // large error payloads.
     const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
@@ -1141,7 +1161,9 @@ async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Res
         .chars()
         .take(512)
         .collect::<String>();
-    let sse_error = format_sse_error_event(&error_text);
+    let status = upstream_response.status().as_u16();
+    let transformed = transform(error_text, status);
+    let sse_error = format_sse_error_event(&transformed);
     let mut resp = Response::new(Body::from(sse_error));
     // Forward the upstream's status code to the client so it can react
     // to the specific failure class.
@@ -1156,6 +1178,182 @@ async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Res
         header::HeaderValue::from_static("no-cache"),
     );
     resp
+}
+
+/// Handle a streaming response from an Anthropic upstream by translating
+/// each Anthropic SSE event into one or more OpenAI SSE chunks before
+/// forwarding to the client.
+fn handle_anthropic_streaming_response(
+    state: Arc<AppState>,
+    classification: intent_classifier::ClassificationResult,
+    body_str: String,
+    prompt: String,
+    start: Instant,
+    byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
+    keepalive_interval_secs: u64,
+) -> Response {
+    let channel_capacity = state.streaming_channel_capacity;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(channel_capacity);
+
+    log_classification(&state, &classification, &body_str, &prompt, start, "streaming");
+
+    tokio::spawn(async move {
+        let keepalive_secs = keepalive_interval_secs;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(keepalive_secs));
+        let mut stream = byte_stream;
+        let mut stream_status = "ok";
+        let mut translate_state = protocol_translation::StreamTranslateState::default();
+        let mut buffer = Vec::new();
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                chunk = stream.next() => {
+                    match chunk {
+                        Some(Ok(bytes)) => {
+                            buffer.extend_from_slice(&bytes);
+                            const MAX_SSE_BUFFER: usize = 1024 * 1024; // 1 MB
+                            if buffer.len() > MAX_SSE_BUFFER {
+                                let sse_error = format_sse_error_event("SSE buffer exceeded 1 MB limit");
+                                let _ = tx.send(Bytes::from(sse_error)).await;
+                                stream_status = "buffer_overflow";
+                                break;
+                            }
+                            let events = protocol_translation::parse_sse_events(&buffer);
+                            if !events.is_empty() {
+                                // Drain only up to last complete event boundary; keep partial tail.
+                                if let Some(last_boundary) = buffer.windows(2).rposition(|w| w == b"\n\n") {
+                                    buffer.drain(..last_boundary + 2);
+                                } else {
+                                    buffer.clear();
+                                }
+                                for (event_type, data) in &events {
+                                    if let Some(openai_chunk) =
+                                        protocol_translation::translate_stream_event(
+                                            event_type,
+                                            data,
+                                            &mut translate_state,
+                                        )
+                                    {
+                                        if tx.send(Bytes::from(openai_chunk)).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Some(Err(_e)) => {
+                            stream_status = "stream_error";
+                            let error_text: String = _e.to_string().chars().take(512).collect();
+                            let sse_error = format_sse_error_event(&error_text);
+                            let _ = tx.send(Bytes::from(sse_error)).await;
+                            break;
+                        }
+                        None => {
+                            // Stream ended — flush remaining buffer.
+                            if !buffer.is_empty() {
+                                let events = protocol_translation::parse_sse_events(&buffer);
+                                for (event_type, data) in &events {
+                                    if let Some(openai_chunk) =
+                                        protocol_translation::translate_stream_event(
+                                            event_type,
+                                            data,
+                                            &mut translate_state,
+                                        )
+                                    {
+                                        let _ = tx.send(Bytes::from(openai_chunk)).await;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ = interval.tick() => {
+                    if tx.send(Bytes::from_static(b": keepalive\n\n")).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        log_classification(&state, &classification, &body_str, &prompt, start, stream_status);
+    });
+
+    let body =
+        Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, Infallible>));
+
+    let mut resp = Response::new(body);
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/event-stream"),
+    );
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    resp
+}
+
+/// Buffer an Anthropic upstream response and translate it to OpenAI format.
+/// Non-2xx errors are translated from Anthropic error shape to OpenAI error envelope.
+async fn translate_anthropic_buffered_response(
+    mut upstream_response: reqwest::Response,
+    max_upstream_body_bytes: usize,
+) -> (StatusCode, String) {
+    let upstream_status = upstream_response.status();
+    if !upstream_status.is_success() {
+        const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
+        let mut error_bytes = Vec::new();
+        let error_body = loop {
+            match upstream_response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if error_bytes.len() + chunk.len() > MAX_ERROR_BODY_BYTES {
+                        break String::from_utf8_lossy(&error_bytes).into_owned();
+                    }
+                    error_bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => break String::from_utf8_lossy(&error_bytes).into_owned(),
+                Err(e) => break e.to_string(),
+            }
+        };
+        let status =
+            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let translated =
+            protocol_translation::translate_error(&error_body, upstream_status.as_u16());
+        return (status, translated);
+    }
+
+    let mut upstream_body_bytes: Vec<u8> = Vec::new();
+    let upstream_body = loop {
+        match upstream_response.chunk().await {
+            Ok(Some(chunk)) => {
+                if upstream_body_bytes.len() + chunk.len() > max_upstream_body_bytes {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        upstream_error_json(502, "upstream response too large"),
+                    );
+                }
+                upstream_body_bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break String::from_utf8_lossy(&upstream_body_bytes).into_owned(),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    upstream_error_json(502, &e.to_string()),
+                );
+            }
+        }
+    };
+
+    match serde_json::from_str::<serde_json::Value>(&upstream_body) {
+        Ok(parsed) => match protocol_translation::translate_response(&parsed) {
+            Ok(translated) => {
+                let body_str = serde_json::to_string(&translated).unwrap_or(upstream_body);
+                (StatusCode::OK, body_str)
+            }
+            Err(_) => (StatusCode::OK, upstream_body),
+        },
+        Err(_) => (StatusCode::OK, upstream_body),
+    }
 }
 
 /// Completion handler: classifies intent, optionally skips classification via
@@ -1294,6 +1492,139 @@ async fn completion_handler(
         );
     }
 
+    // ── Anthropic upstream: translate OpenAI → Anthropic ──────────────
+    // When the routed upstream speaks Anthropic protocol, translate the
+    // OpenAI request body to Anthropic Messages format before forwarding,
+    // and translate the response (including SSE streaming) back to OpenAI
+    // format before returning to the client.
+    if classification.provider_type == "anthropic" {
+        let parsed_body: serde_json::Value = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                log_classification(&state, &classification, &body_str, &prompt, start, "bad_request");
+                #[cfg(feature = "otel")]
+                rm.set_status(StatusCode::BAD_REQUEST);
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    upstream_error_json(400, &format!("invalid JSON body: {e}")),
+                );
+            }
+        };
+
+        let anthropic_body = match protocol_translation::translate_request(&parsed_body) {
+            Ok(b) => b,
+            Err(e) => {
+                log_classification(&state, &classification, &body_str, &prompt, start, "bad_request");
+                #[cfg(feature = "otel")]
+                rm.set_status(StatusCode::BAD_REQUEST);
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    upstream_error_json(400, &e),
+                );
+            }
+        };
+
+        let client_wants_stream = parsed_body
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let anthropic_bytes = Bytes::from(
+            serde_json::to_vec(&anthropic_body).unwrap_or_default(),
+        );
+
+        // Build upstream request without model override — the translated
+        // body already carries the correct model from the routing config.
+        let auth_headers = intent_classifier::auth_headers_for(
+            &state.auth_providers,
+            &classification.provider_type,
+            &api_key,
+        );
+        let upstream_req = client
+            .post(&classification.endpoint)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(anthropic_bytes);
+        let upstream_req = auth_headers
+            .iter()
+            .fold(upstream_req, |req, (name, value)| {
+                req.header(name.as_str(), value.as_str())
+            });
+
+        #[cfg_attr(not(feature = "otel"), allow(unused_variables))]
+        let upstream_start = std::time::Instant::now();
+        let upstream_response = match upstream_req.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                #[cfg(feature = "otel")]
+                if let Some(ref metrics) = state.metrics {
+                    metrics.upstream_duration_seconds.record(
+                        upstream_start.elapsed().as_secs_f64(),
+                        &[
+                            KeyValue::new("provider", classification.provider_type.clone()),
+                            KeyValue::new("status", "502"),
+                        ],
+                    );
+                }
+                log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
+                #[cfg(feature = "otel")]
+                rm.set_status(StatusCode::BAD_GATEWAY);
+                return json_response(
+                    StatusCode::BAD_GATEWAY,
+                    upstream_error_json(502, &e.to_string()),
+                );
+            }
+        };
+
+        #[cfg(feature = "otel")]
+        if let Some(ref metrics) = state.metrics {
+            metrics.upstream_duration_seconds.record(
+                upstream_start.elapsed().as_secs_f64(),
+                &[
+                    KeyValue::new("provider", classification.provider_type.clone()),
+                    KeyValue::new("status", upstream_response.status().as_u16().to_string()),
+                ],
+            );
+        }
+
+        if client_wants_stream {
+            if !upstream_response.status().is_success() {
+                let resp = handle_anthropic_streaming_error(upstream_response).await;
+                log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
+                #[cfg(feature = "otel")]
+                rm.set_status(resp.status());
+                return resp;
+            }
+
+            let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
+
+            return handle_anthropic_streaming_response(
+                state,
+                classification,
+                body_str,
+                prompt,
+                start,
+                upstream_response.bytes_stream(),
+                keepalive_interval_secs,
+            );
+        }
+
+        let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
+        let (status, response_body) =
+            translate_anthropic_buffered_response(upstream_response, max_upstream_body_bytes).await;
+        let log_status = if status == StatusCode::OK {
+            "ok"
+        } else {
+            "upstream_error"
+        };
+        log_classification(&state, &classification, &body_str, &prompt, start, log_status);
+
+        #[cfg(feature = "otel")]
+        rm.set_status(status);
+
+        return json_response(status, response_body);
+    }
+
+    // ── OpenAI-compatible upstream: pass through ──────────────────────
     let (client_wants_stream, upstream_req) = match build_upstream_request(
         client,
         &classification,
@@ -5033,6 +5364,165 @@ mod tests {
         assert!(nested.exists(), "file should exist at nested path");
         let content = std::fs::read_to_string(&nested).expect("file should be readable");
         assert_eq!(content, INIT_TEMPLATE);
+    }
+
+    // ── OpenAI → Anthropic translation e2e tests ──────────────────────────
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_anthropic_translation() {
+        let env = "TEST_TRANSLATE_O2A";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        // Mock Anthropic upstream — receives Anthropic Messages format,
+        // returns Anthropic Messages response.
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .header("x-api-key", "sk-ant-test")
+                .header("anthropic-version", "2023-06-01")
+                .body_contains("\"system\"")
+                .body_contains("\"max_tokens\"");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"id":"msg_1","type":"message","role":"assistant","model":"sf-model","content":[{"type":"text","text":"translated response"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}"#,
+                );
+        });
+        // Send OpenAI-format request to /v1/chat/completions.
+        // "fix this bug" matches SYNTAX_FIX → routes to anthropic upstream.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4","messages":[{"role":"system","content":"You are helpful."},{"role":"user","content":"fix this bug"}],"max_tokens":100}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        let json = parse_json_body(response).await;
+        // Verify response is valid OpenAI Chat Completions format.
+        assert_eq!(
+            json.get("object").and_then(|v| v.as_str()),
+            Some("chat.completion"),
+            "expected chat.completion object, got: {json}"
+        );
+        let choices = json.get("choices").and_then(|v| v.as_array()).expect("choices array");
+        assert_eq!(choices.len(), 1);
+        let message = choices[0].get("message").expect("message field");
+        assert_eq!(
+            message.get("content").and_then(|v| v.as_str()),
+            Some("translated response")
+        );
+        assert_eq!(
+            choices[0].get("finish_reason").and_then(|v| v.as_str()),
+            Some("stop")
+        );
+        let usage = json.get("usage").expect("usage field");
+        assert_eq!(usage.get("prompt_tokens").and_then(|v| v.as_u64()), Some(10));
+        assert_eq!(usage.get("completion_tokens").and_then(|v| v.as_u64()), Some(5));
+        assert_eq!(usage.get("total_tokens").and_then(|v| v.as_u64()), Some(15));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_anthropic_streaming() {
+        let env = "TEST_TRANSLATE_O2A_STREAM";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        // Mock returns Anthropic SSE stream.
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(
+                    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_s1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"sf-model\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello \"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"world\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+                );
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some("text/event-stream"),
+        );
+        mock.assert();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body_str = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // Verify OpenAI SSE format.
+        assert!(body_str.contains("chatcmpl-"), "expected OpenAI chunk IDs, got: {body_str}");
+        assert!(body_str.contains("\"role\":\"assistant\""), "expected role chunk, got: {body_str}");
+        assert!(body_str.contains("Hello "), "expected text content, got: {body_str}");
+        assert!(body_str.contains("\"finish_reason\":\"stop\""), "expected finish_reason, got: {body_str}");
+        assert!(body_str.contains("[DONE]"), "expected [DONE] terminator, got: {body_str}");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_anthropic_error() {
+        let env = "TEST_TRANSLATE_O2A_ERR";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        // Mock returns Anthropic error.
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(429)
+                .header("content-type", "application/json")
+                .body(r#"{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        mock.assert();
+        let json = parse_json_body(response).await;
+        // Verify error is translated to OpenAI envelope.
+        let error = json.get("error").expect("error field");
+        assert_eq!(
+            error.get("type").and_then(|v| v.as_str()),
+            Some("rate_limit_error"),
+            "expected rate_limit_error type, got: {json}"
+        );
+        assert_eq!(
+            error.get("message").and_then(|v| v.as_str()),
+            Some("Too many requests"),
+            "expected error message, got: {json}"
+        );
     }
 }
 
