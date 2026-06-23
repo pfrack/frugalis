@@ -713,19 +713,25 @@ async fn health() -> (StatusCode, &'static str) {
     (StatusCode::OK, "ok")
 }
 
-/// Shared logging helper. Extracts the snippet, builds the inference record,
-/// and enqueues a fire-and-forget DB write.
+/// Shared logging helper. Builds the inference record from the pre-extracted
+/// `prompt` and enqueues a fire-and-forget DB write. Callers must extract the
+/// prompt themselves (via `persistence::extract_last_user_message` for OpenAI
+/// traffic or `persistence::extract_last_user_message_anthropic` for Anthropic
+/// traffic) so the persistence log records the same prompt the classifier saw.
+#[allow(clippy::too_many_arguments)]
 fn log_classification(
     state: &AppState,
     classification: &intent_classifier::ClassificationResult,
-    body_str: &str,
+    _body_str: &str,
+    prompt: &str,
     start: std::time::Instant,
     log_status: &str,
 ) {
     if let Some(persistence) = &state.persistence {
         let duration_ms = start.elapsed().as_millis() as i32;
-        let snippet = persistence::extract_snippet(body_str);
-        let prompt = persistence::extract_last_user_message(body_str);
+        // Snippet is the 200-char privacy-safe truncation of the FULL prompt,
+        // not the body — bodies may contain system prompts, tool calls, etc.
+        let snippet: String = prompt.chars().take(200).collect();
         let prompt_char_count = if prompt.is_empty() {
             None
         } else {
@@ -802,7 +808,7 @@ async fn classify_and_log(
     })
     .to_string();
     if let Some(log_status) = log_status {
-        log_classification(state, &classification, body_str, start, log_status);
+        log_classification(state, &classification, body_str, &prompt, start, log_status);
     }
 
     json_response(StatusCode::OK, response_body)
@@ -823,6 +829,24 @@ fn upstream_error_json(status: u16, message: &str) -> String {
         "error": "upstream_error",
         "status": status,
         "message": message,
+    })
+    .to_string()
+}
+
+/// Anthropic-shaped error body for the proxy's own errors (auth failure,
+/// bad request, no endpoint). Anthropic-speaking clients expect
+/// `{"type": "error", "error": {"type": "...", "message": "..."}}` so we
+/// match that envelope rather than the OpenAI-shaped `upstream_error_json`.
+/// `error_type` is the Anthropic error type, e.g. `"authentication_error"`,
+/// `"invalid_request_error"`, `"api_error"`. Status passthrough happens at
+/// the HTTP layer (this body is wrapped in a `StatusCode` from the caller).
+fn anthropic_error_json(error_type: &str, message: &str) -> String {
+    serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": error_type,
+            "message": message,
+        }
     })
     .to_string()
 }
@@ -877,42 +901,50 @@ fn build_upstream_request(
     Ok((client_wants_stream, req))
 }
 
+/// Buffer an upstream response. For OpenAI traffic, non-2xx responses are
+/// wrapped in the `upstream_error_json` envelope so the client always sees a
+/// consistent JSON shape. For Anthropic traffic (`anthropic_errors = true`),
+/// non-2xx responses pass through verbatim — the Anthropic upstream already
+/// produces an Anthropic-format error body, and re-wrapping it would
+/// double-encode the message and break the client's error contract.
 async fn handle_buffered_response(
     mut upstream_response: reqwest::Response,
     max_upstream_body_bytes: usize,
+    anthropic_errors: bool,
 ) -> (StatusCode, String) {
     let upstream_status = upstream_response.status();
     if !upstream_status.is_success() {
+        // Cap the upstream error body to 2 KB to bound latency and memory on
+        // large error payloads (lesson: "Handle upstream error bodies without
+        // full buffering where possible").
         const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
         let mut error_bytes = Vec::new();
         let error_body = loop {
             match upstream_response.chunk().await {
                 Ok(Some(chunk)) => {
                     if error_bytes.len() + chunk.len() > MAX_ERROR_BODY_BYTES {
-                        let error_text = String::from_utf8_lossy(&error_bytes)
-                            .chars()
-                            .take(512)
-                            .collect::<String>()
-                            .replace(['\n', '\r'], " ");
-                        break upstream_error_json(upstream_status.as_u16(), &error_text);
+                        break String::from_utf8_lossy(&error_bytes).into_owned();
                     }
                     error_bytes.extend_from_slice(&chunk);
                 }
-                Ok(None) => {
-                    let error_text = String::from_utf8_lossy(&error_bytes)
-                        .chars()
-                        .take(512)
-                        .collect::<String>()
-                        .replace(['\n', '\r'], " ");
-                    break upstream_error_json(upstream_status.as_u16(), &error_text);
-                }
-                Err(e) => break upstream_error_json(502, &e.to_string()),
+                Ok(None) => break String::from_utf8_lossy(&error_bytes).into_owned(),
+                Err(e) => break e.to_string(),
             }
         };
-        return (
-            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-            error_body,
-        );
+        let status =
+            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        if anthropic_errors {
+            // Pass through verbatim — the upstream already speaks Anthropic.
+            return (status, error_body);
+        }
+        // OpenAI: re-encode the upstream error text in our envelope so the
+        // client sees a consistent shape regardless of upstream quirks.
+        let error_text = error_body
+            .chars()
+            .take(512)
+            .collect::<String>()
+            .replace(['\n', '\r'], " ");
+        return (status, upstream_error_json(upstream_status.as_u16(), &error_text));
     }
 
     let mut upstream_body_bytes: Vec<u8> = Vec::new();
@@ -947,18 +979,22 @@ async fn handle_buffered_response(
 /// Set up SSE streaming response with keepalive and logging.
 /// The `Unpin` bound is required because the byte_stream is moved into a spawned task.
 /// Spawned tasks must own all captured data (trait objects require `Unpin` for safe pinning).
+/// `prompt` is the pre-extracted user prompt for the persistence log (passed
+/// explicitly so callers can use protocol-specific extractors — OpenAI vs.
+/// Anthropic — without re-parsing the body).
 fn handle_streaming_response(
     state: Arc<AppState>,
     classification: intent_classifier::ClassificationResult,
     body_str: String,
+    prompt: String,
     start: Instant,
     byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
     keepalive_interval_secs: u64,
-) -> Response<Body> {
+) -> Response {
     let channel_capacity = state.streaming_channel_capacity;
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(channel_capacity);
 
-    log_classification(&state, &classification, &body_str, start, "streaming");
+    log_classification(&state, &classification, &body_str, &prompt, start, "streaming");
 
     tokio::spawn(async move {
         let keepalive_secs = keepalive_interval_secs;
@@ -997,7 +1033,7 @@ fn handle_streaming_response(
                 }
             }
         }
-        log_classification(&state, &classification, &body_str, start, stream_status);
+        log_classification(&state, &classification, &body_str, &prompt, start, stream_status);
     });
 
     let body =
@@ -1174,6 +1210,12 @@ async fn completion_handler(
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
+    // Extract the prompt once and reuse it for both classification and the
+    // persistence log. When X-Cerebrum-Category/Model headers bypass the
+    // classifier, we still log an empty prompt rather than re-extracting
+    // — the classifier never ran, so there is nothing meaningful to log.
+    let prompt = persistence::extract_last_user_message(&body_str);
+
     let classification = if let (Some(category), Some(model)) =
         (x_category.as_ref(), x_model.as_ref())
     {
@@ -1194,12 +1236,11 @@ async fn completion_handler(
                     None => intent_classifier::ClassificationResult::fallback(),
                 };
                 let response_body = classification_only_json(&fallback);
-                log_classification(&state, &fallback, &body_str, start, "ok");
+                log_classification(&state, &fallback, &body_str, "", start, "ok");
                 return json_response(StatusCode::OK, response_body);
             }
         }
     } else {
-        let prompt = persistence::extract_last_user_message(&body_str);
         match state.classifier.as_ref() {
             Some(c) => c.classify(&prompt).await,
             None => intent_classifier::ClassificationResult::fallback(),
@@ -1221,7 +1262,7 @@ async fn completion_handler(
         Some(c) => c,
         None => {
             let response_body = classification_only_json(&classification);
-            log_classification(&state, &classification, &body_str, start, "ok");
+            log_classification(&state, &classification, &body_str, &prompt, start, "ok");
             return json_response(StatusCode::OK, response_body);
         }
     };
@@ -1231,20 +1272,20 @@ async fn completion_handler(
             Ok(key) if !key.is_empty() => key,
             _ => {
                 warn!("upstream API key env var '{env_name}' is missing or empty; degrading to classification-only response");
-                log_classification(&state, &classification, &body_str, start, "ok");
+                log_classification(&state, &classification, &body_str, &prompt, start, "ok");
                 return json_response(StatusCode::OK, classification_only_json(&classification));
             }
         },
         None => {
             warn!("no api_key_env configured for category '{}'; degrading to classification-only response", classification.category);
             let response_body = classification_only_json(&classification);
-            log_classification(&state, &classification, &body_str, start, "ok");
+            log_classification(&state, &classification, &body_str, &prompt, start, "ok");
             return json_response(StatusCode::OK, response_body);
         }
     };
 
     if classification.endpoint.is_empty() {
-        log_classification(&state, &classification, &body_str, start, "upstream_error");
+        log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
         #[cfg(feature = "otel")]
         rm.set_status(StatusCode::BAD_GATEWAY);
         return json_response(
@@ -1261,7 +1302,7 @@ async fn completion_handler(
         &state.auth_providers,
     ) {
         Err(msg) => {
-            log_classification(&state, &classification, &body_str, start, "bad_request");
+            log_classification(&state, &classification, &body_str, &prompt, start, "bad_request");
             #[cfg(feature = "otel")]
             rm.set_status(StatusCode::BAD_REQUEST);
             return json_response(StatusCode::BAD_REQUEST, upstream_error_json(400, &msg));
@@ -1284,7 +1325,7 @@ async fn completion_handler(
                     ],
                 );
             }
-            log_classification(&state, &classification, &body_str, start, "upstream_error");
+            log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
             #[cfg(feature = "otel")]
             rm.set_status(StatusCode::BAD_GATEWAY);
             return json_response(
@@ -1308,7 +1349,7 @@ async fn completion_handler(
     if client_wants_stream {
         if !upstream_response.status().is_success() {
             let resp = handle_streaming_error(upstream_response).await;
-            log_classification(&state, &classification, &body_str, start, "upstream_error");
+            log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
             #[cfg(feature = "otel")]
             rm.set_status(resp.status());
             return resp;
@@ -1320,6 +1361,7 @@ async fn completion_handler(
             state,
             classification,
             body_str,
+            prompt,
             start,
             upstream_response.bytes_stream(),
             keepalive_interval_secs,
@@ -1327,13 +1369,251 @@ async fn completion_handler(
     }
 
     let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
-    let (status, body) = handle_buffered_response(upstream_response, max_upstream_body_bytes).await;
+    let (status, body) = handle_buffered_response(upstream_response, max_upstream_body_bytes, false).await;
     let log_status = if status == StatusCode::OK {
         "ok"
     } else {
         "upstream_error"
     };
-    log_classification(&state, &classification, &body_str, start, log_status);
+    log_classification(&state, &classification, &body_str, &prompt, start, log_status);
+
+    #[cfg(feature = "otel")]
+    rm.set_status(status);
+
+    json_response(status, body)
+}
+
+/// Anthropic Messages API pass-through handler.
+///
+/// Mirrors `completion_handler` but for the Anthropic protocol:
+/// - `extract_last_user_message_anthropic` handles string-or-array `content`
+/// - Auth headers flow through `auth_headers_for` which now emits
+///   `x-api-key` + `anthropic-version: 2023-06-01` for `provider_type: "anthropic"`
+/// - Upstream streaming is byte-forwarded verbatim (Anthropic SSE format passes
+///   through unchanged — both client and upstream speak Anthropic)
+/// - Proxy's own errors use the Anthropic envelope
+///   (`{"type":"error","error":{"type":"...","message":"..."}}`)
+///
+/// Pass-through is intentional: protocol translation (Anthropic ↔ OpenAI) is
+/// a separate concern handled by sibling changes.
+async fn messages_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let start = std::time::Instant::now();
+
+    #[cfg(feature = "otel")]
+    let mut rm = RequestMetrics::new(state.metrics.clone(), "POST", "/v1/messages");
+
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !content_type.starts_with("application/json") {
+        #[cfg(feature = "otel")]
+        rm.set_status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        return json_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            anthropic_error_json("invalid_request_error", "expected application/json"),
+        );
+    }
+
+    let body_str: String = match std::str::from_utf8(&body) {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            #[cfg(feature = "otel")]
+            rm.set_status(StatusCode::BAD_REQUEST);
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                anthropic_error_json("invalid_request_error", "invalid UTF-8 body"),
+            );
+        }
+    };
+
+    let x_category = headers
+        .get("x-cerebrum-category")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let x_model = headers
+        .get("x-cerebrum-model")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    // Extract the prompt with the Anthropic extractor (handles string OR
+    // array-of-blocks content). Reuse it for both classification and the
+    // persistence log.
+    let prompt = persistence::extract_last_user_message_anthropic(&body_str);
+
+    let classification = if let (Some(category), Some(model)) =
+        (x_category.as_ref(), x_model.as_ref())
+    {
+        let routing = state.routing.read().await;
+        match routing.get(category) {
+            Some(entry) => intent_classifier::ClassificationResult {
+                category: category.clone(),
+                model: model.clone(),
+                endpoint: entry.endpoint.clone(),
+                tier: intent_classifier::ClassificationTier::Fallback,
+                provider_type: entry.provider_type.clone(),
+                api_key_env: entry.api_key_env.clone(),
+            },
+            None => {
+                warn!("X-Cerebrum-Category '{category}' not found in routing configuration; degrading to classification JSON");
+                let fallback = match state.classifier.as_ref() {
+                    Some(c) => c.classify("").await,
+                    None => intent_classifier::ClassificationResult::fallback(),
+                };
+                let response_body = classification_only_json(&fallback);
+                log_classification(&state, &fallback, &body_str, "", start, "ok");
+                return json_response(StatusCode::OK, response_body);
+            }
+        }
+    } else {
+        match state.classifier.as_ref() {
+            Some(c) => c.classify(&prompt).await,
+            None => intent_classifier::ClassificationResult::fallback(),
+        }
+    };
+
+    #[cfg(feature = "otel")]
+    if let Some(ref metrics) = state.metrics {
+        metrics.classification_total.add(
+            1,
+            &[
+                KeyValue::new("category", classification.category.clone()),
+                KeyValue::new("tier", format!("{:?}", classification.tier)),
+            ],
+        );
+    }
+
+    let client = match &state.http_client {
+        Some(c) => c,
+        None => {
+            let response_body = classification_only_json(&classification);
+            log_classification(&state, &classification, &body_str, &prompt, start, "ok");
+            return json_response(StatusCode::OK, response_body);
+        }
+    };
+
+    let api_key = match &classification.api_key_env {
+        Some(env_name) => match std::env::var(env_name) {
+            Ok(key) if !key.is_empty() => key,
+            _ => {
+                warn!("upstream API key env var '{env_name}' is missing or empty; degrading to classification-only response");
+                log_classification(&state, &classification, &body_str, &prompt, start, "ok");
+                return json_response(StatusCode::OK, classification_only_json(&classification));
+            }
+        },
+        None => {
+            warn!("no api_key_env configured for category '{}'; degrading to classification-only response", classification.category);
+            let response_body = classification_only_json(&classification);
+            log_classification(&state, &classification, &body_str, &prompt, start, "ok");
+            return json_response(StatusCode::OK, response_body);
+        }
+    };
+
+    if classification.endpoint.is_empty() {
+        log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
+        #[cfg(feature = "otel")]
+        rm.set_status(StatusCode::BAD_GATEWAY);
+        return json_response(
+            StatusCode::BAD_GATEWAY,
+            anthropic_error_json("api_error", "no endpoint configured"),
+        );
+    }
+
+    // Reuse the OpenAI `build_upstream_request` — the protocol difference
+    // is handled by `auth_headers_for` (which now emits the anthropic-version
+    // header when provider_type == "anthropic"). Body bytes are passed
+    // through verbatim except for the `model` field override.
+    let (client_wants_stream, upstream_req) = match build_upstream_request(
+        client,
+        &classification,
+        &body,
+        &api_key,
+        &state.auth_providers,
+    ) {
+        Err(msg) => {
+            log_classification(&state, &classification, &body_str, &prompt, start, "bad_request");
+            #[cfg(feature = "otel")]
+            rm.set_status(StatusCode::BAD_REQUEST);
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                anthropic_error_json("invalid_request_error", &msg),
+            );
+        }
+        Ok(r) => r,
+    };
+
+    #[cfg_attr(not(feature = "otel"), allow(unused_variables))]
+    let upstream_start = std::time::Instant::now();
+    let upstream_response = match upstream_req.send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            #[cfg(feature = "otel")]
+            if let Some(ref metrics) = state.metrics {
+                metrics.upstream_duration_seconds.record(
+                    upstream_start.elapsed().as_secs_f64(),
+                    &[
+                        KeyValue::new("provider", classification.provider_type.clone()),
+                        KeyValue::new("status", "502"),
+                    ],
+                );
+            }
+            log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
+            #[cfg(feature = "otel")]
+            rm.set_status(StatusCode::BAD_GATEWAY);
+            return json_response(
+                StatusCode::BAD_GATEWAY,
+                anthropic_error_json("api_error", &e.to_string()),
+            );
+        }
+    };
+
+    #[cfg(feature = "otel")]
+    if let Some(ref metrics) = state.metrics {
+        metrics.upstream_duration_seconds.record(
+            upstream_start.elapsed().as_secs_f64(),
+            &[
+                KeyValue::new("provider", classification.provider_type.clone()),
+                KeyValue::new("status", upstream_response.status().as_u16().to_string()),
+            ],
+        );
+    }
+
+    if client_wants_stream {
+        if !upstream_response.status().is_success() {
+            let resp = handle_streaming_error(upstream_response).await;
+            log_classification(&state, &classification, &body_str, &prompt, start, "upstream_error");
+            #[cfg(feature = "otel")]
+            rm.set_status(resp.status());
+            return resp;
+        }
+
+        let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
+
+        return handle_streaming_response(
+            state,
+            classification,
+            body_str,
+            prompt,
+            start,
+            upstream_response.bytes_stream(),
+            keepalive_interval_secs,
+        );
+    }
+
+    let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
+    let (status, body) = handle_buffered_response(upstream_response, max_upstream_body_bytes, true).await;
+    let log_status = if status == StatusCode::OK {
+        "ok"
+    } else {
+        "upstream_error"
+    };
+    log_classification(&state, &classification, &body_str, &prompt, start, log_status);
 
     #[cfg(feature = "otel")]
     rm.set_status(status);
@@ -1430,6 +1710,7 @@ async fn feedback_handler(
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
     let proxy_routes = Router::new()
         .route("/chat/completions", post(completion_handler))
+        .route("/messages", post(messages_handler))
         .route("/classify", post(classify_handler))
         .route("/feedback", post(feedback_handler))
         .route_layer(auth::proxy_auth_layer(auth_config.clone()));
@@ -2952,6 +3233,301 @@ mod tests {
         );
         let app = build_app(auth_config, app_state);
         (app, server)
+    }
+
+    /// Anthropic-flavored variant of `test_app_with_http_client`. Routes the
+    /// mock at `/v1/messages` and tags the route with `provider_type: "anthropic"`
+    /// so the proxy emits `x-api-key` + `anthropic-version` headers instead
+    /// of `Authorization: Bearer …`. The mock assertions in the tests below
+    /// rely on this header contract.
+    pub(crate) fn test_app_with_anthropic_http_client(
+        env_var_name: &str,
+        max_upstream_body_bytes: usize,
+    ) -> (Router, httpmock::MockServer) {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        use std::collections::HashMap;
+        let cats = test_categories();
+        let server = httpmock::MockServer::start();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("test reqwest client should build");
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let endpoint = server.url("/v1/messages");
+        let mut routing = HashMap::new();
+        routing.insert(
+            cats[1].name.clone(),
+            intent_classifier::RouteEntry {
+                model: "sf-model".to_string(),
+                endpoint: endpoint.clone(),
+                cost_per_1m_input_tokens: None,
+                provider_type: "anthropic".to_string(),
+                api_key_env: Some(env_var_name.to_string()),
+            },
+        );
+        routing.insert(
+            cats[3].name.clone(),
+            intent_classifier::RouteEntry {
+                model: "ca-model".to_string(),
+                endpoint,
+                cost_per_1m_input_tokens: None,
+                provider_type: "anthropic".to_string(),
+                api_key_env: Some(env_var_name.to_string()),
+            },
+        );
+        let fallback = intent_classifier::RouteEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            cost_per_1m_input_tokens: None,
+            provider_type: String::new(),
+            api_key_env: None,
+        };
+        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
+        let app_state = make_test_app_state(
+            regex_classifier,
+            Some(client),
+            intent_classifier::ModelCosts::empty(),
+            String::new(),
+            max_upstream_body_bytes,
+        );
+        let app = build_app(auth_config, app_state);
+        (app, server)
+    }
+
+    // ── /v1/messages (Anthropic pass-through) integration tests ──────────────
+
+    #[tokio::test]
+    async fn test_messages_handler_requires_auth() {
+        // Auth must fail before any handler logic runs — same contract as
+        // /v1/chat/completions and /v1/feedback, covered by the proxy_auth_layer.
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"claude-3.5","messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_non_streaming_passthrough() {
+        let env = "TEST_ANTHROPIC_NS";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .header("x-api-key", "sk-ant-test")
+                .header("anthropic-version", "2023-06-01");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hello"}]}"#,
+                );
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body_str = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(
+            body_str.contains("hello"),
+            "expected upstream text in response, got: {body_str}"
+        );
+        assert!(
+            body_str.contains("msg_1"),
+            "expected upstream id in response, got: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_streaming_passthrough() {
+        let env = "TEST_ANTHROPIC_STREAM";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body("event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n");
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"claude-3.5","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream"),
+            "expected text/event-stream content type"
+        );
+        mock.assert();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body_str = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(
+            body_str.contains("message_start"),
+            "expected upstream SSE bytes forwarded, got: {body_str}"
+        );
+        assert!(
+            body_str.contains("content_block_delta"),
+            "expected second SSE event forwarded, got: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_upstream_error_forwards_body() {
+        let env = "TEST_ANTHROPIC_ERR";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(429)
+                .header("content-type", "application/json")
+                .body(r#"{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        mock.assert();
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("type").and_then(|v| v.as_str()),
+            Some("error"),
+            "expected upstream Anthropic error envelope, got: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_messages_handler_classification_only_when_no_http_client() {
+        // No http_client configured → proxy returns classification JSON
+        // instead of attempting an upstream call (parity with /v1/chat/completions).
+        let response = test_app_with_classifier()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("status").and_then(|v| v.as_str()),
+            Some("classified"),
+            "expected classified status, got: {json}"
+        );
+        assert_eq!(
+            json.get("category").and_then(|v| v.as_str()),
+            Some("SYNTAX_FIX"),
+            "expected SYNTAX_FIX category from 'fix this bug', got: {json}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_overrides_model_to_classifier_choice() {
+        let env = "TEST_ANTHROPIC_MODEL";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        // Mock verifies the body has the classifier-selected "sf-model" (from
+        // SYNTAX_FIX routing), NOT the client's "claude-3.5". Mock only fires
+        // when the body_contains matcher passes.
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .body_contains("\"model\":\"sf-model\"");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":"msg_1","type":"message"}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
     }
 
     /// Build app state and router with an arbitrary `DbBackend` for integration tests.

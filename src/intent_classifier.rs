@@ -422,8 +422,11 @@ pub(crate) struct FewShotExample {
 // ── Auth Header Lookup ──
 
 /// Maps a provider_type string and resolved API key to HTTP auth header tuples
-/// using the configured auth provider list.
-/// Falls back to Bearer Authorization for unknown or unconfigured provider types.
+/// using the configured auth provider list. Falls back to Bearer Authorization
+/// for unknown or unconfigured provider types. For `provider_type == "anthropic"`
+/// always appends the protocol-required `anthropic-version` header alongside
+/// whichever auth header was resolved (configured or hard-coded fallback) — the
+/// version is a protocol constant, not a user preference, so we centralize it.
 pub fn auth_headers_for(
     providers: &[AuthProviderConfig],
     provider_type: &str,
@@ -434,16 +437,33 @@ pub fn auth_headers_for(
     } else {
         provider_type
     };
+    // Anthropic protocol constant: every Anthropic request must carry the
+    // version header. Append it to whatever auth header the user configured
+    // (or the hard-coded fallback below) so callers don't need to manage two
+    // parallel config entries.
+    let anthropic_version = ("anthropic-version".to_string(), "2023-06-01".to_string());
     for provider in providers {
         if provider.type_ == pt {
-            return match (&provider.header, &provider.value_template) {
+            let mut headers = match (&provider.header, &provider.value_template) {
                 (Some(header), Some(template)) => {
                     let value = template.replace("{api_key}", api_key);
                     vec![(header.clone(), value)]
                 }
                 _ => vec![],
             };
+            if pt == "anthropic" {
+                headers.push(anthropic_version);
+            }
+            return headers;
         }
+    }
+    // No matching provider config — hard-coded fallback for "anthropic",
+    // generic Bearer for everything else.
+    if pt == "anthropic" {
+        return vec![
+            ("x-api-key".to_string(), api_key.to_string()),
+            anthropic_version,
+        ];
     }
     vec![("authorization".into(), format!("Bearer {api_key}"))]
 }
@@ -1242,7 +1262,26 @@ mod tests {
         let headers = auth_headers_for(&providers, "anthropic", "sk-ant-123");
         assert_eq!(
             headers,
-            vec![("x-api-key".to_string(), "sk-ant-123".to_string())]
+            vec![
+                ("x-api-key".to_string(), "sk-ant-123".to_string()),
+                ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn auth_headers_for_anthropic_no_provider_config() {
+        // Hard-coded fallback: even with no [[auth_providers]] entry, an
+        // Anthropic provider_type must still emit x-api-key + the protocol
+        // version header so the upstream accepts the request.
+        let providers: Vec<AuthProviderConfig> = vec![];
+        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-fb");
+        assert_eq!(
+            headers,
+            vec![
+                ("x-api-key".to_string(), "sk-ant-fb".to_string()),
+                ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ]
         );
     }
 

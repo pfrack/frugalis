@@ -25,11 +25,37 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ============================================================================
+# Shared infrastructure — needed by every mode (auto, anthropic, fewshot, default).
+# lib.sh defines TOKEN, MESSAGES_URL, color vars, log_pass/log_fail, classify, etc.
+# ============================================================================
+source "$SCRIPT_DIR/lib.sh"
+
+# Default endpoint for interactive /v1/chat/completions tests.
+URL="${URL:-http://$HOST/v1/chat/completions}"
+
+# ============================================================================
 # Mode detection
 # ============================================================================
 AUTO_MODE=false
-if [ $# -gt 0 ] && ([ "$1" = "--auto" ] || [ "$1" = "-a" ]); then
-    AUTO_MODE=true
+ANTHROPIC_MODE=false
+FEWSHOT_MODE=false
+for arg in "$@"; do
+    case "$arg" in
+        --auto)       AUTO_MODE=true ;;
+        --anthropic)  ANTHROPIC_MODE=true ;;
+        --fewshot|-f) FEWSHOT_MODE=true ;;
+    esac
+done
+
+# DISPATCH_MODE is consumed at the end of the file. The interactive
+# /v1/chat/completions section runs only when it is empty. AUTO_MODE
+# exits early at the top of its own block.
+DISPATCH_MODE=""
+if [ "$ANTHROPIC_MODE" = true ]; then
+    DISPATCH_MODE="anthropic"
+fi
+if [ "$FEWSHOT_MODE" = true ]; then
+    DISPATCH_MODE="fewshot"
 fi
 
 # ============================================================================
@@ -966,6 +992,193 @@ EOF
         fi
     }
 
+    # ── Anthropic Pass-Through (POST /v1/messages) ────────────────────────
+
+    test_anthropic_classifies_anthropic_format() {
+        section "Anthropic pass-through: /v1/messages responds to Anthropic-format requests"
+        # Smoke test: the endpoint accepts Anthropic-format request bodies
+        # and returns a 200 with a valid JSON response (either classification
+        # JSON when no upstream is configured, or the upstream's response
+        # when one is). The per-category routing correctness is covered by
+        # the Rust integration tests (which use httpmock), not here.
+        if ! start_server ""; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+        local all_pass=true
+        local tests=(
+            "fix this bug please"
+            "please read the file src/main.rs"
+            "architect a distributed rate limiter"
+            "hello"
+        )
+        for prompt in "${tests[@]}"; do
+            local _resp _code _body
+            _resp=$(curl -s -w "\n%{http_code}" \
+                "$MESSAGES_URL" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"model\":\"claude-3.5\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}]}" 2>/dev/null) || _resp="ERROR"
+            _code=$(printf '%s' "$_resp" | tail -1)
+            _body=$(printf '%s' "$_resp" | sed '$d')
+            # Verify 200 + valid JSON
+            local _is_json
+            _is_json=$(echo "$_body" | python3 -c "import json,sys; json.load(sys.stdin); print('ok')" 2>/dev/null || echo "bad")
+            if [ "$_code" = "200" ] && [ "$_is_json" = "ok" ]; then
+                log_pass "Anthropic format prompt accepted (200 + JSON): \"$prompt\""
+            else
+                log_fail "Anthropic format: expected 200 + JSON, got code=$_code json=$_is_json for: $prompt"
+                all_pass=false
+            fi
+        done
+        stop_server
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
+    test_anthropic_extracts_array_of_text_blocks() {
+        section "Anthropic pass-through: /v1/messages handles array-of-text-blocks content"
+        # When content is a JSON array of typed blocks, only text blocks
+        # contribute to the prompt. Smoke test: the endpoint accepts the
+        # shape and returns 200 + JSON. Per-block text extraction is
+        # covered by the Rust unit tests in src/persistence.rs.
+        if ! start_server ""; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+        local _body='{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":[{"type":"text","text":"please "},{"type":"text","text":"fix this bug"}]}]}'
+        local _resp _code _body_resp _is_json
+        _resp=$(curl -s -w "\n%{http_code}" \
+            "$MESSAGES_URL" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$_body" 2>/dev/null) || _resp="ERROR"
+        _code=$(printf '%s' "$_resp" | tail -1)
+        _body_resp=$(printf '%s' "$_resp" | sed '$d')
+        _is_json=$(echo "$_body_resp" | python3 -c "import json,sys; json.load(sys.stdin); print('ok')" 2>/dev/null || echo "bad")
+        stop_server
+        if [ "$_code" = "200" ] && [ "$_is_json" = "ok" ]; then
+            log_pass "Array-of-text-blocks accepted (200 + JSON)"
+            return 0
+        else
+            log_fail "Array-of-text-blocks: expected 200 + JSON, got code=$_code json=$_is_json"
+            return 1
+        fi
+    }
+
+    test_anthropic_requires_auth() {
+        section "Anthropic pass-through: /v1/messages requires bearer auth"
+        if ! start_server ""; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+        local _code
+        _code=$(curl -s -o /dev/null -w "%{http_code}" \
+            "$MESSAGES_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}' 2>/dev/null) || _code="000"
+        stop_server
+        if [ "$_code" = "401" ]; then
+            log_pass "/v1/messages returns 401 without bearer token"
+            return 0
+        else
+            log_fail "/v1/messages expected 401 without token, got $_code"
+            return 1
+        fi
+    }
+
+    test_anthropic_rejects_non_json() {
+        section "Anthropic pass-through: /v1/messages rejects non-JSON content-type"
+        if ! start_server ""; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+        local _code
+        _code=$(curl -s -o /dev/null -w "%{http_code}" \
+            "$MESSAGES_URL" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: text/plain" \
+            -d 'hello' 2>/dev/null) || _code="000"
+        stop_server
+        if [ "$_code" = "415" ]; then
+            log_pass "/v1/messages returns 415 for non-JSON content-type"
+            return 0
+        else
+            log_fail "/v1/messages expected 415 for non-JSON, got $_code"
+            return 1
+        fi
+    }
+
+    test_anthropic_error_envelope_shape() {
+        section "Anthropic pass-through: 415 error body is Anthropic envelope"
+        if ! start_server ""; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+        local _resp _code _json _error_type
+        _resp=$(curl -s -w "\n%{http_code}" \
+            "$MESSAGES_URL" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: text/plain" \
+            -d 'hello' 2>/dev/null) || _resp="ERROR"
+        _code=$(printf '%s' "$_resp" | tail -1)
+        _json=$(printf '%s' "$_resp" | sed '$d')
+        # Anthropic error envelope: {"type":"error","error":{"type":"invalid_request_error","message":"..."}}
+        _error_type=$(echo "$_json" | python3 -c "
+import json,sys
+try:
+    d = json.load(sys.stdin)
+    e = d.get('error', {})
+    print(e.get('type', '') if isinstance(e, dict) else '')
+except:
+    print('')
+" 2>/dev/null || echo "")
+        stop_server
+        if [ "$_code" = "415" ] && [ "$_error_type" = "invalid_request_error" ]; then
+            log_pass "Anthropic error envelope: error.type=invalid_request_error"
+            return 0
+        else
+            log_fail "Anthropic error envelope: expected invalid_request_error, got code=$_code error.type=$_error_type"
+            return 1
+        fi
+    }
+
+    test_anthropic_openapi_documents_endpoint() {
+        section "Anthropic pass-through: OpenAPI spec documents /v1/messages"
+        # Phase 4 manual verification: spec is consistent with the endpoint.
+        # We don't validate against the live server (the tests above do that);
+        # this verifies the spec mentions /v1/messages and Anthropic-format
+        # error fields.
+        local _yaml
+        _yaml=$(python3 -c "
+import yaml,sys
+try:
+    d = yaml.safe_load(open('openapi/completions.yaml'))
+    paths = d.get('paths', {})
+    msgs = paths.get('/v1/messages', {})
+    post = msgs.get('post', {})
+    # Confirm Anthropic error envelope fields are documented
+    resp_400 = post.get('responses', {}).get('400', {})
+    schema_ref = resp_400.get('content', {}).get('application/json', {}).get('schema', {})
+    required = schema_ref.get('required', [])
+    properties = schema_ref.get('properties', {})
+    has_type = 'type' in properties
+    has_error = 'error' in properties
+    if msgs and has_type and has_error and 'type' in required and 'error' in required:
+        print('OK')
+    else:
+        print(f'MISSING: msgs={bool(msgs)} type={has_type} error={has_error} required={required}')
+except Exception as e:
+    print(f'YAML_ERROR: {e}')
+" 2>/dev/null)
+        if [ "$_yaml" = "OK" ]; then
+            log_pass "OpenAPI spec documents /v1/messages with Anthropic error envelope"
+            return 0
+        else
+            log_fail "OpenAPI spec check failed: $_yaml"
+            return 1
+        fi
+    }
+
     run_automated_tests() {
         echo ""
         echo "╔══════════════════════════════════════════════════════════════════╗"
@@ -1000,6 +1213,14 @@ EOF
         test_phase4_validate_invalid_regex
         test_phase4_validate_schema_errors
         test_phase4_validate_unknown_args
+
+        # ── Anthropic Pass-Through (anthropic-passthrough plan) manual tests ──
+        test_anthropic_classifies_anthropic_format
+        test_anthropic_extracts_array_of_text_blocks
+        test_anthropic_requires_auth
+        test_anthropic_rejects_non_json
+        test_anthropic_error_envelope_shape
+        test_anthropic_openapi_documents_endpoint
         
         echo ""
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1023,20 +1244,12 @@ fi
 # ============================================================================
 # Interactive manual testing mode (default)
 # ============================================================================
-# This is the original run.sh functionality
+# lib.sh was sourced at the top of the file, so TOKEN, MESSAGES_URL, color
+# vars, etc. are already set. The interactive /v1/chat/completions tests run
+# only when DISPATCH_MODE is empty (i.e. neither --anthropic nor --fewshot
+# was passed). The dispatch for those modes happens at the end of the file.
 
-if [ -z "$TOKEN" ]; then
-    echo "ERROR: PROXY_API_BEARER_TOKEN is not set" >&2
-    echo "Set it via: export PROXY_API_BEARER_TOKEN=your_token" >&2
-    exit 1
-fi
-
-# Colors (redefine in case not in auto mode)
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
+# Reset pass/fail counters for interactive mode.
 PASS=0
 FAIL=0
 
@@ -1149,18 +1362,21 @@ run_test_headers() {
 }
 
 # Interactive mode header
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " Cerebrum Manual Route Tests (Shared Category Config Validation)"
-echo " Target: $URL"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "Make sure the server is running with:"
-echo "  RUST_LOG=info cargo run"
-echo ""
-echo "Press Ctrl+C to abort any test, or wait for completion."
-echo ""
+if [ -z "$DISPATCH_MODE" ]; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo " Cerebrum Manual Route Tests (Shared Category Config Validation)"
+    echo " Target: $URL"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Make sure the server is running with:"
+    echo "  RUST_LOG=info cargo run"
+    echo ""
+    echo "Press Ctrl+C to abort any test, or wait for completion."
+    echo ""
+fi
 
+if [ -z "$DISPATCH_MODE" ]; then
 # ── COMPLEX_REASONING (expects NVIDIA meta/llama-3.3-70b-instruct) ──
 echo "── COMPLEX_REASONING ──"
 run_test "architect a system" \
@@ -1253,31 +1469,34 @@ else
 fi
 
 # ── Summary ──
+if [ -z "$DISPATCH_MODE" ]; then
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 printf " Results: ${GREEN}%d passed${NC}, ${RED}%d failed${NC}\n" "$PASS" "$FAIL"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
+fi
 
-if [ $FAIL -gt 0 ]; then
+if [ -z "$DISPATCH_MODE" ] && [ $FAIL -gt 0 ]; then
     exit 1
+fi
 fi
 
 # ============================================================================
 # Few-Shot Classifier Manual Tests (Phase 1-5)
 # ============================================================================
 
-test_fewshot_phase1_config() {
-    section "Phase 1 - Config section present in config.toml"
-    # The config.toml already contains [fewshot_classifier] commented block
-    if grep -q '\[fewshot_classifier\]' config.toml; then
-        log_pass "config.toml contains [fewshot_classifier] section"
-        return 0
-    else
-        log_fail "config.toml missing [fewshot_classifier] section"
-        return 1
-    fi
-}
+    test_fewshot_phase1_config() {
+        section "Phase 1 - Config section present in config.toml"
+        # The config.toml already contains [fewshot_classifier] commented block
+        if grep -q '\[fewshot_classifier\]' config.toml; then
+            log_pass "config.toml contains [fewshot_classifier] section"
+            return 0
+        else
+            log_fail "config.toml missing [fewshot_classifier] section"
+            return 1
+        fi
+    }
 
 test_fewshot_phase2_classify_casual() {
     section "Phase 2 - Classify bootstrap CASUAL prompt"
@@ -1441,8 +1660,190 @@ run_fewshot_manual_tests() {
 }
 
 # Allow running just the fewshot tests
-if [ "$1" = "--fewshot" ] || [ "$1" = "-f" ]; then
-    run_fewshot_manual_tests
-    exit $?
-fi
+# (handled at end of file — see DISPATCH_MODE block)
+
+# ============================================================================
+# Anthropic Pass-Through (POST /v1/messages) Manual Tests
+# ============================================================================
+# These tests hit POST /v1/messages, the Anthropic Messages API pass-through
+# endpoint. They work WITHOUT a real upstream — the proxy returns a
+# classification JSON response when no http_client is configured (default
+# state for manual testing). With a real upstream configured, the same
+# requests forward verbatim to the upstream and the JSON response is the
+# upstream's Anthropic-format response.
+#
+# Run mode: same as the chat/completions tests above (server must be running).
+
+run_messages_test() {
+    _label="$1" _body="$2"
+    _resp=""
+    _http_code=""
+    _upstream_model=""
+    _error_msg=""
+    _tmpfile=$(mktemp)
+    _start=$(date +%s)
+
+    printf "[TEST] %s\n" "$_label"
+    printf "  ⏳  "
+    ( curl -s -w "\n%{http_code}" --max-time 120 \
+        "$MESSAGES_URL" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$_body" > "$_tmpfile" 2>/dev/null ) &
+    _curl_pid=$!
+    while kill -0 "$_curl_pid" 2>/dev/null; do
+        sleep 2
+        printf "."
+    done
+    wait $_curl_pid 2>/dev/null
+    _end=$(date +%s)
+    _elapsed=$((_end - _start))
+    printf " done\n"
+    _resp=$(cat "$_tmpfile")
+    rm -f "$_tmpfile"
+    _http_code=$(printf '%s' "$_resp" | tail -1)
+    _body_resp=$(printf '%s' "$_resp" | sed '$d')
+    _upstream_model=$(extract_model "$_body_resp")
+
+    if [ "$_http_code" = "200" ]; then
+        printf "  ${GREEN}PASS${NC} (HTTP %s, %ss, model=%s)\n" "$_http_code" "$_elapsed" "$_upstream_model"
+        PASS=$((PASS+1))
+    else
+        _error_msg=$(extract_error "$_body_resp")
+        [ -z "$_error_msg" ] && _error_msg=$(printf '%s' "$_body_resp" | head -c 120)
+        printf "  ${RED}FAIL${NC} (HTTP %s, %ss): %s\n" "$_http_code" "$_elapsed" "$_error_msg"
+        FAIL=$((FAIL+1))
+    fi
+}
+
+run_anthropic_manual_tests() {
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════════╗"
+    echo "║  Anthropic Pass-Through (POST /v1/messages) Manual Tests        ║"
+    echo "╚══════════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "Target: $MESSAGES_URL"
+    echo ""
+    echo "These tests send Anthropic Messages API requests. With no upstream"
+    echo "configured the proxy returns classification JSON (status=classified,"
+    echo "category=X, model=Y). With a real upstream configured, responses are"
+    echo "the upstream's Anthropic-format messages."
+    echo ""
+
+    # ── Basic shape: required fields model, max_tokens, messages ──────────
+    echo "── REQUEST SHAPE ──"
+    run_messages_test "string content" \
+        '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}'
+    run_messages_test "array-of-text-blocks content" \
+        '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}]}'
+
+    # ── Classifier routes: each category via a representative prompt ────
+    echo ""
+    echo "── CLASSIFICATION (verifies prompt extraction works on Anthropic format) ──"
+    run_messages_test "SYNTAX_FIX" \
+        '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug please"}]}'
+    run_messages_test "FILE_READING" \
+        '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"please read the file src/main.rs"}]}'
+    run_messages_test "COMPLEX_REASONING" \
+        '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"architect a distributed rate limiter"}]}'
+    run_messages_test "CASUAL" \
+        '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}'
+
+    # ── Auth gate ──────────────────────────────────────────────────────────
+    echo ""
+    echo "── AUTH ──"
+    printf "[TEST] missing token ... "
+    _code=$(curl -s -o /dev/null -w "%{http_code}" \
+        "$MESSAGES_URL" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}' 2>/dev/null) || true
+    if [ "$_code" = "401" ]; then
+        printf "${GREEN}PASS${NC} (HTTP %s)\n" "$_code"
+        PASS=$((PASS+1))
+    else
+        printf "${RED}FAIL${NC} (expected 401, got %s)\n" "$_code"
+        FAIL=$((FAIL+1))
+    fi
+
+    printf "[TEST] wrong token ... "
+    _code=$(curl -s -o /dev/null -w "%{http_code}" \
+        "$MESSAGES_URL" \
+        -H "Authorization: Bearer wrong-token" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}' 2>/dev/null) || true
+    if [ "$_code" = "401" ]; then
+        printf "${GREEN}PASS${NC} (HTTP %s)\n" "$_code"
+        PASS=$((PASS+1))
+    else
+        printf "${RED}FAIL${NC} (expected 401, got %s)\n" "$_code"
+        FAIL=$((FAIL+1))
+    fi
+
+    # ── Streaming: when stream=true, response should be text/event-stream ──
+    echo ""
+    echo "── STREAMING ──"
+    printf "[TEST] streaming mode ... "
+    resp=$(curl -s -w "\n%{http_code}" \
+        "$MESSAGES_URL" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"claude-3.5","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hello"}]}' 2>/dev/null) || true
+    http_code=$(printf '%s' "$resp" | tail -1)
+    sse_lines=$(printf '%s' "$resp" | sed '$d' | grep -c "^data:\|^event:" || true)
+    if [ "$http_code" = "200" ] && [ "${sse_lines:-0}" -gt 0 ]; then
+        printf "${GREEN}PASS${NC} (HTTP %s, %s SSE chunks)\n" "$http_code" "$sse_lines"
+        PASS=$((PASS+1))
+    elif [ "$http_code" = "200" ]; then
+        # With no upstream the response is a JSON classification envelope,
+        # not SSE — that's correct behavior, just no SSE lines to count.
+        printf "${GREEN}PASS${NC} (HTTP %s, no SSE — classification JSON response)\n" "$http_code"
+        PASS=$((PASS+1))
+    else
+        printf "${RED}FAIL${NC} (HTTP %s)\n" "$http_code"
+        FAIL=$((FAIL+1))
+    fi
+
+    # ── Content-Type gate: 415 when not application/json ──────────────────
+    echo ""
+    echo "── CONTENT-TYPE ──"
+    printf "[TEST] non-JSON content-type ... "
+    _code=$(curl -s -o /dev/null -w "%{http_code}" \
+        "$MESSAGES_URL" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: text/plain" \
+        -d 'hello' 2>/dev/null) || true
+    if [ "$_code" = "415" ]; then
+        printf "${GREEN}PASS${NC} (HTTP %s)\n" "$_code"
+        PASS=$((PASS+1))
+    else
+        printf "${RED}FAIL${NC} (expected 415, got %s)\n" "$_code"
+        FAIL=$((FAIL+1))
+    fi
+
+    # ── Summary ──
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    printf " Results: ${GREEN}%d passed${NC}, ${RED}%d failed${NC}\n" "$PASS" "$FAIL"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    if [ $FAIL -gt 0 ]; then
+        exit 1
+    fi
+}
+
+# Allow running just the anthropic-passthrough tests
+# (handled below — see DISPATCH_MODE block)
+
+# ============================================================================
+# Dispatch to interactive modes AFTER all function definitions are loaded.
+# AUTO_MODE exits at the top of its own block. The interactive
+# /v1/chat/completions tests have already run by the time we get here
+# (or were skipped via DISPATCH_MODE guards).
+# ============================================================================
+case "$DISPATCH_MODE" in
+    anthropic) run_anthropic_manual_tests ;;
+    fewshot)   run_fewshot_manual_tests ;;
+esac
+
 
