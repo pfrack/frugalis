@@ -1181,15 +1181,6 @@ pub fn extract_snippet(body: &str) -> String {
     full.chars().take(200).collect()
 }
 
-/// Extract a 200-char privacy-safe snippet from a pre-extracted prompt string.
-/// Truncates to 200 characters. Used internally by callers that already have
-/// the full prompt extracted (e.g. via `extract_last_user_message` or
-/// `extract_last_user_message_anthropic`).
-#[allow(dead_code)]
-pub fn truncate_snippet(prompt: &str) -> String {
-    prompt.chars().take(200).collect()
-}
-
 /// Convert character count to estimated dollar cost.
 ///
 /// Uses a simple 4-characters-to-1-token heuristic. Rounds to 6 decimal places.

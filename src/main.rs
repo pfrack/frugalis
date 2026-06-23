@@ -1611,6 +1611,7 @@ async fn messages_handler(
     let log_status = if status == StatusCode::OK {
         "ok"
     } else {
+        warn!(upstream_status = status.as_u16(), "upstream returned non-2xx");
         "upstream_error"
     };
     log_classification(&state, &classification, &body_str, &prompt, start, log_status);
