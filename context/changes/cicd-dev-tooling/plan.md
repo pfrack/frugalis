@@ -459,27 +459,27 @@ Update `context/foundation/test-plan.md` §3-§6 to reference the new justfile t
 
 #### Automated
 
-- [x] 3.1 `just` lists all recipes (exit 0)
-- [x] 3.2 `just fmt-check` passes
-- [x] 3.3 `just lint-strict` passes
-- [x] 3.4 `just test` passes (all fast tests)
-- [x] 3.5 `just build-release` produces `target/release/cerebrum`
-- [x] 3.6 `just ci` runs full gate sequence and passes
+- [x] 3.1 `just` lists all recipes (exit 0) — 1ccf582
+- [x] 3.2 `just fmt-check` passes — 1ccf582
+- [x] 3.3 `just lint-strict` passes — 1ccf582
+- [x] 3.4 `just test` passes (all fast tests) — 1ccf582
+- [x] 3.5 `just build-release` produces `target/release/cerebrum` — 1ccf582
+- [x] 3.6 `just ci` runs full gate sequence and passes — 1ccf582
 
 #### Manual
 
-- [ ] 3.7 `just run` starts cerebrum with sensible defaults
-- [ ] 3.8 `just test TEST=auth` forwards args correctly
+- [x] 3.7 `just run` starts cerebrum with sensible defaults — 1ccf582
+- [x] 3.8 `just test TEST=auth` forwards args correctly — 1ccf582
 
 ### Phase 4: .env.example
 
 #### Automated
 
-- [ ] 4.1 `cp .env.example .env && just run` starts cerebrum successfully
+- [x] 4.1 `cp .env.example .env && just run` starts cerebrum successfully
 
 #### Manual
 
-- [ ] 4.2 All env vars match codebase usage; comments reference source anchors
+- [x] 4.2 All env vars match codebase usage; comments reference source anchors
 
 ### Phase 5: test-plan.md Updates
 
