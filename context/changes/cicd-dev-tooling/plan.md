@@ -434,21 +434,21 @@ Update `context/foundation/test-plan.md` §3-§6 to reference the new justfile t
 
 #### Automated
 
-- [x] 1.1 `docker build -t cerebrum:test .` completes successfully
-- [x] 1.2 `docker run --rm cerebrum:test --validate` exits 0
-- [x] 1.3 Image size < 200 MB for runtime stage
+- [x] 1.1 `docker build -t cerebrum:test .` completes successfully — 9b5696f
+- [x] 1.2 `docker run --rm cerebrum:test --validate` exits 0 — 9b5696f
+- [x] 1.3 Image size < 200 MB for runtime stage — 9b5696f
 
 #### Manual
 
-- [ ] 1.4 Incremental code change rebuilds only the final stage
+- [x] 1.4 Incremental code change rebuilds only the final stage — 9b5696f
 
 ### Phase 2: docker-compose.yml + OTel Collector Config
 
 #### Automated
 
-- [ ] 2.1 `docker compose up -d postgres` starts and healthcheck passes
-- [ ] 2.2 `docker compose --profile otel up -d` starts both services
-- [ ] 2.3 `curl http://localhost:13133` returns 200
+- [x] 2.1 `docker compose up -d postgres` starts and healthcheck passes
+- [x] 2.2 `docker compose --profile otel up -d` starts both services
+- [x] 2.3 `curl http://localhost:13133` returns 200
 
 #### Manual
 
