@@ -1,8 +1,8 @@
 ---
 id: translate-openai-to-anthropic
-status: researched
+status: implementing
 created: 2026-06-22
-updated: 2026-06-22
+updated: 2026-06-23
 user: pfrack
 tags: [protocol-translation, anthropic, openai, proxy, streaming]
 ---

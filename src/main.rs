@@ -71,6 +71,7 @@ mod dashboard;
 mod fewshot_classifier;
 mod intent_classifier;
 mod persistence;
+mod protocol_translation;
 mod quickstart;
 mod routing;
 
