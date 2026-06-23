@@ -475,20 +475,20 @@ Update `context/foundation/test-plan.md` §3-§6 to reference the new justfile t
 
 #### Automated
 
-- [x] 4.1 `cp .env.example .env && just run` starts cerebrum successfully
+- [x] 4.1 `cp .env.example .env && just run` starts cerebrum successfully — c69dd3c
 
 #### Manual
 
-- [x] 4.2 All env vars match codebase usage; comments reference source anchors
+- [x] 4.2 All env vars match codebase usage; comments reference source anchors — c69dd3c
 
 ### Phase 5: test-plan.md Updates
 
 #### Automated
 
-- [ ] 5.1 `grep -c "just" context/foundation/test-plan.md` shows new references
-- [ ] 5.2 No broken markdown links in test-plan.md
+- [x] 5.1 `grep -c "just" context/foundation/test-plan.md` shows new references
+- [x] 5.2 No broken markdown links in test-plan.md
 
 #### Manual
 
-- [ ] 5.3 All `cargo test <name>` references in §6 replaced with `just test TEST=<name>`
-- [ ] 5.4 Phase 4 row accurately reflects new tooling
+- [x] 5.3 All `cargo test <name>` references in §6 replaced with `just test TEST=<name>`
+- [x] 5.4 Phase 4 row accurately reflects new tooling
