@@ -1178,6 +1178,597 @@ except Exception as e:
         fi
     }
 
+    # ── OpenAI → Anthropic Translation ────────────────────────────────────
+    # These tests spin up a lightweight Python HTTP server that mimics an
+    # Anthropic upstream. It validates that incoming requests are in
+    # Anthropic Messages format (has "system" field, content blocks, etc.)
+    # and returns Anthropic-format responses. Cerebrum translates the
+    # OpenAI request → Anthropic before forwarding, and translates the
+    # Anthropic response → OpenAI before returning to the client.
+
+    MOCK_ANTHROPIC_PORT=10042
+
+    start_mock_anthropic_server() {
+        local mode="$1"  # "ok" or "error"
+        local mock_script="/tmp/cerebrum-mock-anthropic-$$.py"
+        cat > "$mock_script" << 'PYEOF'
+import http.server
+import json
+import sys
+
+PORT = int(sys.argv[1])
+mode = sys.argv[2] if len(sys.argv) > 2 else "ok"
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length > 0 else {}
+
+        has_system = "system" in body
+        has_messages = "messages" in body
+        has_max_tokens = "max_tokens" in body
+        msgs = body.get("messages", [])
+        content_is_blocks = True
+        for m in msgs:
+            c = m.get("content")
+            if isinstance(c, str):
+                if m.get("role") in ("user", "assistant"):
+                    content_is_blocks = False
+                    break
+            elif isinstance(c, list):
+                for block in c:
+                    if not isinstance(block, dict) or "type" not in block:
+                        content_is_blocks = False
+                        break
+
+        has_api_key = self.headers.get("x-api-key") is not None
+        has_version = self.headers.get("anthropic-version") == "2023-06-01"
+
+        if mode == "error":
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "Mock rate limit"}
+            }).encode())
+            return
+
+        ok = has_system and has_messages and has_max_tokens and content_is_blocks and has_api_key and has_version
+        if ok:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "id": "msg_mock_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "mock-model",
+                "content": [{"type": "text", "text": "mock translated response"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }).encode())
+        else:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            details = {
+                "system": has_system, "messages": has_messages,
+                "max_tokens": has_max_tokens, "content_is_blocks": content_is_blocks,
+                "api_key": has_api_key, "version": has_version,
+            }
+            self.wfile.write(json.dumps({
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": f"Bad translation: {details}"}
+            }).encode())
+
+server = http.server.HTTPServer(("127.0.0.1", PORT), Handler)
+server.serve_forever()
+PYEOF
+        python3 "$mock_script" "$MOCK_ANTHROPIC_PORT" "$mode" &
+        MOCK_PID=$!
+        sleep 0.5
+    }
+
+    stop_mock_anthropic_server() {
+        if [ -n "${MOCK_PID:-}" ]; then
+            kill "$MOCK_PID" 2>/dev/null || true
+            wait "$MOCK_PID" 2>/dev/null || true
+            MOCK_PID=""
+        fi
+        rm -f /tmp/cerebrum-mock-anthropic-*.py
+    }
+
+    test_o2a_translation_non_streaming() {
+        section "OpenAI→Anthropic Translation: non-streaming request/response"
+        trap stop_mock_anthropic_server EXIT
+
+        start_mock_anthropic_server "ok"
+
+        local _mock_url="http://127.0.0.1:${MOCK_ANTHROPIC_PORT}/v1/messages"
+        cat > /tmp/cerebrum-config-test.toml << HEREDOC
+[categories.FILE_READING]
+description = "Reading files"
+threshold = 3
+priority = 1
+
+[categories.SYNTAX_FIX]
+description = "Fixing bugs"
+threshold = 3
+priority = 2
+patterns = [
+  { regex = '(?i)\\\\b(?:fix|correct|repair|patch)\\\\s+(?:this|the|my|a)\\\\s+(?:bug|error|issue)', weight = 3 }
+]
+
+[categories.COMPLEX_REASONING]
+description = "Complex reasoning"
+threshold = 3
+priority = 3
+
+[categories.CASUAL]
+description = "Casual"
+threshold = 1
+priority = 4
+
+[routing.FILE_READING]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.SYNTAX_FIX]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.COMPLEX_REASONING]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.CASUAL]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.DEFAULT]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+HEREDOC
+
+        export ANTHROPIC_API_KEY="sk-ant-test-key"
+
+        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+            log_fail "Failed to start server"
+            stop_mock_anthropic_server
+            unset ANTHROPIC_API_KEY
+            return 1
+        fi
+
+        # Send OpenAI-format request to /v1/chat/completions
+        local _resp _code _body _obj _content _finish
+        _resp=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"gpt-4","messages":[{"role":"system","content":"You are helpful."},{"role":"user","content":"fix this bug"}],"max_tokens":100}' \
+            "$COMPLETION_URL" 2>/dev/null) || _resp="ERROR"
+        _code=$(printf '%s' "$_resp" | tail -1)
+        _body=$(printf '%s' "$_resp" | sed '$d')
+
+        local all_pass=true
+
+        # Verify HTTP 200
+        if [ "$_code" = "200" ]; then
+            log_pass "Translation returns HTTP 200"
+        else
+            log_fail "Translation expected 200, got $_code (body: $(printf '%s' "$_body" | head -c 200))"
+            all_pass=false
+        fi
+
+        # Verify response is valid JSON
+        local _is_json
+        _is_json=$(printf '%s' "$_body" | python3 -c "import json,sys; json.load(sys.stdin); print('ok')" 2>/dev/null || echo "bad")
+        if [ "$_is_json" = "ok" ]; then
+            log_pass "Response is valid JSON"
+        else
+            log_fail "Response is not valid JSON"
+            all_pass=false
+        fi
+
+        # Verify OpenAI Chat Completions format
+        _obj=$(printf '%s' "$_body" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+print(d.get('object',''))
+" 2>/dev/null || echo "")
+        if [ "$_obj" = "chat.completion" ]; then
+            log_pass "Response has object=chat.completion"
+        else
+            log_fail "Expected object=chat.completion, got: $_obj"
+            all_pass=false
+        fi
+
+        # Verify content
+        _content=$(printf '%s' "$_body" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+choices = d.get('choices', [])
+if choices:
+    print(choices[0].get('message',{}).get('content',''))
+else:
+    print('')
+" 2>/dev/null || echo "")
+        if [ "$_content" = "mock translated response" ]; then
+            log_pass "Response content matches mock upstream"
+        else
+            log_fail "Expected 'mock translated response', got: '$_content'"
+            all_pass=false
+        fi
+
+        # Verify finish_reason
+        _finish=$(printf '%s' "$_body" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+choices = d.get('choices', [])
+if choices:
+    print(choices[0].get('finish_reason',''))
+else:
+    print('')
+" 2>/dev/null || echo "")
+        if [ "$_finish" = "stop" ]; then
+            log_pass "finish_reason=stop (mapped from end_turn)"
+        else
+            log_fail "Expected finish_reason=stop, got: $_finish"
+            all_pass=false
+        fi
+
+        # Verify usage
+        local _prompt _completion _total
+        _prompt=$(printf '%s' "$_body" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('usage',{}).get('prompt_tokens',''))" 2>/dev/null || echo "")
+        _completion=$(printf '%s' "$_body" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('usage',{}).get('completion_tokens',''))" 2>/dev/null || echo "")
+        _total=$(printf '%s' "$_body" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('usage',{}).get('total_tokens',''))" 2>/dev/null || echo "")
+        if [ "$_prompt" = "10" ] && [ "$_completion" = "5" ] && [ "$_total" = "15" ]; then
+            log_pass "Usage mapped correctly (10+5=15)"
+        else
+            log_fail "Usage expected 10/5/15, got $_prompt/$_completion/$_total"
+            all_pass=false
+        fi
+
+        stop_server
+        stop_mock_anthropic_server
+        unset ANTHROPIC_API_KEY
+        trap cleanup EXIT
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
+    test_o2a_translation_streaming() {
+        section "OpenAI→Anthropic Translation: streaming SSE"
+        trap stop_mock_anthropic_server EXIT
+
+        local mock_script="/tmp/cerebrum-mock-stream-$$.py"
+        cat > "$mock_script" << 'PYEOF'
+import http.server
+import json
+import sys
+
+PORT = int(sys.argv[1])
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length > 0 else {}
+        stream = body.get("stream", False)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+
+        if stream:
+            start = {"type":"message_start","message":{"id":"msg_s1","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":None,"usage":{"input_tokens":10,"output_tokens":0}}}
+            self.wfile.write(f"event: message_start\ndata: {json.dumps(start)}\n\n".encode())
+            self.wfile.flush()
+
+            cb_start = {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+            self.wfile.write(f"event: content_block_start\ndata: {json.dumps(cb_start)}\n\n".encode())
+            self.wfile.flush()
+
+            delta1 = {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello "}}
+            self.wfile.write(f"event: content_block_delta\ndata: {json.dumps(delta1)}\n\n".encode())
+            self.wfile.flush()
+
+            delta2 = {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"stream"}}
+            self.wfile.write(f"event: content_block_delta\ndata: {json.dumps(delta2)}\n\n".encode())
+            self.wfile.flush()
+
+            cb_stop = {"type":"content_block_stop","index":0}
+            self.wfile.write(f"event: content_block_stop\ndata: {json.dumps(cb_stop)}\n\n".encode())
+            self.wfile.flush()
+
+            msg_delta = {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}
+            self.wfile.write(f"event: message_delta\ndata: {json.dumps(msg_delta)}\n\n".encode())
+            self.wfile.flush()
+
+            msg_stop = {"type":"message_stop"}
+            self.wfile.write(f"event: message_stop\ndata: {json.dumps(msg_stop)}\n\n".encode())
+            self.wfile.flush()
+
+server = http.server.HTTPServer(("127.0.0.1", PORT), Handler)
+server.serve_forever()
+PYEOF
+        python3 "$mock_script" "$MOCK_ANTHROPIC_PORT" &
+        MOCK_PID=$!
+        sleep 0.5
+
+        local _mock_url="http://127.0.0.1:${MOCK_ANTHROPIC_PORT}/v1/messages"
+        cat > /tmp/cerebrum-config-test.toml << HEREDOC
+[categories.FILE_READING]
+description = "Reading files"
+threshold = 3
+priority = 1
+
+[categories.SYNTAX_FIX]
+description = "Fixing bugs"
+threshold = 3
+priority = 2
+patterns = [
+  { regex = '(?i)\\\\b(?:fix|correct|repair|patch)\\\\s+(?:this|the|my|a)\\\\s+(?:bug|error|issue)', weight = 3 }
+]
+
+[categories.COMPLEX_REASONING]
+description = "Complex reasoning"
+threshold = 3
+priority = 3
+
+[categories.CASUAL]
+description = "Casual"
+threshold = 1
+priority = 4
+
+[routing.FILE_READING]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.SYNTAX_FIX]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.COMPLEX_REASONING]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.CASUAL]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.DEFAULT]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+HEREDOC
+
+        export ANTHROPIC_API_KEY="sk-ant-test-key"
+
+        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+            log_fail "Failed to start server"
+            stop_mock_anthropic_server
+            unset ANTHROPIC_API_KEY
+            return 1
+        fi
+
+        local _resp _code _body
+        _resp=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"stream":true}' \
+            "$COMPLETION_URL" 2>/dev/null) || _resp="ERROR"
+        _code=$(printf '%s' "$_resp" | tail -1)
+        _body=$(printf '%s' "$_resp" | sed '$d')
+
+        local all_pass=true
+
+        if [ "$_code" = "200" ]; then
+            log_pass "Streaming returns HTTP 200"
+        else
+            log_fail "Streaming expected 200, got $_code"
+            all_pass=false
+        fi
+
+        # Verify SSE content type
+        local _ct
+        _ct=$(curl -s -o /dev/null -w "%{content_type}" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"stream":true}' \
+            "$COMPLETION_URL" 2>/dev/null) || _ct=""
+        if echo "$_ct" | grep -q "text/event-stream"; then
+            log_pass "Content-Type is text/event-stream"
+        else
+            log_fail "Expected text/event-stream, got: $_ct"
+            all_pass=false
+        fi
+
+        # Verify OpenAI chunk format (chatcmpl- IDs)
+        if printf '%s' "$_body" | grep -q "chatcmpl-"; then
+            log_pass "SSE contains OpenAI chunk IDs (chatcmpl-)"
+        else
+            log_fail "Missing OpenAI chunk IDs in: $(printf '%s' "$_body" | head -c 300)"
+            all_pass=false
+        fi
+
+        # Verify text content
+        if printf '%s' "$_body" | grep -q "Hello "; then
+            log_pass "SSE contains translated text content"
+        else
+            log_fail "Missing translated text in SSE stream"
+            all_pass=false
+        fi
+
+        # Verify [DONE] terminator
+        if printf '%s' "$_body" | grep -q "\[DONE\]"; then
+            log_pass "SSE contains [DONE] terminator"
+        else
+            log_fail "Missing [DONE] terminator"
+            all_pass=false
+        fi
+
+        # Verify finish_reason
+        if printf '%s' "$_body" | grep -q '"finish_reason":"stop"'; then
+            log_pass "SSE contains finish_reason=stop"
+        else
+            log_fail "Missing finish_reason=stop in SSE"
+            all_pass=false
+        fi
+
+        stop_server
+        stop_mock_anthropic_server
+        unset ANTHROPIC_API_KEY
+        trap cleanup EXIT
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
+    test_o2a_translation_error() {
+        section "OpenAI→Anthropic Translation: error response"
+        trap stop_mock_anthropic_server EXIT
+
+        start_mock_anthropic_server "error"
+
+        local _mock_url="http://127.0.0.1:${MOCK_ANTHROPIC_PORT}/v1/messages"
+        cat > /tmp/cerebrum-config-test.toml << HEREDOC
+[categories.FILE_READING]
+description = "Reading files"
+threshold = 3
+priority = 1
+
+[categories.SYNTAX_FIX]
+description = "Fixing bugs"
+threshold = 3
+priority = 2
+patterns = [
+  { regex = '(?i)\\\\b(?:fix|correct|repair|patch)\\\\s+(?:this|the|my|a)\\\\s+(?:bug|error|issue)', weight = 3 }
+]
+
+[categories.COMPLEX_REASONING]
+description = "Complex reasoning"
+threshold = 3
+priority = 3
+
+[categories.CASUAL]
+description = "Casual"
+threshold = 1
+priority = 4
+
+[routing.FILE_READING]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.SYNTAX_FIX]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.COMPLEX_REASONING]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.CASUAL]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.DEFAULT]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+HEREDOC
+
+        export ANTHROPIC_API_KEY="sk-ant-test-key"
+
+        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+            log_fail "Failed to start server"
+            stop_mock_anthropic_server
+            unset ANTHROPIC_API_KEY
+            return 1
+        fi
+
+        local _resp _code _body _err_type _err_msg
+        _resp=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}]}' \
+            "$COMPLETION_URL" 2>/dev/null) || _resp="ERROR"
+        _code=$(printf '%s' "$_resp" | tail -1)
+        _body=$(printf '%s' "$_resp" | sed '$d')
+
+        local all_pass=true
+
+        # Mock returns 429 → client should see 429
+        if [ "$_code" = "429" ]; then
+            log_pass "Error status 429 forwarded to client"
+        else
+            log_fail "Expected 429, got $_code (body: $(printf '%s' "$_body" | head -c 200))"
+            all_pass=false
+        fi
+
+        # Verify error is translated to OpenAI envelope
+        _err_type=$(printf '%s' "$_body" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+print(d.get('error',{}).get('type',''))
+" 2>/dev/null || echo "")
+        _err_msg=$(printf '%s' "$_body" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+print(d.get('error',{}).get('message',''))
+" 2>/dev/null || echo "")
+
+        if [ "$_err_type" = "rate_limit_error" ]; then
+            log_pass "Error type=rate_limit_error (translated from Anthropic)"
+        else
+            log_fail "Expected error.type=rate_limit_error, got: $_err_type"
+            all_pass=false
+        fi
+
+        if [ "$_err_msg" = "Mock rate limit" ]; then
+            log_pass "Error message preserved from upstream"
+        else
+            log_fail "Expected error.message='Mock rate limit', got: '$_err_msg'"
+            all_pass=false
+        fi
+
+        stop_server
+        stop_mock_anthropic_server
+        unset ANTHROPIC_API_KEY
+        trap cleanup EXIT
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
     run_automated_tests() {
         echo ""
         echo "╔══════════════════════════════════════════════════════════════════╗"
@@ -1220,6 +1811,11 @@ except Exception as e:
         test_anthropic_rejects_non_json
         test_anthropic_error_envelope_shape
         test_anthropic_openapi_documents_endpoint
+
+        # ── OpenAI → Anthropic Translation (translate-openai-to-anthropic plan) ──
+        test_o2a_translation_non_streaming
+        test_o2a_translation_streaming
+        test_o2a_translation_error
         
         echo ""
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

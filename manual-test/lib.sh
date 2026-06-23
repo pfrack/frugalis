@@ -16,6 +16,7 @@ BINARY="./target/release/cerebrum"
 HOST="${HOST:-127.0.0.1:10000}"
 HEALTH_URL="http://$HOST/health"
 CLASSIFY_URL="http://$HOST/v1/classify"
+COMPLETION_URL="http://$HOST/v1/chat/completions"
 MESSAGES_URL="http://$HOST/v1/messages"
 TOKEN="${PROXY_API_BEARER_TOKEN:-test-token-123}"
 
