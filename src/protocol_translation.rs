@@ -1,4 +1,5 @@
 use serde_json::json;
+use tracing::debug;
 
 /// Tracks state across an Anthropic→OpenAI streaming translation session.
 /// Each field is updated as Anthropic SSE events arrive and used to
@@ -413,7 +414,10 @@ pub fn translate_response(body: &serde_json::Value) -> Result<serde_json::Value,
                 let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let input = block.get("input").cloned().unwrap_or(json!({}));
-                let arguments = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
+                let arguments = serde_json::to_string(&input).unwrap_or_else(|e| {
+                    debug!("tool input serialization failed: {e}");
+                    "{}".to_string()
+                });
                 tool_calls.push(json!({
                     "id": id,
                     "type": "function",
@@ -681,7 +685,10 @@ pub fn translate_stream_event(
                     // No chunk emitted at start — content arrives in deltas.
                     None
                 }
-                _ => None,
+                _ => {
+                    debug!("unknown content_block_start type: {btype}");
+                    None
+                }
             }
         }
 
@@ -745,7 +752,10 @@ pub fn translate_stream_event(
                         }]),
                     ))
                 }
-                _ => None,
+                _ => {
+                    debug!("unknown content_block_delta type: {dtype}");
+                    None
+                }
             }
         }
 
@@ -818,7 +828,10 @@ pub fn translate_stream_event(
         "message_stop" => Some("data: [DONE]\n\n".to_string()),
 
         // Ping and other events — ignore.
-        _ => None,
+        _ => {
+            debug!("unhandled SSE event type: {event_type}");
+            None
+        }
     }
 }
 

@@ -1119,7 +1119,26 @@ pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
 ///    — the client must parse the body as SSE and must not cache error
 ///    events (caching would replay a transient error long after it has
 ///    been resolved).
-async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Response {
+async fn handle_streaming_error(upstream_response: reqwest::Response) -> Response {
+    handle_streaming_error_with_transform(upstream_response, |body, _status| body).await
+}
+
+/// Handle a non-2xx upstream response for an Anthropic upstream.
+/// Translates the Anthropic error body to OpenAI error envelope,
+/// returns an SSE error event (matching the format used by
+/// `handle_streaming_error`) with the upstream's status code.
+async fn handle_anthropic_streaming_error(upstream_response: reqwest::Response) -> Response {
+    handle_streaming_error_with_transform(upstream_response, |body, status| {
+        protocol_translation::translate_error(&body, status)
+    }).await
+}
+
+/// Shared implementation for streaming error handling. Takes a transform
+/// closure that converts the raw error body into the desired SSE error text.
+async fn handle_streaming_error_with_transform(
+    mut upstream_response: reqwest::Response,
+    transform: impl FnOnce(String, u16) -> String,
+) -> Response {
     // Bound the upstream error body to 2 KB to cap latency and memory on
     // large error payloads.
     const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
@@ -1142,53 +1161,14 @@ async fn handle_streaming_error(mut upstream_response: reqwest::Response) -> Res
         .chars()
         .take(512)
         .collect::<String>();
-    let sse_error = format_sse_error_event(&error_text);
+    let status = upstream_response.status().as_u16();
+    let transformed = transform(error_text, status);
+    let sse_error = format_sse_error_event(&transformed);
     let mut resp = Response::new(Body::from(sse_error));
     // Forward the upstream's status code to the client so it can react
     // to the specific failure class.
     *resp.status_mut() = upstream_response.status();
     // Mark the response as an uncacheable SSE stream.
-    resp.headers_mut().insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static("text/event-stream"),
-    );
-    resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("no-cache"),
-    );
-    resp
-}
-
-/// Handle a non-2xx upstream response for an Anthropic upstream.
-/// Translates the Anthropic error body to OpenAI error envelope,
-/// returns an SSE error event (matching the format used by
-/// `handle_streaming_error`) with the upstream's status code.
-async fn handle_anthropic_streaming_error(mut upstream_response: reqwest::Response) -> Response {
-    const MAX_ERROR_BODY_BYTES: usize = 2 * 1024;
-    let mut error_bytes = Vec::new();
-    loop {
-        match upstream_response.chunk().await {
-            Ok(Some(chunk)) => {
-                if error_bytes.len() + chunk.len() > MAX_ERROR_BODY_BYTES {
-                    break;
-                }
-                error_bytes.extend_from_slice(&chunk);
-            }
-            Ok(None) => break,
-            Err(_) => break,
-        }
-    }
-    let error_body = String::from_utf8_lossy(&error_bytes)
-        .chars()
-        .take(512)
-        .collect::<String>();
-    let translated = protocol_translation::translate_error(
-        &error_body,
-        upstream_response.status().as_u16(),
-    );
-    let sse_error = format_sse_error_event(&translated);
-    let mut resp = Response::new(Body::from(sse_error));
-    *resp.status_mut() = upstream_response.status();
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("text/event-stream"),
@@ -1231,9 +1211,21 @@ fn handle_anthropic_streaming_response(
                     match chunk {
                         Some(Ok(bytes)) => {
                             buffer.extend_from_slice(&bytes);
+                            const MAX_SSE_BUFFER: usize = 1024 * 1024; // 1 MB
+                            if buffer.len() > MAX_SSE_BUFFER {
+                                let sse_error = format_sse_error_event("SSE buffer exceeded 1 MB limit");
+                                let _ = tx.send(Bytes::from(sse_error)).await;
+                                stream_status = "buffer_overflow";
+                                break;
+                            }
                             let events = protocol_translation::parse_sse_events(&buffer);
                             if !events.is_empty() {
-                                buffer.clear();
+                                // Drain only up to last complete event boundary; keep partial tail.
+                                if let Some(last_boundary) = buffer.windows(2).rposition(|w| w == b"\n\n") {
+                                    buffer.drain(..last_boundary + 2);
+                                } else {
+                                    buffer.clear();
+                                }
                                 for (event_type, data) in &events {
                                     if let Some(openai_chunk) =
                                         protocol_translation::translate_stream_event(
