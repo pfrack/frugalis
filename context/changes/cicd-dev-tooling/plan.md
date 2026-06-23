@@ -485,10 +485,10 @@ Update `context/foundation/test-plan.md` §3-§6 to reference the new justfile t
 
 #### Automated
 
-- [x] 5.1 `grep -c "just" context/foundation/test-plan.md` shows new references
-- [x] 5.2 No broken markdown links in test-plan.md
+- [x] 5.1 `grep -c "just" context/foundation/test-plan.md` shows new references — ef44243
+- [x] 5.2 No broken markdown links in test-plan.md — ef44243
 
 #### Manual
 
-- [x] 5.3 All `cargo test <name>` references in §6 replaced with `just test TEST=<name>`
-- [x] 5.4 Phase 4 row accurately reflects new tooling
+- [x] 5.3 All `cargo test <name>` references in §6 replaced with `just test TEST=<name>` — ef44243
+- [x] 5.4 Phase 4 row accurately reflects new tooling — ef44243
