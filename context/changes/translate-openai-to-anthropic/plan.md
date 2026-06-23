@@ -273,11 +273,11 @@ Error translation tests:
 
 #### Automated
 
-- [x] 3.1 `cargo test protocol_translation` — all unit tests pass
-- [x] 3.2 `cargo test test_completion_handler_anthropic_translation` — e2e tests pass
-- [x] 3.3 `cargo test test_completion_handler_anthropic_streaming` — streaming e2e tests pass
-- [x] 3.4 `cargo test test_completion_handler_anthropic_error` — error e2e tests pass
+- [x] 3.1 `cargo test protocol_translation` — all unit tests pass — b8bbf08
+- [x] 3.2 `cargo test test_completion_handler_anthropic_translation` — e2e tests pass — b8bbf08
+- [x] 3.3 `cargo test test_completion_handler_anthropic_streaming` — streaming e2e tests pass — b8bbf08
+- [x] 3.4 `cargo test test_completion_handler_anthropic_error` — error e2e tests pass — b8bbf08
 
 #### Manual
 
-- [x] 3.5 Review test coverage against research doc edge cases (§4)
+- [x] 3.5 Review test coverage against research doc edge cases (§4) — b8bbf08
