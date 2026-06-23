@@ -251,23 +251,23 @@ Error translation tests:
 
 #### Automated
 
-- [x] 1.1 `cargo build` compiles without errors
-- [x] 1.2 `cargo test protocol_translation` — all unit tests pass
+- [x] 1.1 `cargo build` compiles without errors — 16b3527
+- [x] 1.2 `cargo test protocol_translation` — all unit tests pass — 16b3527
 
 #### Manual
 
-- [x] 1.3 Review translation functions against research doc §1-§4 for completeness
+- [x] 1.3 Review translation functions against research doc §1-§4 for completeness — 16b3527
 
 ### Phase 2: Handler Integration
 
 #### Automated
 
-- [ ] 2.1 `cargo build` compiles without errors
-- [ ] 2.2 `cargo test` — all existing tests still pass (no regressions)
+- [x] 2.1 `cargo build` compiles without errors
+- [x] 2.2 `cargo test` — all existing tests still pass (no regressions)
 
 #### Manual
 
-- [ ] 2.3 Send OpenAI-format request to `/v1/chat/completions` with Anthropic route, verify response is OpenAI format
+- [x] 2.3 Send OpenAI-format request to `/v1/chat/completions` with Anthropic route, verify response is OpenAI format
 
 ### Phase 3: Testing
 
