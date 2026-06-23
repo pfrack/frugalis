@@ -5373,6 +5373,165 @@ mod tests {
         let content = std::fs::read_to_string(&nested).expect("file should be readable");
         assert_eq!(content, INIT_TEMPLATE);
     }
+
+    // ── OpenAI → Anthropic translation e2e tests ──────────────────────────
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_anthropic_translation() {
+        let env = "TEST_TRANSLATE_O2A";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        // Mock Anthropic upstream — receives Anthropic Messages format,
+        // returns Anthropic Messages response.
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .header("x-api-key", "sk-ant-test")
+                .header("anthropic-version", "2023-06-01")
+                .body_contains("\"system\"")
+                .body_contains("\"max_tokens\"");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"id":"msg_1","type":"message","role":"assistant","model":"sf-model","content":[{"type":"text","text":"translated response"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}"#,
+                );
+        });
+        // Send OpenAI-format request to /v1/chat/completions.
+        // "fix this bug" matches SYNTAX_FIX → routes to anthropic upstream.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4","messages":[{"role":"system","content":"You are helpful."},{"role":"user","content":"fix this bug"}],"max_tokens":100}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        let json = parse_json_body(response).await;
+        // Verify response is valid OpenAI Chat Completions format.
+        assert_eq!(
+            json.get("object").and_then(|v| v.as_str()),
+            Some("chat.completion"),
+            "expected chat.completion object, got: {json}"
+        );
+        let choices = json.get("choices").and_then(|v| v.as_array()).expect("choices array");
+        assert_eq!(choices.len(), 1);
+        let message = choices[0].get("message").expect("message field");
+        assert_eq!(
+            message.get("content").and_then(|v| v.as_str()),
+            Some("translated response")
+        );
+        assert_eq!(
+            choices[0].get("finish_reason").and_then(|v| v.as_str()),
+            Some("stop")
+        );
+        let usage = json.get("usage").expect("usage field");
+        assert_eq!(usage.get("prompt_tokens").and_then(|v| v.as_u64()), Some(10));
+        assert_eq!(usage.get("completion_tokens").and_then(|v| v.as_u64()), Some(5));
+        assert_eq!(usage.get("total_tokens").and_then(|v| v.as_u64()), Some(15));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_anthropic_streaming() {
+        let env = "TEST_TRANSLATE_O2A_STREAM";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        // Mock returns Anthropic SSE stream.
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(
+                    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_s1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"sf-model\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello \"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"world\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+                );
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some("text/event-stream"),
+        );
+        mock.assert();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body_str = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        // Verify OpenAI SSE format.
+        assert!(body_str.contains("chatcmpl-"), "expected OpenAI chunk IDs, got: {body_str}");
+        assert!(body_str.contains("\"role\":\"assistant\""), "expected role chunk, got: {body_str}");
+        assert!(body_str.contains("Hello "), "expected text content, got: {body_str}");
+        assert!(body_str.contains("\"finish_reason\":\"stop\""), "expected finish_reason, got: {body_str}");
+        assert!(body_str.contains("[DONE]"), "expected [DONE] terminator, got: {body_str}");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_anthropic_error() {
+        let env = "TEST_TRANSLATE_O2A_ERR";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        // Mock returns Anthropic error.
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(429)
+                .header("content-type", "application/json")
+                .body(r#"{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        mock.assert();
+        let json = parse_json_body(response).await;
+        // Verify error is translated to OpenAI envelope.
+        let error = json.get("error").expect("error field");
+        assert_eq!(
+            error.get("type").and_then(|v| v.as_str()),
+            Some("rate_limit_error"),
+            "expected rate_limit_error type, got: {json}"
+        );
+        assert_eq!(
+            error.get("message").and_then(|v| v.as_str()),
+            Some("Too many requests"),
+            "expected error message, got: {json}"
+        );
+    }
 }
 
 #[cfg(test)]

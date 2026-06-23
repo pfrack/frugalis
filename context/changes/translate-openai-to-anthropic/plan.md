@@ -262,22 +262,22 @@ Error translation tests:
 
 #### Automated
 
-- [x] 2.1 `cargo build` compiles without errors
-- [x] 2.2 `cargo test` — all existing tests still pass (no regressions)
+- [x] 2.1 `cargo build` compiles without errors — 28879b3
+- [x] 2.2 `cargo test` — all existing tests still pass (no regressions) — 28879b3
 
 #### Manual
 
-- [x] 2.3 Send OpenAI-format request to `/v1/chat/completions` with Anthropic route, verify response is OpenAI format
+- [x] 2.3 Send OpenAI-format request to `/v1/chat/completions` with Anthropic route, verify response is OpenAI format — 28879b3
 
 ### Phase 3: Testing
 
 #### Automated
 
-- [ ] 3.1 `cargo test protocol_translation` — all unit tests pass
-- [ ] 3.2 `cargo test test_completion_handler_anthropic_translation` — e2e tests pass
-- [ ] 3.3 `cargo test test_completion_handler_anthropic_streaming` — streaming e2e tests pass
-- [ ] 3.4 `cargo test test_completion_handler_anthropic_error` — error e2e tests pass
+- [x] 3.1 `cargo test protocol_translation` — all unit tests pass
+- [x] 3.2 `cargo test test_completion_handler_anthropic_translation` — e2e tests pass
+- [x] 3.3 `cargo test test_completion_handler_anthropic_streaming` — streaming e2e tests pass
+- [x] 3.4 `cargo test test_completion_handler_anthropic_error` — error e2e tests pass
 
 #### Manual
 
-- [ ] 3.5 Review test coverage against research doc edge cases (§4)
+- [x] 3.5 Review test coverage against research doc edge cases (§4)
