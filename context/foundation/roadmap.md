@@ -4,7 +4,7 @@ project: cerebrum
 version: 1
 status: draft
 created: 2026-05-26
-updated: 2026-06-11
+updated: 2026-06-23
 prd_version: 1
 main_goal: speed
 top_blocker: time
@@ -55,7 +55,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-12 | in-memory-db-fallback | persistence always available: 3-tier backend config (`memory` / `sqlite` / `postgres`) via `DB_BACKEND` env; enables zero-dep dev startup and real persistence in tests | S-13 | FR-005, NFR (testing) | proposed |
 | S-13 | move-all-config-to-file | Config: eliminate all hardcoded values — 25 hardcoded Rust values + 19 env var reads moved to config.toml; env vars reduced to API_KEYS + auth creds + DATABASE_URL only; categories and regex patterns fully configurable | S-09a, **S-14** | FR-002, FR-003 | done |
 | S-14 | config-format-upgrade | Config: upgrade format to support YAML + external pattern files; add `--validate` and `--migrate-config` CLI tools | **S-13** | FR-002, FR-003 | done |
-| S-15 | translate-openai-to-anthropic | route existing `/v1/chat/completions` traffic to Anthropic-protocol upstreams (Claude API, DeepSeek, Kimi, Z.ai) with full body + streaming translation | S-01e | FR-003 | researched |
+| S-15 | translate-openai-to-anthropic | route existing `/v1/chat/completions` traffic to Anthropic-protocol upstreams (Claude API, DeepSeek, Kimi, Z.ai) with full body + streaming translation | S-01e | FR-003 | done |
 | S-16 | translate-anthropic-to-openai | new `/v1/messages` endpoint accepting Anthropic Messages protocol, translating to OpenAI Chat Completions for upstream routing | S-15 | FR-003 | researched |
 
 ## Streams
@@ -419,7 +419,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Blockers:** —
 - **Unknowns:** —
 - **Risk:** Medium — adds a translation layer in the request/response path. Streaming translation (Anthropic SSE → OpenAI chunks) is straightforward since Anthropic provides structured typed events. The shared translation module produced here becomes the foundation for S-16. Research complete: `context/changes/translate-openai-to-anthropic/research.md`.
-- **Status:** researched
+- **Status:** done
 
 ### S-16: Protocol translation — Anthropic client → OpenAI upstream
 
@@ -502,6 +502,8 @@ All roadmap items are active or completed; no currently parked items.
 - **S-07b: A `CategoryConfig` struct is defined with `name`, `description`, `regex_threshold`, and `priority` fields. A static `CATEGORIES: &[CategoryConfig]` array serves as the single source of truth for all four intent categories. `RegexClassifier` consumes `CategoryConfig` at construction time (replacing scattered `CAT_*` constants, thresholds, and hardcoded priority ordering). The same `CategoryConfig` array feeds `LLMClassifier`'s prompt template generation (iterating `.description` fields) so both classifiers operate on the same category set without drift.** — Archived 2026-06-08 → `context/archive/2026-06-07-shared-category-config/`. Lesson: —.
 
 - **S-09: An `LLMClassifier` struct implements `IntentClassify`, sending the user prompt to a small/cheap classification model (e.g., `gpt-4o-mini`) and parsing the intent category from the response. Its config carries: model name, endpoint, `UPSTREAM_API_KEY` env var, and a classification prompt template that instructs the model to output one of the known categories. The `AppState` can hold either `RegexClassifier` or `LLMClassifier` behind the same `Arc<dyn IntentClassify>`.** — Archived 2026-06-08 → `context/archive/2026-06-07-llm-classifier/`. Lesson: —.
+
+- **S-15: The existing `POST /v1/chat/completions` endpoint can route to Anthropic-protocol upstreams with full body + streaming translation.** — Archived 2026-06-23 → `context/archive/2026-06-22-translate-openai-to-anthropic/`. Lesson: —.
 - **S-13: Move All Config to File** — Zero hardcoded configuration in Rust — everything lives in `config.toml`. Environment variables reduced to strictly secrets. — Archived 2026-06-11 → `context/archive/2026-06-10-move-all-config-to-file/`. Lesson: —.
 
 - **S-14: Config Format Upgrade — Multi-Format + External Patterns** — Upgrade Cerebrum's configuration system to support both YAML and TOML formats (via serde derives) and externalize regex patterns into pattern files. Users can choose configuration format (YAML favored by DevOps, TOML for Rust-native). Regex patterns live in separate `*.patterns` files with `weight | regex` format, eliminating escaping issues. Fully backward compatible with existing `config.toml`. Adds CLI tools: `--validate` checks config and patterns; `--migrate-config` converts old configs to YAML + pattern files. — Archived 2026-06-13 → `context/archive/2026-06-11-config-format-upgrade/`. Lesson: —.
