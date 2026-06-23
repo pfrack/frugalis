@@ -59,10 +59,9 @@ if [ "$FEWSHOT_MODE" = true ]; then
 fi
 
 # ============================================================================
-# Automated test functions (--auto mode) — sourced from lib.sh
+# Automated test functions (--auto mode) — uses helpers from lib.sh
 # ============================================================================
 if [ "$AUTO_MODE" = true ]; then
-    source "$SCRIPT_DIR/lib.sh"
     trap cleanup EXIT
 
     # ============================================================================

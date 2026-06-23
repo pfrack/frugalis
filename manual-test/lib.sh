@@ -150,6 +150,3 @@ except:
     echo "$category"
 }
 
-# Classify a prompt via the /v1/messages (Anthropic pass-through) endpoint.
-# Sends a body shaped like the Anthropic Messages API. Returns the category
-

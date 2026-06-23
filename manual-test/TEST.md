@@ -1,179 +1,105 @@
-# Automated Integration Tests: Shared Category Configuration (S-07b)
+# Automated Integration Tests
 
 ## Overview
 
-This script provides fully automated integration tests for the `shared-category-config` change. It:
-
-- Builds the server binary (release mode)
-- For each test scenario:
-  - Creates the appropriate `config.toml`
-  - Starts the server in the background
-  - Waits for the health endpoint
-  - Runs classification checks via HTTP API
-  - Validates results
-  - Stops the server
-- Reports a pass/fail summary
+`run.sh --auto` runs the full integration test suite. For each test scenario it:
+- Creates an appropriate `config.toml` (or uses none for hardcoded defaults)
+- Starts the server in the background
+- Validates classification via `/v1/classify` or `/v1/messages`
+- Stops the server and cleans up
 
 ## Prerequisites
 
-- Rust toolchain installed
-- `cargo` available
-- `PROXY_API_BEARER_TOKEN` environment variable set (any non-empty value for tests)
-- Server port 10000 available (or set `PORT` env var)
+- Rust toolchain (`cargo`)
+- `PROXY_API_BEARER_TOKEN` env var (any non-empty value)
+- Port 10000 available (or set `HOST=host:port`)
 
 ## Usage
 
 ```bash
-cd /home/pawel/code/cerebrum
-./test-shared-category-config.sh
+cd manual-test
+./run.sh --auto
 ```
 
-The script will:
-1. Build `target/release/cerebrum` if needed
-2. Run 7 test scenarios sequentially
-3. Output colored pass/fail results
-4. Exit with code 0 on success, 1 on any failure
+Exit code 0 on success, non-zero on failure.
 
 ## Test Scenarios
 
-### 1. Hardcoded Defaults
-No configuration file present. Verifies server starts with hardcoded `CategoryConfig` and all four categories classify correctly using the exact same prompts as unit tests:
-
+### 1. Hardcoded Defaults (no config file)
+No configuration file present. Verifies all four categories classify correctly:
 - `"please read the file src/main.rs"` → `FILE_READING`
 - `"fix this bug please"` → `SYNTAX_FIX`
 - `"architect a distributed rate limiter"` → `COMPLEX_REASONING`
 - `"hello"` → `CASUAL`
 
 ### 2. Threshold Override
-Creates `config.toml` with `SYNTAX_FIX` threshold raised from 3 to 5. Verifies that `"fix this bug please"` no longer matches `SYNTAX_FIX` and falls back to `CASUAL`.
+`FILE_READING` threshold set to 100 (unreachable). Verifies that `"please read the file src/main.rs"` no longer matches `FILE_READING` and falls back to `CASUAL`.
 
 ### 3. Partial Categories
-Creates `config.toml` with only `FILE_READING` and `CASUAL` categories. Verifies:
-- Those two categories still work
-- Missing categories are not in routing table
-- Classification for missing categories falls back to `CASUAL`
-- No panics or errors
+Only `FILE_READING` and `CASUAL` configured. Verifies those two work and missing categories fall back gracefully.
 
 ### 4. Legacy routing.toml
-Tests backward compatibility with the old `routing.toml` format. Verifies server starts when no `config.toml` exists and uses hardcoded categories + routing from `routing.toml` if present (or pure hardcoded if not).
+Tests backward compatibility — server starts with no `config.toml` and uses hardcoded defaults.
 
 ### 5. Combined Config
-Creates full `config.toml` with all four categories in `[[categories]]` plus `[FALLBACK]` routing. Verifies all four categories route correctly to their expected default models:
-- `FILE_READING` → `meta/llama-3.1-70b-instruct` (via `DEFAULT_MODEL_READING`)
-- `SYNTAX_FIX` → `meta/llama-3.1-8b-instruct` (via `DEFAULT_MODEL`)
-- `COMPLEX_REASONING` → `meta/llama-3.3-70b-instruct` (via `DEFAULT_MODEL_COMPLEX`)
-- `CASUAL` → `meta/llama-3.1-8b-instruct` (via `DEFAULT_MODEL`)
+Full `config.toml` with all four categories plus `[FALLBACK]` routing. All categories route to expected models.
 
-### 6. Field Value Integrity
-Tests that all `CategoryConfig` fields are respected by setting extreme values:
-- `FILE_READING` threshold = 100 (effectively unreachable)
-- `FILE_READING` `model_env_var = "CUSTOM_MODEL"`
-Verifies threshold override works and no crashes.
+### 6. Field Integrity
+Extreme values (threshold=100, custom `model_env_var`). Verifies overrides work and no crashes.
 
 ### 7. Negative Suppression
-Regression test for the `NEGATIVE_META` mechanism. Verifies that `"read the architecture document"` does **not** classify as `COMPLEX_REASONING` (since `"read"` matches `FILE_READING`, which suppresses `COMPLEX_REASONING` per negative metadata).
+Regression test: `"read the architecture document"` does **not** classify as `COMPLEX_REASONING` because `"read"` triggers `FILE_READING` suppression.
+
+### 8. Embedded Config
+Config embedded in routing file (no separate config path). Verifies server accepts it.
+
+### 9. Validation CLI
+`--validate-config` flag parses and validates config without starting the server.
+
+### 10. YAML Support
+`.yaml` config file accepted alongside `.toml`.
+
+### 11. External Patterns
+Pattern files loaded from disk for regex classifier customization.
+
+### 12–13. Anthropic Passthrough
+`/v1/messages` endpoint forwards to Anthropic with correct headers, model routing, and streaming support.
+
+### 14. Legacy Fallback Routing
+Old `[FALLBACK]` config format still works for backward compatibility.
 
 ## How It Works
 
-The script:
 1. **Builds** the binary once with `cargo build --release`
 2. For each test:
-   - Writes a specific `config.toml` to `/tmp/cerebrum-config-test.toml`
-   - Sets `CONFIG_PATH` env var to that file
-   - Launches the server in the background: `./target/release/cerebrum`
-   - Polls `http://localhost:10000/health` until it returns 200
-   - Sends HTTP POST requests to `/v1/chat/completions` with test prompts
-   - Extracts the `model` field from the JSON response
-   - Maps the model name to an expected category (heuristic based on default model constants)
-   - Validates the classification matches expectation
-   - Kills the server process
-   - Cleans up the temp config file
-3. Prints a summary table
-
-## Model → Category Mapping
-
-The script infers classification from the model selected (since the API doesn't expose category directly in response). Default mappings:
-
-| Model Pattern | Category |
-|--------------|----------|
-| `70b` or `reading` | `FILE_READING` |
-| `3.3` or `complex` | `COMPLEX_REASONING` |
-| `coder` or `qwen` | `SYNTAX_FIX` |
-| `8b` or `nano` | `CASUAL` |
-
-This works because the default routing maps categories to specific models.
-
-## Environment Variables
-
-- `PROXY_API_BEARER_TOKEN` - required (any non-empty string for tests)
-- `HOST` - optional, defaults to `127.0.0.1:10000`
-- `PORT` - optional, server port (default 10000)
-- Other server env vars (`NVIDIA_API_KEY`, etc.) are set to dummy values by the script where needed
+   - Writes a `config.toml` to `/tmp/cerebrum-config-*.toml`
+   - Launches the server with that config
+   - Polls `http://localhost:10000/health` until ready
+   - Sends classification requests and validates responses
+   - Kills the server
+3. Prints pass/fail summary
 
 ## Troubleshooting
 
 ### "Server failed to start"
-Check that:
-- Port 10000 is not in use
-- You have permission to bind to the port
-- Binary exists (`cargo build --release` succeeded)
-
-Look at the log file: `/tmp/cerebrum-test-*.log`
-
-### "ERROR" responses from classify()
-Could be:
-- Server not started yet (wait failure)
-- HTTP error (401, 500, etc.) - check server logs
-- Invalid JSON response
+- Port 10000 in use? Check `lsof -i :10000`
+- Build failed? Run `cargo build --release` manually
+- Check `/tmp/cerebrum-test-*.log` for server errors
 
 ### Classification mismatches
-If a test fails with unexpected category:
-1. Check the server logs for warnings
-2. Verify the config was loaded correctly (look for `loaded N categories from config.toml` in logs)
-3. Check that the prompt actually matches the category's patterns (see unit tests for exact expected prompts)
+- Look for `loaded N categories from config.toml` in server logs
+- Verify prompts match expected patterns (see unit tests in `src/intent_classifier.rs`)
+- Check config syntax is valid TOML
+
+### Authentication errors
+- `PROXY_API_BEARER_TOKEN` must be set (any non-empty value)
+- Defaults to `test-token-123` if not explicitly set
 
 ## Cleanup
 
-The script uses `trap` to ensure cleanup on exit. Manual cleanup if script aborted:
+The script uses `trap` for cleanup. Manual cleanup if needed:
 
 ```bash
 pkill -f cerebrum 2>/dev/null || true
-rm -f /tmp/cerebrum-config-*.toml
-rm -f /tmp/cerebrum-test-*.log
+rm -f /tmp/cerebrum-config-*.toml /tmp/cerebrum-test-*.log
 ```
-
-## Integration with CI
-
-To run in CI/CD:
-
-```bash
-#!/bin/bash
-set -euo pipefail
-
-# Build
-cargo build --release
-
-# Set dummy token for tests
-export PROXY_API_BEARER_TOKEN="ci-test-token"
-
-# Run tests
-./test-shared-category-config.sh
-```
-
-## Success Criteria
-
-All 7 tests must pass:
-- [x] Hardcoded defaults work
-- [x] Threshold override respected
-- [x] Partial categories handled
-- [x] Legacy routing.toml supported
-- [x] Combined config works
-- [x] Field values wired correctly
-- [x] Negative suppression intact
-
-## Reference
-
-- Implementation plan: `context/changes/shared-category-config/plan.md`
-- Code: `src/intent_classifier.rs`, `src/config.rs`
-- Manual guide: `manual-test-shared-category-config.md` (for interactive testing)
-- Automated runner: `test-shared-category-config.sh` (this file)
