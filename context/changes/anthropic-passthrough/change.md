@@ -1,8 +1,8 @@
 ---
 id: anthropic-passthrough
-status: implemented
+status: impl_reviewed
 created: 2026-06-22
-updated: 2026-06-22
+updated: 2026-06-23
 user: pfrack
 tags: [anthropic, proxy, streaming, pass-through, endpoint]
 ---
