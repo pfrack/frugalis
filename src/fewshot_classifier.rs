@@ -321,11 +321,12 @@ impl IntentClassify for FewShotClassifier {
             let route = self.routing.get(&category).unwrap_or(&self.fallback_entry);
             return ClassificationResult {
                 category,
-                model: route.model.clone(),
-                endpoint: route.endpoint.clone(),
+                model: route.primary().model.clone(),
+                endpoint: route.primary().endpoint.clone(),
                 tier: ClassificationTier::FewShot,
-                provider_type: route.provider_type.clone(),
-                api_key_env: route.api_key_env.clone(),
+                provider_type: route.primary().provider_type.clone(),
+                api_key_env: route.primary().api_key_env.clone(),
+                providers: route.providers.clone(),
             };
         }
 
@@ -342,11 +343,12 @@ impl IntentClassify for FewShotClassifier {
                 let route = self.routing.get(&category).unwrap_or(&self.fallback_entry);
                 ClassificationResult {
                     category,
-                    model: route.model.clone(),
-                    endpoint: route.endpoint.clone(),
+                    model: route.primary().model.clone(),
+                    endpoint: route.primary().endpoint.clone(),
                     tier: ClassificationTier::FewShot,
-                    provider_type: route.provider_type.clone(),
-                    api_key_env: route.api_key_env.clone(),
+                    provider_type: route.primary().provider_type.clone(),
+                    api_key_env: route.primary().api_key_env.clone(),
+                    providers: route.providers.clone(),
                 }
             }
             _ => ClassificationResult {
@@ -356,6 +358,7 @@ impl IntentClassify for FewShotClassifier {
                 tier: ClassificationTier::Fallback,
                 provider_type: String::new(),
                 api_key_env: None,
+                providers: vec![],
             },
         }
     }
@@ -368,6 +371,7 @@ impl IntentClassify for FewShotClassifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::intent_classifier::ProviderEntry;
 
     fn make_config() -> FewShotConfig {
         let nanos = std::time::SystemTime::now()
@@ -391,11 +395,14 @@ mod tests {
         let config = make_config();
         let routing = HashMap::new();
         let fallback = RouteEntry {
-            model: "fallback".to_string(),
-            endpoint: String::new(),
+            providers: vec![ProviderEntry {
+                model: "fallback".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         FewShotClassifier::new(config, routing, fallback)
     }
@@ -484,11 +491,14 @@ mod tests {
         let config = make_config();
         let routing = HashMap::new();
         let fallback = RouteEntry {
-            model: "fb".to_string(),
-            endpoint: String::new(),
+            providers: vec![ProviderEntry {
+                model: "fb".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let classifier = FewShotClassifier::new(config, routing, fallback);
         let result = classifier.classify("anything").await;

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use regex::Regex;
 use regex::RegexSet;
 
-pub use crate::routing::{ModelCosts, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX};
+pub use crate::routing::{ModelCosts, ProviderEntry, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX};
 
 /// A single regex pattern entry with its weight for intent classification.
 #[derive(Clone, Debug, Deserialize)]
@@ -92,6 +92,8 @@ pub struct ClassificationResult {
     pub tier: ClassificationTier,
     pub provider_type: String,
     pub api_key_env: Option<String>,
+    #[allow(dead_code)]
+    pub providers: Vec<ProviderEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,6 +356,7 @@ impl LLMClassifier {
                             tier: ClassificationTier::Regex,
                             provider_type: self.provider_type.clone(),
                             api_key_env: Some(self.api_key_env.clone()),
+                            providers: vec![],
                         };
                     }
                 }
@@ -539,6 +542,7 @@ impl ClassificationResult {
             tier: ClassificationTier::Fallback,
             provider_type: String::new(),
             api_key_env: None,
+            providers: vec![],
         }
     }
 }
@@ -673,22 +677,24 @@ impl RegexClassifier {
         let route = self.routing.get(category).unwrap_or(&self.fallback_entry);
         ClassificationResult {
             category: category.to_string(),
-            model: route.model.clone(),
-            endpoint: route.endpoint.clone(),
+            model: route.primary().model.clone(),
+            endpoint: route.primary().endpoint.clone(),
             tier: ClassificationTier::Regex,
-            provider_type: route.provider_type.clone(),
-            api_key_env: route.api_key_env.clone(),
+            provider_type: route.primary().provider_type.clone(),
+            api_key_env: route.primary().api_key_env.clone(),
+            providers: route.providers.clone(),
         }
     }
 
     fn route_fallback(&self, category: &str) -> ClassificationResult {
         ClassificationResult {
             category: category.to_string(),
-            model: self.fallback_entry.model.clone(),
-            endpoint: self.fallback_entry.endpoint.clone(),
+            model: self.fallback_entry.primary().model.clone(),
+            endpoint: self.fallback_entry.primary().endpoint.clone(),
             tier: ClassificationTier::Fallback,
-            provider_type: self.fallback_entry.provider_type.clone(),
-            api_key_env: self.fallback_entry.api_key_env.clone(),
+            provider_type: self.fallback_entry.primary().provider_type.clone(),
+            api_key_env: self.fallback_entry.primary().api_key_env.clone(),
+            providers: self.fallback_entry.providers.clone(),
         }
     }
 }
@@ -811,49 +817,64 @@ mod tests {
         routing.insert(
             cats[0].name.clone(),
             RouteEntry {
-                model: "fr-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "fr-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             cats[1].name.clone(),
             RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             cats[2].name.clone(),
             RouteEntry {
-                model: "cr-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "cr-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             cats[3].name.clone(),
             RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         RegexClassifier::from_values(routing, fallback, 30, cats, &neg)
     }
@@ -950,7 +971,8 @@ mod tests {
                 tier: ClassificationTier::Regex,
                 provider_type: "prov1".to_string(),
                 api_key_env: None,
-            },
+                providers: vec![],
+            },        
         };
         let stub2 = StubClassifier {
             result: ClassificationResult {
@@ -960,7 +982,8 @@ mod tests {
                 tier: ClassificationTier::Regex,
                 provider_type: "prov2".to_string(),
                 api_key_env: None,
-            },
+                providers: vec![],
+            },        
         };
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
         let result = chain.classify("any prompt").await;
@@ -978,7 +1001,8 @@ mod tests {
                 tier: ClassificationTier::Fallback,
                 provider_type: String::new(),
                 api_key_env: None,
-            },
+                providers: vec![],
+            },        
         };
         let stub2 = StubClassifier {
             result: ClassificationResult {
@@ -988,7 +1012,8 @@ mod tests {
                 tier: ClassificationTier::Regex,
                 provider_type: "prov2".to_string(),
                 api_key_env: None,
-            },
+                providers: vec![],
+            },        
         };
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
         let result = chain.classify("prompt").await;
@@ -1009,7 +1034,8 @@ mod tests {
                 tier: ClassificationTier::Fallback,
                 provider_type: String::new(),
                 api_key_env: None,
-            },
+                providers: vec![],
+            },        
         };
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
         let result = chain.classify("any").await;
@@ -1038,6 +1064,7 @@ mod tests {
                     tier: ClassificationTier::Regex,
                     provider_type: "stub".to_string(),
                     api_key_env: None,
+                    providers: vec![],
                 }
             }
         }
@@ -1072,7 +1099,8 @@ mod tests {
                 tier: ClassificationTier::Regex,
                 provider_type: String::new(),
                 api_key_env: None,
-            },
+                providers: vec![],
+            },        
         };
         let stub2 = CountingClassifier {
             counter: counter2.clone(),
@@ -1127,7 +1155,8 @@ mod tests {
                 tier: ClassificationTier::FewShot,
                 provider_type: String::new(),
                 api_key_env: None,
-            },
+                providers: vec![],
+            },        
         };
         let stub3 = CountingClassifier {
             counter: counter3.clone(),
@@ -1138,7 +1167,8 @@ mod tests {
                 tier: ClassificationTier::Regex,
                 provider_type: String::new(),
                 api_key_env: None,
-            },
+                providers: vec![],
+            },        
         };
 
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2), Arc::new(stub3)]);
@@ -1189,7 +1219,8 @@ mod tests {
                 tier: ClassificationTier::Fallback,
                 provider_type: String::new(),
                 api_key_env: None,
-            },
+                providers: vec![],
+            },        
         };
 
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2), Arc::new(stub3)]);
@@ -1495,29 +1526,38 @@ mod tests {
         routing.insert(
             "DATABASE".to_string(),
             RouteEntry {
-                model: "db-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "db-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             "DEPLOYMENT".to_string(),
             RouteEntry {
-                model: "dep-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "dep-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = RouteEntry {
-            model: "fb-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![ProviderEntry {
+                model: "fb-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
         let result = c.classify("SELECT * FROM users").await;
@@ -1561,29 +1601,38 @@ mod tests {
         routing.insert(
             "ALPHA".to_string(),
             RouteEntry {
-                model: "a".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "a".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             "BETA".to_string(),
             RouteEntry {
-                model: "b".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "b".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = RouteEntry {
-            model: "fb".to_string(),
-            endpoint: String::new(),
+            providers: vec![ProviderEntry {
+                model: "fb".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
         // "alpha beta" gives ALPHA score=3 (meets threshold=3), BETA score=1 (meets threshold=1)
@@ -1602,11 +1651,14 @@ mod tests {
         let neg = vec![];
         let routing = HashMap::new();
         let fallback = RouteEntry {
-            model: "fb".to_string(),
-            endpoint: String::new(),
+            providers: vec![ProviderEntry {
+                model: "fb".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
         let result = c.classify("anything").await;
@@ -1647,19 +1699,25 @@ mod tests {
         routing.insert(
             "CODING".to_string(),
             RouteEntry {
-                model: "c".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "c".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = RouteEntry {
-            model: "fb".to_string(),
-            endpoint: String::new(),
+            providers: vec![ProviderEntry {
+                model: "fb".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
         // "code" matches CODING pattern (score=2), but negative pattern penalizes CODING by 3 → score=0

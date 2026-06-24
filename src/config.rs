@@ -391,21 +391,27 @@ pub(crate) fn hardcoded_routing(
         routing.insert(
             cat.name.clone(),
             RouteEntry {
-                model: DEFAULT_MODEL_LOCAL.to_string(),
-                endpoint: endpoint.to_string(),
+                providers: vec![ProviderEntry {
+                    model: DEFAULT_MODEL_LOCAL.to_string(),
+                    endpoint: endpoint.to_string(),
+                    provider_type: "ollama".to_string(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "ollama".to_string(),
-                api_key_env: None,
             },
         );
     }
 
     let fallback = RouteEntry {
-        model: DEFAULT_MODEL_LOCAL.to_string(),
-        endpoint: endpoint.to_string(),
+        providers: vec![ProviderEntry {
+            model: DEFAULT_MODEL_LOCAL.to_string(),
+            endpoint: endpoint.to_string(),
+            provider_type: "ollama".to_string(),
+            api_key_env: None,
+            timeout_ms: None,
+        }],
         cost_per_1m_input_tokens: None,
-        provider_type: "ollama".to_string(),
-        api_key_env: None,
     };
     (routing, fallback)
 }
@@ -454,11 +460,14 @@ pub(crate) fn load_routing_from_file(path: &str) -> Result<HashMap<String, Route
         routing.insert(
             key.to_uppercase(),
             RouteEntry {
-                model,
-                endpoint,
+                providers: vec![ProviderEntry {
+                    model,
+                    endpoint,
+                    provider_type,
+                    api_key_env,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens,
-                provider_type,
-                api_key_env,
             },
         );
     }
@@ -491,11 +500,14 @@ pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
         }
     };
     let fallback_entry = routing.remove("DEFAULT").unwrap_or_else(|| RouteEntry {
-        model: DEFAULT_MODEL.to_string(),
-        endpoint: String::new(),
+        providers: vec![ProviderEntry {
+            model: DEFAULT_MODEL.to_string(),
+            endpoint: String::new(),
+            provider_type: String::new(),
+            api_key_env: None,
+            timeout_ms: None,
+        }],
         cost_per_1m_input_tokens: None,
-        provider_type: String::new(),
-        api_key_env: None,
     });
     (routing, fallback_entry)
 }
@@ -510,11 +522,14 @@ pub(crate) fn routing_from_value(
         None => {
             debug!("[routing] section not found; no routing entries configured");
             let fallback = RouteEntry {
-                model: DEFAULT_MODEL.to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: DEFAULT_MODEL.to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             };
             return Ok((HashMap::new(), fallback));
         }
@@ -522,28 +537,28 @@ pub(crate) fn routing_from_value(
 
     let default_model = routing_table
         .get("DEFAULT")
-        .map(|e| e.model.as_str())
+        .map(|e| e.primary().model.as_str())
         .unwrap_or(DEFAULT_MODEL)
         .to_string();
 
     let mut routing = HashMap::new();
     for (key, entry) in routing_table {
-        let model = if !entry.model.is_empty() {
-            entry.model.clone()
+        let model = if !entry.primary().model.is_empty() {
+            entry.primary().model.clone()
         } else {
             warn!(category = %key, "routing section missing 'model' for category; using DEFAULT model");
             default_model.clone()
         };
-        let endpoint = entry.endpoint.clone();
+        let endpoint = entry.primary().endpoint.clone();
         let cost_per_1m_input_tokens = entry.cost_per_1m_input_tokens;
-        let provider_type = if !entry.provider_type.is_empty() {
-            entry.provider_type.clone()
+        let provider_type = if !entry.primary().provider_type.is_empty() {
+            entry.primary().provider_type.clone()
         } else {
             warn!(category = %key, "routing section missing 'provider_type' for category; defaulting to empty");
             String::new()
         };
-        let api_key_env = if entry.api_key_env.is_some() {
-            entry.api_key_env.clone()
+        let api_key_env = if entry.primary().api_key_env.is_some() {
+            entry.primary().api_key_env.clone()
         } else {
             warn!(category = %key, "routing section missing 'api_key_env' for category; no API key will be resolved");
             None
@@ -551,20 +566,26 @@ pub(crate) fn routing_from_value(
         routing.insert(
             key.to_uppercase(),
             RouteEntry {
-                model,
-                endpoint,
+                providers: vec![ProviderEntry {
+                    model,
+                    endpoint,
+                    provider_type,
+                    api_key_env,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens,
-                provider_type,
-                api_key_env,
             },
         );
     }
     let fallback = routing.remove("DEFAULT").unwrap_or_else(|| RouteEntry {
-        model: default_model,
-        endpoint: String::new(),
+        providers: vec![ProviderEntry {
+            model: default_model,
+            endpoint: String::new(),
+            provider_type: String::new(),
+            api_key_env: None,
+            timeout_ms: None,
+        }],
         cost_per_1m_input_tokens: None,
-        provider_type: String::new(),
-        api_key_env: None,
     });
     Ok((routing, fallback))
 }
@@ -619,7 +640,7 @@ pub(crate) fn build_model_costs(
 
     for entry in routing.values() {
         if let Some(override_cost) = entry.cost_per_1m_input_tokens {
-            costs.insert(entry.model.clone(), override_cost);
+            costs.insert(entry.primary().model.clone(), override_cost);
         }
     }
     ModelCosts::from_costs(costs)
@@ -1251,17 +1272,17 @@ api_key_env = ""
         let routing = result.unwrap();
 
         assert_eq!(routing.len(), 3);
-        assert_eq!(routing.get("SYNTAX_FIX").unwrap().model, "test-sf-model");
+        assert_eq!(routing.get("SYNTAX_FIX").unwrap().primary().model, "test-sf-model");
         assert_eq!(
-            routing.get("SYNTAX_FIX").unwrap().endpoint,
+            routing.get("SYNTAX_FIX").unwrap().primary().endpoint,
             "https://test.endpoint"
         );
         assert_eq!(
-            routing.get("SYNTAX_FIX").unwrap().provider_type,
+            routing.get("SYNTAX_FIX").unwrap().primary().provider_type,
             "openai_compatible"
         );
         assert_eq!(
-            routing.get("SYNTAX_FIX").unwrap().api_key_env,
+            routing.get("SYNTAX_FIX").unwrap().primary().api_key_env,
             Some("TEST_API_KEY".to_string())
         );
         assert_eq!(
@@ -1270,7 +1291,7 @@ api_key_env = ""
         );
 
         assert_eq!(
-            routing.get("COMPLEX_REASONING").unwrap().model,
+            routing.get("COMPLEX_REASONING").unwrap().primary().model,
             "test-cr-model"
         );
     }
@@ -1314,24 +1335,24 @@ api_key_env = ""
                 cat.name
             );
             let entry = routing.get(cat.name.as_str()).unwrap();
-            assert_eq!(entry.model, DEFAULT_MODEL_LOCAL);
-            assert!(entry.endpoint.contains("localhost:11434"));
-            assert_eq!(entry.provider_type, "ollama");
-            assert_eq!(entry.api_key_env, None);
+            assert_eq!(entry.primary().model, DEFAULT_MODEL_LOCAL);
+            assert!(entry.primary().endpoint.contains("localhost:11434"));
+            assert_eq!(entry.primary().provider_type, "ollama");
+            assert_eq!(entry.primary().api_key_env, None);
             assert_eq!(entry.cost_per_1m_input_tokens, None);
         }
 
-        assert_eq!(fallback.model, DEFAULT_MODEL_LOCAL);
-        assert!(fallback.endpoint.contains("localhost:11434"));
-        assert_eq!(fallback.provider_type, "ollama");
-        assert_eq!(fallback.api_key_env, None);
+        assert_eq!(fallback.primary().model, DEFAULT_MODEL_LOCAL);
+        assert!(fallback.primary().endpoint.contains("localhost:11434"));
+        assert_eq!(fallback.primary().provider_type, "ollama");
+        assert_eq!(fallback.primary().api_key_env, None);
     }
 
     #[test]
     fn hardcoded_routing_uses_hardcoded_endpoint() {
         let (_, fallback) = hardcoded_routing(&test_categories());
         assert_eq!(
-            fallback.endpoint,
+            fallback.primary().endpoint,
             "http://localhost:11434/v1/chat/completions"
         );
     }
@@ -1361,9 +1382,9 @@ api_key_env = ""
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 1);
-        assert_eq!(routing.get("SYNTAX_FIX").unwrap().model, "file-sf-model");
+        assert_eq!(routing.get("SYNTAX_FIX").unwrap().primary().model, "file-sf-model");
         // fallback should be the file-defined fallback
-        assert_eq!(fallback.model, "file-fallback");
+        assert_eq!(fallback.primary().model, "file-fallback");
 
         std::env::remove_var("CONFIG_PATH");
 
@@ -1372,7 +1393,7 @@ api_key_env = ""
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 0);
-        assert_eq!(fallback.model, DEFAULT_MODEL_LOCAL);
+        assert_eq!(fallback.primary().model, DEFAULT_MODEL_LOCAL);
 
         std::env::remove_var("CONFIG_PATH");
 
@@ -1387,7 +1408,7 @@ api_key_env = ""
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 0);
-        assert_eq!(fallback.model, DEFAULT_MODEL_LOCAL);
+        assert_eq!(fallback.primary().model, DEFAULT_MODEL_LOCAL);
 
         std::env::remove_var("CONFIG_PATH");
     }
@@ -1398,31 +1419,40 @@ api_key_env = ""
         routing.insert(
             "SYNTAX_FIX".to_string(),
             RouteEntry {
-                model: "claude-3.5-sonnet".to_string(),
-                endpoint: "".to_string(),
+                providers: vec![ProviderEntry {
+                    model: "claude-3.5-sonnet".to_string(),
+                    endpoint: "".to_string(),
+                    provider_type: "".to_string(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: Some(5.00),
-                provider_type: "".to_string(),
-                api_key_env: None,
             },
         );
         routing.insert(
             "COMPLEX_REASONING".to_string(),
             RouteEntry {
-                model: "gpt-4o".to_string(),
-                endpoint: "".to_string(),
+                providers: vec![ProviderEntry {
+                    model: "gpt-4o".to_string(),
+                    endpoint: "".to_string(),
+                    provider_type: "".to_string(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "".to_string(),
-                api_key_env: None,
             },
         );
         routing.insert(
             "CASUAL".to_string(),
             RouteEntry {
-                model: "unknown-model".to_string(),
-                endpoint: "".to_string(),
+                providers: vec![ProviderEntry {
+                    model: "unknown-model".to_string(),
+                    endpoint: "".to_string(),
+                    provider_type: "".to_string(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: Some(2.50),
-                provider_type: "".to_string(),
-                api_key_env: None,
             },
         );
 
@@ -1962,15 +1992,15 @@ provider_type = "openai_compatible"
         let routing = base.routing.expect("routing should be present after merge");
         // DEFAULT preserved from base
         let default = routing.get("DEFAULT").expect("DEFAULT preserved from base");
-        assert_eq!(default.model, "base-default");
-        assert_eq!(default.endpoint, "https://base.example/v1/chat/completions");
+        assert_eq!(default.primary().model, "base-default");
+        assert_eq!(default.primary().endpoint, "https://base.example/v1/chat/completions");
         // FILE_READING replaced by overlay
         let file_reading = routing
             .get("FILE_READING")
             .expect("FILE_READING present after merge");
-        assert_eq!(file_reading.model, "overlay-file-reading");
+        assert_eq!(file_reading.primary().model, "overlay-file-reading");
         assert_eq!(
-            file_reading.endpoint,
+            file_reading.primary().endpoint,
             "https://overlay.example/v1/chat/completions"
         );
     }
@@ -2012,8 +2042,8 @@ provider_type = "openai_compatible"
 
         merge_configs(&mut base, overlay);
         let routing = base.routing.expect("routing should be present after merge");
-        assert_eq!(routing.get("DEFAULT").unwrap().model, "new-default");
-        assert_eq!(routing.get("FILE_READING").unwrap().model, "new-fr");
+        assert_eq!(routing.get("DEFAULT").unwrap().primary().model, "new-default");
+        assert_eq!(routing.get("FILE_READING").unwrap().primary().model, "new-fr");
     }
 
     #[test]
@@ -2043,7 +2073,7 @@ provider_type = "openai_compatible"
         merge_configs(&mut base, overlay);
         let routing = base.routing.expect("routing initialized from None");
         assert_eq!(routing.len(), 1);
-        assert_eq!(routing.get("SYNTAX_FIX").unwrap().model, "sf-model");
+        assert_eq!(routing.get("SYNTAX_FIX").unwrap().primary().model, "sf-model");
     }
 
     // ── Phase 3: External Pattern File Tests ──
@@ -2381,10 +2411,10 @@ patterns_file = "nonexistent.patterns"
             let entry = routing
                 .get(key)
                 .unwrap_or_else(|| panic!("missing route key {key} in openrouter example"));
-            assert!(!entry.model.is_empty(), "{key} model should be set");
-            assert!(!entry.endpoint.is_empty(), "{key} endpoint should be set");
+            assert!(!entry.primary().model.is_empty(), "{key} model should be set");
+            assert!(!entry.primary().endpoint.is_empty(), "{key} endpoint should be set");
             assert!(
-                !entry.provider_type.is_empty(),
+                !entry.primary().provider_type.is_empty(),
                 "{key} provider_type should be set"
             );
         }
@@ -2408,7 +2438,7 @@ patterns_file = "nonexistent.patterns"
                 .get(key)
                 .unwrap_or_else(|| panic!("missing route key {key} in nvidia-nim example"));
             assert!(
-                !entry.endpoint.is_empty(),
+                !entry.primary().endpoint.is_empty(),
                 "{key} endpoint should be present (legacy version omitted it): {entry:?}"
             );
         }

@@ -462,12 +462,12 @@ ENVIRONMENT:
         route_keys.sort();
         for key in route_keys {
             let entry = &routing_map[key];
-            info!("Route {} -> {} @ {}", key, entry.model, entry.endpoint);
+            info!("Route {} -> {} @ {}", key, entry.primary().model, entry.primary().endpoint);
         }
         if !routing_map.contains_key("DEFAULT") {
             info!(
                 "Route DEFAULT -> {} @ {}",
-                fallback_entry.model, fallback_entry.endpoint
+                fallback_entry.primary().model, fallback_entry.primary().endpoint
             );
         }
 
@@ -1811,10 +1811,11 @@ async fn completion_handler(
             Some(entry) => intent_classifier::ClassificationResult {
                 category: category.clone(),
                 model: model.clone(),
-                endpoint: entry.endpoint.clone(),
+                endpoint: entry.primary().endpoint.clone(),
                 tier: intent_classifier::ClassificationTier::Fallback,
-                provider_type: entry.provider_type.clone(),
-                api_key_env: entry.api_key_env.clone(),
+                provider_type: entry.primary().provider_type.clone(),
+                api_key_env: entry.primary().api_key_env.clone(),
+                providers: entry.providers.clone(),
             },
             None => {
                 warn!("X-Cerebrum-Category '{category}' not found in routing configuration; degrading to classification JSON");
@@ -2266,10 +2267,11 @@ async fn messages_handler(
             Some(entry) => intent_classifier::ClassificationResult {
                 category: category.clone(),
                 model: model.clone(),
-                endpoint: entry.endpoint.clone(),
+                endpoint: entry.primary().endpoint.clone(),
                 tier: intent_classifier::ClassificationTier::Fallback,
-                provider_type: entry.provider_type.clone(),
-                api_key_env: entry.api_key_env.clone(),
+                provider_type: entry.primary().provider_type.clone(),
+                api_key_env: entry.primary().api_key_env.clone(),
+                providers: entry.providers.clone(),
             },
             None => {
                 warn!("X-Cerebrum-Category '{category}' not found in routing configuration; degrading to classification JSON");
@@ -2869,29 +2871,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -2957,29 +2968,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -3008,11 +3028,14 @@ mod tests {
             fewshot_config,
             HashMap::new(),
             intent_classifier::RouteEntry {
-                model: "fallback-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "fallback-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
 
@@ -3070,29 +3093,38 @@ mod tests {
         routing.insert(
             "SYNTAX_FIX".to_string(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             "CASUAL".to_string(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -3293,29 +3325,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: "https://test.endpoint".to_string(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: "https://test.endpoint".to_string(),
+                    provider_type: provider_type_val.to_string(),
+                    api_key_env: api_key_env_val.map(|s| s.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: provider_type_val.to_string(),
-                api_key_env: api_key_env_val.map(|s| s.to_string()),
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -4408,29 +4449,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: endpoint.clone(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: endpoint.clone(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint,
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint,
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -4477,29 +4527,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: endpoint.clone(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: endpoint.clone(),
+                    provider_type: "anthropic".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "anthropic".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint,
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint,
+                    provider_type: "anthropic".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "anthropic".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -4775,29 +4834,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: endpoint.clone(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: endpoint.clone(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some("MOCK_API_KEY".to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some("MOCK_API_KEY".to_string()),
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint,
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint,
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some("MOCK_API_KEY".to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some("MOCK_API_KEY".to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -4879,29 +4947,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -5656,19 +5733,25 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: url,
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: url,
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -6051,6 +6134,7 @@ mod tests {
             tier: intent_classifier::ClassificationTier::Regex,
             provider_type: "test_provider".to_string(),
             api_key_env: Some("TEST_API_KEY".to_string()),
+            providers: vec![],
         };
         let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result))
             .expect("classification_only_json output should be valid JSON");
@@ -6137,6 +6221,7 @@ mod tests {
                 tier,
                 provider_type: "test_provider".to_string(),
                 api_key_env: Some("TEST_API_KEY".to_string()),
+                providers: vec![],
             };
             let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result))
                 .expect("classification_only_json output should be valid JSON");
@@ -6458,19 +6543,25 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "gpt-4o".to_string(),
-                endpoint: endpoint.clone(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "gpt-4o".to_string(),
+                    endpoint: endpoint.clone(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -6732,19 +6823,25 @@ mod slow_tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: url,
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: url,
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env_var.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
