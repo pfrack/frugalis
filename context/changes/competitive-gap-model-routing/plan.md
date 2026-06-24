@@ -259,8 +259,8 @@ Returns `None` if the request should proceed normally.
 
 #### Manual
 
-- [ ] 1.3 curl /v1/models returns valid JSON model list
-- [ ] 1.4 Claude Code model picker works with gateway discovery
+- [x] 1.3 curl /v1/models returns valid JSON model list — 53c6b33
+- [x] 1.4 Claude Code model picker works with gateway discovery — 53c6b33
 
 ### Phase 2: NIM Field Sanitization
 
@@ -271,7 +271,7 @@ Returns `None` if the request should proceed normally.
 
 #### Manual
 
-- [ ] 2.3 Request with top_k to NIM provider succeeds
+- [x] 2.3 Request with top_k to NIM provider succeeds — b6ec082
 
 ### Phase 3: /v1/messages/count_tokens Stub
 
@@ -282,7 +282,7 @@ Returns `None` if the request should proceed normally.
 
 #### Manual
 
-- [ ] 3.3 curl count_tokens returns reasonable estimate
+- [x] 3.3 curl count_tokens returns reasonable estimate — 5c2f3d9
 
 ### Phase 4: Request Optimizations
 
@@ -293,5 +293,5 @@ Returns `None` if the request should proceed normally.
 
 #### Manual
 
-- [ ] 4.3 Empty messages array returns instantly without upstream call
-- [ ] 4.4 Normal requests still route through classification
+- [x] 4.3 Empty messages array returns instantly without upstream call — ecf26b2
+- [x] 4.4 Normal requests still route through classification — ecf26b2
