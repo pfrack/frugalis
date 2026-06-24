@@ -1,6 +1,6 @@
 ---
 id: translate-anthropic-to-openai
-status: implementing
+status: impl_reviewed
 created: 2026-06-22
 updated: 2026-06-23
 user: pfrack

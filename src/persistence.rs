@@ -1164,7 +1164,9 @@ pub fn extract_last_user_message_anthropic(body: &str) -> String {
     match result {
         Some(s) => s,
         None => {
-            warn!("could not extract user message from Anthropic request body; storing empty prompt");
+            warn!(
+                "could not extract user message from Anthropic request body; storing empty prompt"
+            );
             String::new()
         }
     }
@@ -1335,8 +1337,11 @@ pub async fn test_pool() -> Option<std::sync::Arc<PgPool>> {
     // Try disposable PostgreSQL container first (in-memory, Docker-backed)
     if let Some(tdb) = TestDb::new().await {
         // Quick health check — if the container is flaky, skip gracefully
-        let ok = tokio::time::timeout(Duration::from_secs(3), sqlx::query("SELECT 1").execute(tdb.pool.as_ref()))
-            .await;
+        let ok = tokio::time::timeout(
+            Duration::from_secs(3),
+            sqlx::query("SELECT 1").execute(tdb.pool.as_ref()),
+        )
+        .await;
         if ok.is_ok() && ok.unwrap().is_ok() {
             return Some(tdb.pool);
         }
