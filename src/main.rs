@@ -716,6 +716,24 @@ async fn health() -> (StatusCode, &'static str) {
     (StatusCode::OK, "ok")
 }
 
+/// GET /v1/models — static model list for Claude Code gateway discovery.
+/// Returns a minimal OpenAI-compatible /v1/models response with known
+/// Claude model identifiers. Placed outside the auth layer so Claude Code
+/// can probe before authenticating (matches its expectation for gateway
+/// model discovery with `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`).
+async fn models_handler() -> impl IntoResponse {
+    debug!("GET /v1/models request received");
+    static MODELS_JSON: &str = r#"{"data":[{"id":"claude-sonnet-4-6-20250514","object":"model","created":1700000000,"owned_by":"anthropic"},{"id":"claude-haiku-4-5-20250514","object":"model","created":1700000000,"owned_by":"anthropic"},{"id":"claude-opus-4-20250514","object":"model","created":1700000000,"owned_by":"anthropic"}],"object":"list","has_more":false}"#;
+    let mut resp = Response::new(Body::from(MODELS_JSON));
+    *resp.status_mut() = StatusCode::OK;
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
+    resp
+}
+
+
 /// Shared logging helper. Builds the inference record from the pre-extracted
 /// `prompt` and enqueues a fire-and-forget DB write. Callers must extract the
 /// prompt themselves (via `persistence::extract_last_user_message` for OpenAI
@@ -2432,12 +2450,18 @@ async fn feedback_handler(
 }
 
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
+    // Unauthenticated v1 routes — model discovery must be accessible
+    // without auth (Claude Code probes /v1/models before authenticating).
+    let unauth_v1_routes = Router::new()
+        .route("/models", get(models_handler));
+
     let proxy_routes = Router::new()
         .route("/chat/completions", post(completion_handler))
         .route("/messages", post(messages_handler))
         .route("/classify", post(classify_handler))
         .route("/feedback", post(feedback_handler))
-        .route_layer(auth::proxy_auth_layer(auth_config.clone()));
+        .route_layer(auth::proxy_auth_layer(auth_config.clone()))
+        .merge(unauth_v1_routes);
 
     let dashboard_routes = dashboard::routes(auth_config);
 
@@ -3224,6 +3248,74 @@ mod tests {
             .expect("health request should succeed");
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_models_endpoint_returns_valid_json_no_auth() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("models request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .expect("response should have Content-Type");
+        assert!(
+            content_type.starts_with("application/json"),
+            "expected application/json, got {content_type}"
+        );
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("object").and_then(|v| v.as_str()),
+            Some("list"),
+            "expected object=list"
+        );
+        assert_eq!(
+            json.get("has_more").and_then(|v| v.as_bool()),
+            Some(false),
+            "expected has_more=false"
+        );
+        let data = json
+            .get("data")
+            .and_then(|v| v.as_array())
+            .expect("data should be an array");
+        assert_eq!(data.len(), 3, "expected 3 models, got {}", data.len());
+        let model_ids: Vec<&str> = data
+            .iter()
+            .map(|m| m.get("id").and_then(|v| v.as_str()).unwrap_or(""))
+            .collect();
+        assert!(
+            model_ids.contains(&"claude-sonnet-4-6-20250514"),
+            "should contain claude-sonnet-4-6-20250514"
+        );
+        assert!(
+            model_ids.contains(&"claude-haiku-4-5-20250514"),
+            "should contain claude-haiku-4-5-20250514"
+        );
+        assert!(
+            model_ids.contains(&"claude-opus-4-20250514"),
+            "should contain claude-opus-4-20250514"
+        );
+        for model in data {
+            assert_eq!(
+                model.get("object").and_then(|v| v.as_str()),
+                Some("model"),
+                "each model should have object=model"
+            );
+            assert_eq!(
+                model.get("owned_by").and_then(|v| v.as_str()),
+                Some("anthropic"),
+                "each model should be owned_by anthropic"
+            );
+        }
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 ---
 id: competitive-gap-model-routing
-status: planned
+status: implementing
 created: 2026-06-24
 updated: 2026-06-24
 user: pfrack

@@ -254,8 +254,8 @@ Returns `None` if the request should proceed normally.
 
 #### Automated
 
-- [ ] 1.1 cargo test passes with models_handler unit test
-- [ ] 1.2 cargo clippy clean
+- [x] 1.1 cargo test passes with models_handler unit test
+- [x] 1.2 cargo clippy clean
 
 #### Manual
 
