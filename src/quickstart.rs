@@ -281,7 +281,9 @@ fn prompt<R: BufRead>(
         .read_line(&mut line)
         .map_err(|e| format!("failed to read from stdin: {e}"))?;
     if read == 0 {
-        return Err(format!("unexpected end of input while reading '{question}'"));
+        return Err(format!(
+            "unexpected end of input while reading '{question}'"
+        ));
     }
     Ok(line)
 }

@@ -256,8 +256,8 @@ Error translation tests:
 
 #### Automated
 
-- [ ] 1.1 `cargo build` compiles without errors
-- [ ] 1.2 `cargo test protocol_translation` — all unit tests pass
+- [x] 1.1 `cargo build` compiles without errors
+- [x] 1.2 `cargo test protocol_translation` — all unit tests pass
 
 #### Manual
 
@@ -267,8 +267,8 @@ Error translation tests:
 
 #### Automated
 
-- [ ] 2.1 `cargo build` compiles without errors
-- [ ] 2.2 `cargo test` — all existing tests still pass (no regressions)
+- [x] 2.1 `cargo build` compiles without errors
+- [x] 2.2 `cargo test` — all existing tests still pass (no regressions)
 
 #### Manual
 
@@ -278,10 +278,10 @@ Error translation tests:
 
 #### Automated
 
-- [ ] 3.1 `cargo test protocol_translation` — all unit tests pass
-- [ ] 3.2 `cargo test test_messages_handler_openai_translation` — e2e tests pass
-- [ ] 3.3 `cargo test test_messages_handler_openai_streaming` — streaming e2e tests pass
-- [ ] 3.4 `cargo test test_messages_handler_openai_error` — error e2e tests pass
+- [x] 3.1 `cargo test protocol_translation` — all unit tests pass
+- [x] 3.2 `cargo test test_messages_handler_openai_translation` — e2e tests pass
+- [x] 3.3 `cargo test test_messages_handler_openai_streaming` — streaming e2e tests pass
+- [x] 3.4 `cargo test test_messages_handler_openai_error` — error e2e tests pass
 
 #### Manual
 
