@@ -85,8 +85,25 @@ Add a `GET /v1/models` handler that returns a hardcoded list of Claude model nam
 
 #### Manual Verification:
 
-- `curl http://localhost:10000/v1/models` returns valid JSON with model list
-- Claude Code with `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` shows model picker
+```bash
+# 1. Model discovery — no auth required
+curl -s http://localhost:10000/v1/models | jq .
+
+# Expected: JSON with "data" array containing claude-sonnet-4, claude-haiku-4-5, claude-opus-4
+# Each entry has "id", "object": "model", "owned_by": "anthropic"
+
+# 2. Verify has_more is false
+curl -s http://localhost:10000/v1/models | jq '.has_more'
+# Expected: false
+
+# 3. Verify model count
+curl -s http://localhost:10000/v1/models | jq '.data | length'
+# Expected: 3
+
+# 4. Claude Code integration test
+CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 claude --model http://localhost:10000
+# Expected: model picker appears with the 3 models listed
+```
 
 ---
 
@@ -123,7 +140,33 @@ Strip fields that NVIDIA NIM rejects before forwarding translated requests. Appl
 
 #### Manual Verification:
 
-- Request with `top_k` field routed to NIM succeeds (field stripped, no 400 error)
+```bash
+# 1. Send request with top_k field to an NIM-routed category
+# (replace CATEGORY with a category that routes to nvidia_nim provider)
+curl -s -X POST http://localhost:10000/v1/chat/completions \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "CATEGORY",
+    "messages": [{"role": "user", "content": "hello"}],
+    "top_k": 50,
+    "metadata": {"key": "value"},
+    "thinking": {"type": "enabled"}
+  }'
+
+# Expected: 200 OK (not 400). Fields are silently stripped before forwarding.
+
+# 2. Verify the request succeeds without top_k (baseline sanity check)
+curl -s -X POST http://localhost:10000/v1/chat/completions \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "CATEGORY",
+    "messages": [{"role": "user", "content": "hello"}]
+  }'
+
+# Expected: 200 OK — same as above, confirming no regression
+```
 
 ---
 
@@ -163,7 +206,46 @@ Return a local token count approximation so Claude Code's context window managem
 
 #### Manual Verification:
 
-- `curl -X POST http://localhost:10000/v1/messages/count_tokens -H 'Authorization: Bearer ...' -d '{"messages":[{"role":"user","content":"hello world"}]}'` returns `{"input_tokens": 2}`
+```bash
+# 1. Simple text — expect ~3 tokens (12 chars / 4)
+curl -s -X POST http://localhost:10000/v1/messages/count_tokens \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"hello world!"}]}'
+
+# Expected: {"input_tokens":3}
+
+# 2. Longer text — expect ~31 tokens (~124 chars)
+curl -s -X POST http://localhost:10000/v1/messages/count_tokens \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Write a function that calculates the fibonacci sequence up to n terms using dynamic programming in Rust."}]}'
+
+# Expected: {"input_tokens":26} (104 chars / 4)
+
+# 3. Multiple messages — both concatenated
+curl -s -X POST http://localhost:10000/v1/messages/count_tokens \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"system","content":"You are a helpful assistant."},{"role":"user","content":"hello world!"}]}'
+
+# Expected: {"input_tokens":10} (40 chars total / 4)
+
+# 4. Content blocks format (Anthropic-style array)
+curl -s -X POST http://localhost:10000/v1/messages/count_tokens \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":[{"type":"text","text":"hello world!"}]}]}'
+
+# Expected: {"input_tokens":3}
+
+# 5. Missing auth — expect 401
+curl -s -w "\nHTTP %{http_code}" -X POST http://localhost:10000/v1/messages/count_tokens \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"hello"}]}'
+
+# Expected: 401 Unauthorized
+```
 
 ---
 
@@ -204,8 +286,64 @@ Returns `None` if the request should proceed normally.
 
 #### Manual Verification:
 
-- Request with empty messages array returns instantly without upstream call
-- Normal requests still route through classification as before
+```bash
+# 1. Empty messages — expect instant empty assistant response (no upstream call)
+curl -s -X POST http://localhost:10000/v1/chat/completions \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"test","messages":[]}'
+
+# Expected: instant 200 with choices[0].message.content="" and usage all zeros
+
+# 2. Known probe "hello" — expect instant canned response
+curl -s -X POST http://localhost:10000/v1/chat/completions \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"test","messages":[{"role":"user","content":"hello"}]}'
+
+# Expected: instant 200 with "Hi! How can I help you today?"
+
+# 3. Known probe "hi" — same pattern
+curl -s -X POST http://localhost:10000/v1/chat/completions \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"test","messages":[{"role":"user","content":"hi"}]}'
+
+# Expected: instant 200 with "Hi! How can I help you today?"
+
+# 4. Known probe "test" — same pattern
+curl -s -X POST http://localhost:10000/v1/chat/completions \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"test","messages":[{"role":"user","content":"test"}]}'
+
+# Expected: instant 200 with "Hi! How can I help you today?"
+
+# 5. Anthropic-format probe via /v1/messages
+curl -s -X POST http://localhost:10000/v1/messages \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"test","messages":[{"role":"user","content":"hello"}],"max_tokens":1024}'
+
+# Expected: instant 200 with Anthropic-format response (content[0].text = "Hi! How can I help you today?")
+
+# 6. Normal request — verify it still routes through classification (NOT optimized)
+curl -s -X POST http://localhost:10000/v1/chat/completions \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"test","messages":[{"role":"user","content":"Explain quantum computing in detail"}]}'
+
+# Expected: goes to upstream (not instant, not canned) — verify by checking latency and real response
+
+# 7. Multi-message request — NOT a probe, should route normally
+curl -s -X POST http://localhost:10000/v1/chat/completions \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"test","messages":[{"role":"system","content":"You are helpful."},{"role":"user","content":"hello"}]}'
+
+# Expected: routes through classification (multi-message doesn't match probe pattern)
+```
 
 ---
 
@@ -225,11 +363,43 @@ Returns `None` if the request should proceed normally.
 
 ### Manual Testing Steps:
 
-1. Start cerebrum with NIM routing config
-2. Send request with `top_k` field — verify no 400 from NIM
-3. Verify `/v1/models` returns model list without auth
-4. Verify `/v1/messages/count_tokens` returns reasonable token estimate
-5. Connect Claude Code with gateway discovery enabled
+```bash
+# Start cerebrum with your config
+cargo run --release
+
+# Set your auth token
+export PROXY_API_BEARER_TOKEN="your-token-here"
+
+# 1. Model discovery (Phase 1)
+curl -s http://localhost:10000/v1/models | jq .
+# Expected: 3 models listed
+
+# 2. NIM field stripping (Phase 2)
+# Requires a category configured with provider_type: nvidia_nim
+curl -s -X POST http://localhost:10000/v1/chat/completions \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"NIM_CATEGORY","messages":[{"role":"user","content":"hello"}],"top_k":50,"metadata":{}}'
+# Expected: 200 OK, not 400
+
+# 3. Token counting (Phase 3)
+curl -s -X POST http://localhost:10000/v1/messages/count_tokens \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"hello world!"}]}'
+# Expected: {"input_tokens":3}
+
+# 4. Probe optimization (Phase 4)
+curl -s -X POST http://localhost:10000/v1/chat/completions \
+  -H "Authorization: Bearer ${PROXY_API_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"test","messages":[{"role":"user","content":"hello"}]}'
+# Expected: instant "Hi! How can I help you today?"
+
+# 5. Claude Code integration (Phase 1 + all)
+CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 claude --model http://localhost:10000
+# Expected: model picker, no errors, normal conversation works
+```
 
 ## Performance Considerations
 
