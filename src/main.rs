@@ -728,6 +728,44 @@ fn sanitize_for_nim(body: &mut serde_json::Value) {
     }
 }
 
+/// POST /v1/messages/count_tokens — local token count approximation.
+/// Extracts text content from the Anthropic messages array and returns
+/// `total_chars / 4` as a cheap token estimate. Avoids upstream round-trips
+/// for Claude Code's context window management.
+async fn count_tokens_handler(body: Bytes) -> impl IntoResponse {
+    debug!("POST /v1/messages/count_tokens request received");
+    let total_chars: usize = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(val) => val
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .map(|msgs| {
+                msgs.iter()
+                    .flat_map(|msg| msg.get("content"))
+                    .flat_map(|content| {
+                        if let Some(s) = content.as_str() {
+                            // string content
+                            Box::new(std::iter::once(s.len())) as Box<dyn Iterator<Item = usize>>
+                        } else if let Some(arr) = content.as_array() {
+                            // array of content blocks
+                            Box::new(arr.iter().filter_map(|block| {
+                                block.get("text").and_then(|t| t.as_str()).map(|s| s.len())
+                            })) as Box<dyn Iterator<Item = usize>>
+                        } else {
+                            Box::new(std::iter::empty()) as Box<dyn Iterator<Item = usize>>
+                        }
+                    })
+                    .sum::<usize>()
+            })
+            .unwrap_or(0),
+        Err(_) => 0,
+    };
+    let estimated_tokens = total_chars / 4;
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({"input_tokens": estimated_tokens}).to_string(),
+    )
+}
+
 /// GET /v1/models — static model list for Claude Code gateway discovery.
 /// Returns a minimal OpenAI-compatible /v1/models response with known
 /// Claude model identifiers. Placed outside the auth layer so Claude Code
@@ -2496,6 +2534,7 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
     let proxy_routes = Router::new()
         .route("/chat/completions", post(completion_handler))
         .route("/messages", post(messages_handler))
+        .route("/messages/count_tokens", post(count_tokens_handler))
         .route("/classify", post(classify_handler))
         .route("/feedback", post(feedback_handler))
         .route_layer(auth::proxy_auth_layer(auth_config.clone()))
@@ -3373,6 +3412,93 @@ mod tests {
         assert!(body.get("model").is_some(), "model should be preserved");
         assert!(body.get("messages").is_some(), "messages should be preserved");
         assert!(body.get("stream").is_some(), "stream should be preserved");
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_returns_estimated_tokens() {
+        let body = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "hello world"}
+            ]
+        });
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages/count_tokens")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("count_tokens request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        let tokens = json
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .expect("input_tokens should be a number");
+        // "hello world" = 11 chars → 11 / 4 = 2
+        assert_eq!(tokens, 2, "expected 2 tokens for 'hello world'");
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_array_content_blocks() {
+        let body = serde_json::json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "hello world test"}
+                    ]
+                }
+            ]
+        });
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages/count_tokens")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("count_tokens request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        let tokens = json
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .expect("input_tokens should be a number");
+        // "hello world test" = 16 chars → 16 / 4 = 4
+        assert_eq!(tokens, 4, "expected 4 tokens for 'hello world test'");
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_empty_messages() {
+        let body = serde_json::json!({"messages": []});
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages/count_tokens")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("count_tokens request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        let tokens = json
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .expect("input_tokens should be a number");
+        assert_eq!(tokens, 0, "expected 0 tokens for empty messages");
     }
 
     #[tokio::test]

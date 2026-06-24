@@ -266,8 +266,8 @@ Returns `None` if the request should proceed normally.
 
 #### Automated
 
-- [x] 2.1 cargo test passes with sanitize_for_nim unit test
-- [x] 2.2 cargo clippy clean
+- [x] 2.1 cargo test passes with sanitize_for_nim unit test — b6ec082
+- [x] 2.2 cargo clippy clean — b6ec082
 
 #### Manual
 
@@ -277,8 +277,8 @@ Returns `None` if the request should proceed normally.
 
 #### Automated
 
-- [ ] 3.1 cargo test passes with count_tokens unit test
-- [ ] 3.2 cargo clippy clean
+- [x] 3.1 cargo test passes with count_tokens unit test
+- [x] 3.2 cargo clippy clean
 
 #### Manual
 
