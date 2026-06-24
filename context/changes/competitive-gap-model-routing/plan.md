@@ -277,8 +277,8 @@ Returns `None` if the request should proceed normally.
 
 #### Automated
 
-- [x] 3.1 cargo test passes with count_tokens unit test
-- [x] 3.2 cargo clippy clean
+- [x] 3.1 cargo test passes with count_tokens unit test — 5c2f3d9
+- [x] 3.2 cargo clippy clean — 5c2f3d9
 
 #### Manual
 
@@ -288,8 +288,8 @@ Returns `None` if the request should proceed normally.
 
 #### Automated
 
-- [ ] 4.1 cargo test passes with try_optimize_request unit test
-- [ ] 4.2 cargo clippy clean
+- [x] 4.1 cargo test passes with try_optimize_request unit test
+- [x] 4.2 cargo clippy clean
 
 #### Manual
 

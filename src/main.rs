@@ -766,6 +766,91 @@ async fn count_tokens_handler(body: Bytes) -> impl IntoResponse {
     )
 }
 
+/// Check if the request matches a known trivial probe pattern and return
+/// a canned response, avoiding the full classification + upstream round-trip.
+/// Returns `None` if the request should proceed normally.
+fn try_optimize_request(body: &[u8]) -> Option<Response> {
+    let val: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let messages = val.get("messages")?.as_array()?;
+
+    // Empty messages array → return empty assistant response
+    if messages.is_empty() {
+        debug!("Request optimization: empty messages array, returning canned response");
+        let resp_body = if val.get("anthropic_version").is_some() {
+            serde_json::json!({
+                "id": "msg_optimized",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "cerebrum-optimized",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 0, "output_tokens": 0}
+            })
+        } else {
+            serde_json::json!({
+                "id": "chatcmpl-optimized",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": ""},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            })
+        };
+        return Some(json_response(StatusCode::OK, resp_body.to_string()));
+    }
+
+    // Single-message known probe patterns — only match when the entire
+    // body is small (<512 bytes) to avoid false positives on real requests.
+    if messages.len() == 1 && body.len() < 512 {
+        let content = messages[0].get("content")?;
+        let text = if let Some(s) = content.as_str() {
+            s.trim().to_lowercase()
+        } else if let Some(arr) = content.as_array() {
+            if arr.len() == 1 {
+                arr[0].get("text")?.as_str()?.trim().to_lowercase()
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        };
+
+        if matches!(text.as_str(), "hello" | "hi" | "test" | "hey") {
+            debug!(
+                "Request optimization: matched probe pattern '{}', returning canned response",
+                text
+            );
+            let resp_body = if val.get("anthropic_version").is_some() {
+                serde_json::json!({
+                    "id": "msg_optimized",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Hello! How can I help you today?"}],
+                    "model": "cerebrum-optimized",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 8}
+                })
+            } else {
+                serde_json::json!({
+                    "id": "chatcmpl-optimized",
+                    "object": "chat.completion",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Hello! How can I help you today?"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 8, "total_tokens": 9}
+                })
+            };
+            return Some(json_response(StatusCode::OK, resp_body.to_string()));
+        }
+    }
+
+    None
+}
+
 /// GET /v1/models — static model list for Claude Code gateway discovery.
 /// Returns a minimal OpenAI-compatible /v1/models response with known
 /// Claude model identifiers. Placed outside the auth layer so Claude Code
@@ -1686,6 +1771,12 @@ async fn completion_handler(
         }
     };
 
+    // Request optimization: short-circuit known trivial probes before
+    // classification and upstream routing.
+    if let Some(response) = try_optimize_request(&body) {
+        return response;
+    }
+
     let x_category = headers
         .get("x-cerebrum-category")
         .and_then(|v| v.to_str().ok())
@@ -2129,6 +2220,12 @@ async fn messages_handler(
             );
         }
     };
+
+    // Request optimization: short-circuit known trivial probes before
+    // classification and upstream routing.
+    if let Some(response) = try_optimize_request(&body) {
+        return response;
+    }
 
     let x_category = headers
         .get("x-cerebrum-category")
@@ -3499,6 +3596,74 @@ mod tests {
             .and_then(|v| v.as_u64())
             .expect("input_tokens should be a number");
         assert_eq!(tokens, 0, "expected 0 tokens for empty messages");
+    }
+
+    #[test]
+    fn test_optimize_empty_messages_returns_canned_response() {
+        let body = serde_json::json!({"messages": []}).to_string().into_bytes();
+        let resp = try_optimize_request(&body);
+        assert!(resp.is_some(), "empty messages should be optimized");
+        let resp = resp.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_optimize_hello_probe_openai_format() {
+        let body = serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hello"}]
+        })
+        .to_string()
+        .into_bytes();
+        let resp = try_optimize_request(&body);
+        assert!(resp.is_some(), "'hello' probe should be optimized");
+    }
+
+    #[test]
+    fn test_optimize_hello_probe_anthropic_format() {
+        let body = serde_json::json!({
+            "anthropic_version": "2023-06-01",
+            "model": "test",
+            "messages": [{"role": "user", "content": "hello"}]
+        })
+        .to_string()
+        .into_bytes();
+        let resp = try_optimize_request(&body);
+        assert!(resp.is_some(), "anthropic 'hello' probe should be optimized");
+    }
+
+    #[test]
+    fn test_optimize_normal_request_not_matched() {
+        let body = serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "explain quantum computing in detail"}]
+        })
+        .to_string()
+        .into_bytes();
+        let resp = try_optimize_request(&body);
+        assert!(resp.is_none(), "normal request should not be optimized");
+    }
+
+    #[test]
+    fn test_optimize_array_content_hello() {
+        let body = serde_json::json!({
+            "model": "test",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "hi"}]
+            }]
+        })
+        .to_string()
+        .into_bytes();
+        let resp = try_optimize_request(&body);
+        assert!(resp.is_some(), "array content 'hi' probe should be optimized");
+    }
+
+    #[test]
+    fn test_optimize_missing_messages_not_matched() {
+        let body = serde_json::json!({"model": "test"}).to_string().into_bytes();
+        let resp = try_optimize_request(&body);
+        assert!(resp.is_none(), "missing messages should not be optimized");
     }
 
     #[tokio::test]
