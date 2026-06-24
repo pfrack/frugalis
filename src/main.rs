@@ -769,14 +769,14 @@ async fn count_tokens_handler(body: Bytes) -> impl IntoResponse {
 /// Check if the request matches a known trivial probe pattern and return
 /// a canned response, avoiding the full classification + upstream round-trip.
 /// Returns `None` if the request should proceed normally.
-fn try_optimize_request(body: &[u8]) -> Option<Response> {
+fn try_optimize_request(body: &[u8], is_anthropic: bool) -> Option<Response> {
     let val: serde_json::Value = serde_json::from_slice(body).ok()?;
     let messages = val.get("messages")?.as_array()?;
 
     // Empty messages array → return empty assistant response
     if messages.is_empty() {
         debug!("Request optimization: empty messages array, returning canned response");
-        let resp_body = if val.get("anthropic_version").is_some() {
+        let resp_body = if is_anthropic {
             serde_json::json!({
                 "id": "msg_optimized",
                 "type": "message",
@@ -803,7 +803,10 @@ fn try_optimize_request(body: &[u8]) -> Option<Response> {
 
     // Single-message known probe patterns — only match when the entire
     // body is small (<512 bytes) to avoid false positives on real requests.
-    if messages.len() == 1 && body.len() < 512 {
+    // Skip streaming requests — real probes never stream.
+    if messages.len() == 1 && body.len() < 512
+        && val.get("stream") != Some(&serde_json::Value::Bool(true))
+    {
         let content = messages[0].get("content")?;
         let text = if let Some(s) = content.as_str() {
             s.trim().to_lowercase()
@@ -822,7 +825,7 @@ fn try_optimize_request(body: &[u8]) -> Option<Response> {
                 "Request optimization: matched probe pattern '{}', returning canned response",
                 text
             );
-            let resp_body = if val.get("anthropic_version").is_some() {
+            let resp_body = if is_anthropic {
                 serde_json::json!({
                     "id": "msg_optimized",
                     "type": "message",
@@ -1767,14 +1770,20 @@ async fn completion_handler(
             return json_response(
                 StatusCode::BAD_REQUEST,
                 r#"{"error":"bad_request","message":"invalid UTF-8 body"}"#.to_string(),
-            );
+                );
         }
     };
 
-    // Request optimization: short-circuit known trivial probes before
-    // classification and upstream routing.
-    if let Some(response) = try_optimize_request(&body) {
-        return response;
+    // Request optimization: skip if explicit routing headers are present —
+    // explicit directives should take precedence over probe optimization.
+    if headers
+        .get("x-cerebrum-category")
+        .is_none()
+        && headers.get("x-cerebrum-model").is_none()
+    {
+        if let Some(response) = try_optimize_request(&body, false) {
+            return response;
+        }
     }
 
     let x_category = headers
@@ -2221,10 +2230,16 @@ async fn messages_handler(
         }
     };
 
-    // Request optimization: short-circuit known trivial probes before
-    // classification and upstream routing.
-    if let Some(response) = try_optimize_request(&body) {
-        return response;
+    // Request optimization: skip if explicit routing headers are present —
+    // explicit directives should take precedence over probe optimization.
+    if headers
+        .get("x-cerebrum-category")
+        .is_none()
+        && headers.get("x-cerebrum-model").is_none()
+    {
+        if let Some(response) = try_optimize_request(&body, true) {
+            return response;
+        }
     }
 
     let x_category = headers
@@ -3241,7 +3256,7 @@ mod tests {
                     .header(header::AUTHORIZATION, "Bearer proxy-token")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
                     ))
                     .expect("request should be valid"),
             )
@@ -3601,7 +3616,7 @@ mod tests {
     #[test]
     fn test_optimize_empty_messages_returns_canned_response() {
         let body = serde_json::json!({"messages": []}).to_string().into_bytes();
-        let resp = try_optimize_request(&body);
+        let resp = try_optimize_request(&body, false);
         assert!(resp.is_some(), "empty messages should be optimized");
         let resp = resp.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3615,7 +3630,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let resp = try_optimize_request(&body);
+        let resp = try_optimize_request(&body, false);
         assert!(resp.is_some(), "'hello' probe should be optimized");
     }
 
@@ -3628,7 +3643,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let resp = try_optimize_request(&body);
+        let resp = try_optimize_request(&body, false);
         assert!(resp.is_some(), "anthropic 'hello' probe should be optimized");
     }
 
@@ -3640,7 +3655,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let resp = try_optimize_request(&body);
+        let resp = try_optimize_request(&body, false);
         assert!(resp.is_none(), "normal request should not be optimized");
     }
 
@@ -3655,15 +3670,51 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let resp = try_optimize_request(&body);
+        let resp = try_optimize_request(&body, false);
         assert!(resp.is_some(), "array content 'hi' probe should be optimized");
     }
 
     #[test]
     fn test_optimize_missing_messages_not_matched() {
         let body = serde_json::json!({"model": "test"}).to_string().into_bytes();
-        let resp = try_optimize_request(&body);
+        let resp = try_optimize_request(&body, false);
         assert!(resp.is_none(), "missing messages should not be optimized");
+    }
+
+    #[test]
+    fn test_optimize_stream_true_not_matched() {
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true
+        })
+        .to_string()
+        .into_bytes();
+        let resp = try_optimize_request(&body, false);
+        assert!(resp.is_none(), "streaming requests should not be optimized");
+    }
+
+    #[test]
+    fn test_optimize_probe_returns_anthropic_format() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-6-20250514",
+            "messages": [{"role": "user", "content": "hello"}]
+        })
+        .to_string()
+        .into_bytes();
+        let resp = try_optimize_request(&body, true).expect("should match probe pattern");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_optimize_empty_messages_returns_anthropic_format() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-6-20250514",
+            "messages": []
+        })
+        .to_string()
+        .into_bytes();
+        let resp = try_optimize_request(&body, true).expect("should match empty messages");
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -5720,7 +5771,7 @@ mod tests {
                     .header(header::AUTHORIZATION, "Bearer proxy-token")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":false}"#,
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":false}"#,
                     ))
                     .expect("request should be valid"),
             )
@@ -5761,7 +5812,7 @@ mod tests {
                     .header(header::AUTHORIZATION, "Bearer proxy-token")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
                     ))
                     .expect("request should be valid"),
             )
