@@ -304,10 +304,10 @@ Record fallback information in the inference log so operators can see which prov
 
 #### Automated
 
-- [x] 2.1 cargo test passes
-- [x] 2.2 cargo clippy clean
-- [ ] 2.3 Unit test: is_retryable_error correctness
-- [ ] 2.4 Integration test: 503 primary → 200 fallback
+- [x] 2.1 cargo test passes — 6d6a4db
+- [x] 2.2 cargo clippy clean — 6d6a4db
+- [x] 2.3 Unit test: is_retryable_error correctness — 6d6a4db
+- [x] 2.4 Integration test: 503 primary → 200 fallback — 6d6a4db
 
 #### Manual
 
@@ -319,10 +319,10 @@ Record fallback information in the inference log so operators can see which prov
 
 #### Automated
 
-- [x] 3.1 cargo test passes
-- [x] 3.2 cargo clippy clean
-- [x] 3.3 Migration applies cleanly
-- [x] 3.4 Unit test: inference record with provider_attempts > 1
+- [x] 3.1 cargo test passes — 6d6a4db
+- [x] 3.2 cargo clippy clean — 6d6a4db
+- [x] 3.3 Migration applies cleanly — 6d6a4db
+- [x] 3.4 Unit test: inference record with provider_attempts > 1 — 6d6a4db
 
 #### Manual
 

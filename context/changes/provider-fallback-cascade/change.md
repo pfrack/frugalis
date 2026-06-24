@@ -1,7 +1,7 @@
 # Change: Provider Fallback / Cascade
 
 - **id:** provider-fallback-cascade
-- **status:** implementing
+- **status:** implemented
 - **created:** 2026-06-24
 - **updated:** 2026-06-24
 - **roadmap_id:** S-17
