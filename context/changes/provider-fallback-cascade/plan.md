@@ -291,10 +291,10 @@ Record fallback information in the inference log so operators can see which prov
 
 #### Automated
 
-- [x] 1.1 cargo test passes with existing single-provider configs
-- [x] 1.2 cargo clippy clean
-- [x] 1.3 Unit test: providers array config parses correctly
-- [x] 1.4 Unit test: legacy flat config parses to single-element providers vec
+- [x] 1.1 cargo test passes with existing single-provider configs — 4012167
+- [x] 1.2 cargo clippy clean — 4012167
+- [x] 1.3 Unit test: providers array config parses correctly — 4012167
+- [x] 1.4 Unit test: legacy flat config parses to single-element providers vec — 4012167
 
 #### Manual
 
@@ -304,8 +304,8 @@ Record fallback information in the inference log so operators can see which prov
 
 #### Automated
 
-- [ ] 2.1 cargo test passes
-- [ ] 2.2 cargo clippy clean
+- [x] 2.1 cargo test passes
+- [x] 2.2 cargo clippy clean
 - [ ] 2.3 Unit test: is_retryable_error correctness
 - [ ] 2.4 Integration test: 503 primary → 200 fallback
 
@@ -319,10 +319,10 @@ Record fallback information in the inference log so operators can see which prov
 
 #### Automated
 
-- [ ] 3.1 cargo test passes
-- [ ] 3.2 cargo clippy clean
-- [ ] 3.3 Migration applies cleanly
-- [ ] 3.4 Unit test: inference record with provider_attempts > 1
+- [x] 3.1 cargo test passes
+- [x] 3.2 cargo clippy clean
+- [x] 3.3 Migration applies cleanly
+- [x] 3.4 Unit test: inference record with provider_attempts > 1
 
 #### Manual
 

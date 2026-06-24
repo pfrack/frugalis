@@ -88,9 +88,12 @@ fn default_priority() -> u8 {
 pub struct ClassificationResult {
     pub category: String,
     pub model: String,
+    #[allow(dead_code)]
     pub endpoint: String,
     pub tier: ClassificationTier,
+    #[allow(dead_code)]
     pub provider_type: String,
+    #[allow(dead_code)]
     pub api_key_env: Option<String>,
     #[allow(dead_code)]
     pub providers: Vec<ProviderEntry>,

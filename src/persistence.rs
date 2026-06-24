@@ -110,6 +110,22 @@ impl SqliteBackend {
         .execute(&self.pool)
         .await
         .map_err(|e| format!("failed to create SQLite index: {e}"))?;
+
+        // Migration: add provider_attempts and final_provider columns if missing.
+        // SQLite ADD COLUMN is a no-op if the column already exists (error on
+        // duplicate is caught and ignored).
+        for (col, typ) in [
+            ("provider_attempts", "SMALLINT DEFAULT 1"),
+            ("final_provider", "TEXT"),
+        ] {
+            let sql = format!("ALTER TABLE inferences ADD COLUMN {} {}", col, typ);
+            match sqlx::query(&sql).execute(&self.pool).await {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("duplicate column") => {}
+                Err(e) => return Err(format!("failed to add column {}: {}", col, e)),
+            }
+        }
+
         Ok(())
     }
 }
@@ -256,6 +272,8 @@ impl PersistenceBackend for MemoryBackend {
                 category: r.category.clone(),
                 upstream_model: r.upstream_model.clone(),
                 duration_ms: r.duration_ms,
+                provider_attempts: Some(r.provider_attempts as i32),
+                final_provider: Some(r.final_provider.clone()),
             })
             .collect();
 
@@ -517,7 +535,7 @@ impl PersistenceBackend for SqliteBackend {
 
         let count_sql = format!("SELECT COUNT(*) FROM inferences{}", where_clause);
         let data_sql = format!(
-            "SELECT created_at, prompt_snippet, category, upstream_model, duration_ms \
+            "SELECT created_at, prompt_snippet, category, upstream_model, duration_ms, provider_attempts, final_provider \
              FROM inferences{} ORDER BY created_at DESC LIMIT ? OFFSET ?",
             where_clause,
         );
@@ -561,12 +579,16 @@ impl PersistenceBackend for SqliteBackend {
                 let category: Option<String> = row.try_get("category")?;
                 let upstream_model: Option<String> = row.try_get("upstream_model")?;
                 let duration_ms: Option<i32> = row.try_get("duration_ms")?;
+                let provider_attempts: Option<i32> = row.try_get("provider_attempts")?;
+                let final_provider: Option<String> = row.try_get("final_provider")?;
                 Ok(InferenceLog {
                     timestamp,
                     prompt_snippet,
                     category,
                     upstream_model,
                     duration_ms,
+                    provider_attempts,
+                    final_provider,
                 })
             })
             .collect::<Result<Vec<_>, sqlx::Error>>()
@@ -788,7 +810,7 @@ impl PersistenceBackend for PostgresBackend {
         let offset_ph = format!("${}", bind_count);
 
         let data_sql = format!(
-            "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms \
+            "SELECT id, created_at, prompt_snippet, category, upstream_model, duration_ms, provider_attempts, final_provider \
              FROM inferences{} ORDER BY created_at DESC LIMIT {} OFFSET {}",
             where_clause, limit_ph, offset_ph,
         );
@@ -831,12 +853,16 @@ impl PersistenceBackend for PostgresBackend {
                 let category: Option<String> = row.try_get("category")?;
                 let upstream_model: Option<String> = row.try_get("upstream_model")?;
                 let duration_ms: Option<i32> = row.try_get("duration_ms")?;
+                let provider_attempts: Option<i32> = row.try_get("provider_attempts")?;
+                let final_provider: Option<String> = row.try_get("final_provider")?;
                 Ok(InferenceLog {
                     timestamp,
                     prompt_snippet,
                     category,
                     upstream_model,
                     duration_ms,
+                    provider_attempts,
+                    final_provider,
                 })
             })
             .collect::<Result<Vec<_>, sqlx::Error>>()
@@ -1018,6 +1044,10 @@ pub struct InferenceLog {
     pub category: Option<String>,
     pub upstream_model: Option<String>,
     pub duration_ms: Option<i32>,
+    #[allow(dead_code)]
+    pub provider_attempts: Option<i32>,
+    #[allow(dead_code)]
+    pub final_provider: Option<String>,
 }
 
 /// One row from the latency aggregation query — a single category's summary.
@@ -1070,6 +1100,8 @@ pub struct InferenceRecord {
     pub prompt_snippet: String,
     pub prompt_char_count: Option<i32>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub provider_attempts: u8,
+    pub final_provider: String,
 }
 
 /// Extract the full last user message from an OpenAI-compatible request body.
@@ -1242,8 +1274,8 @@ where
 async fn insert_once(pool: &PgPool, record: &InferenceRecord) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO inferences \
-         (request_id, status, category, upstream_model, duration_ms, prompt_snippet, prompt_char_count) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+         (request_id, status, category, upstream_model, duration_ms, prompt_snippet, prompt_char_count, provider_attempts, final_provider) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(record.request_id)
     .bind(&record.status)
@@ -1252,6 +1284,8 @@ async fn insert_once(pool: &PgPool, record: &InferenceRecord) -> Result<(), sqlx
     .bind(record.duration_ms)
     .bind(&record.prompt_snippet)
     .bind(record.prompt_char_count)
+    .bind(record.provider_attempts as i16)
+    .bind(&record.final_provider)
     .execute(pool)
     .await
     .map(|_| ())
@@ -1264,8 +1298,8 @@ async fn insert_once_sqlite(
     // Note: `created_at` is omitted and SQLite will use its default CURRENT_TIMESTAMP.
     sqlx::query(
         "INSERT INTO inferences \
-         (request_id, status, category, upstream_model, duration_ms, prompt_snippet, prompt_char_count) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         (request_id, status, category, upstream_model, duration_ms, prompt_snippet, prompt_char_count, provider_attempts, final_provider) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     )
     .bind(record.request_id.to_string())
     .bind(&record.status)
@@ -1274,6 +1308,8 @@ async fn insert_once_sqlite(
     .bind(record.duration_ms)
     .bind(&record.prompt_snippet)
     .bind(record.prompt_char_count)
+    .bind(record.provider_attempts as i32)
+    .bind(&record.final_provider)
     .execute(pool)
     .await
     .map(|_| ())
@@ -1635,6 +1671,8 @@ mod tests {
             prompt_snippet: "test snippet".to_string(),
             prompt_char_count: None,
             created_at: chrono::Utc::now(),
+            final_provider: String::new(),
+            provider_attempts: 1,
         };
         pc.backend
             .insert_inference(&record)
@@ -1664,6 +1702,8 @@ mod tests {
             prompt_snippet: "alpha snippet".to_string(),
             prompt_char_count: None,
             created_at: chrono::Utc::now(),
+            final_provider: String::new(),
+            provider_attempts: 1,
         };
         let record_b = InferenceRecord {
             request_id: uuid::Uuid::new_v4(),
@@ -1674,6 +1714,8 @@ mod tests {
             prompt_snippet: "beta snippet".to_string(),
             prompt_char_count: None,
             created_at: chrono::Utc::now(),
+            final_provider: String::new(),
+            provider_attempts: 1,
         };
         pc.backend
             .insert_inference(&record_a)
@@ -1713,6 +1755,8 @@ mod tests {
                 prompt_snippet: "snippet".to_string(),
                 prompt_char_count: None,
                 created_at: chrono::Utc::now(),
+                final_provider: String::new(),
+                provider_attempts: 1,
             };
             pc.backend.insert_inference(&record).await.expect("insert");
         }
@@ -1766,6 +1810,8 @@ mod tests {
             prompt_snippet: "single record".to_string(),
             prompt_char_count: None,
             created_at: chrono::Utc::now(),
+            final_provider: String::new(),
+            provider_attempts: 1,
         };
         pc.backend
             .insert_inference(&record)
@@ -1809,6 +1855,8 @@ mod tests {
                     prompt_snippet: "cat a".to_string(),
                     prompt_char_count: None,
                     created_at: now,
+                    final_provider: String::new(),
+                    provider_attempts: 1,
                 })
                 .await
                 .expect("insert");
@@ -1825,6 +1873,8 @@ mod tests {
                     prompt_snippet: "cat b".to_string(),
                     prompt_char_count: None,
                     created_at: now,
+                    final_provider: String::new(),
+                    provider_attempts: 1,
                 })
                 .await
                 .expect("insert");
@@ -1840,6 +1890,8 @@ mod tests {
                 prompt_snippet: "cat c".to_string(),
                 prompt_char_count: None,
                 created_at: now,
+                final_provider: String::new(),
+                provider_attempts: 1,
             })
             .await
             .expect("insert");
@@ -1903,6 +1955,8 @@ mod tests {
                     prompt_snippet: snippet.to_string(),
                     prompt_char_count: None,
                     created_at: now,
+                    final_provider: String::new(),
+                    provider_attempts: 1,
                 })
                 .await
                 .expect("insert");
@@ -1940,6 +1994,8 @@ mod tests {
                 prompt_snippet: "empty test".to_string(),
                 prompt_char_count: Some(100),
                 created_at: chrono::Utc::now(),
+                final_provider: String::new(),
+                provider_attempts: 1,
             })
             .await
             .expect("insert should succeed");
@@ -1979,6 +2035,8 @@ mod tests {
                 prompt_snippet: "cheap prompt".to_string(),
                 prompt_char_count: Some(1000),
                 created_at: now,
+                final_provider: String::new(),
+                provider_attempts: 1,
             })
             .await
             .expect("insert 1");
@@ -1992,6 +2050,8 @@ mod tests {
                 prompt_snippet: "complex prompt with more content".to_string(),
                 prompt_char_count: Some(2000),
                 created_at: now,
+                final_provider: String::new(),
+                provider_attempts: 1,
             })
             .await
             .expect("insert 2");
@@ -2032,6 +2092,8 @@ mod tests {
                 prompt_snippet: "some prompt".to_string(),
                 prompt_char_count: Some(500),
                 created_at: chrono::Utc::now(),
+                final_provider: String::new(),
+                provider_attempts: 1,
             })
             .await
             .expect("insert should succeed");
@@ -2071,6 +2133,8 @@ mod tests {
                 prompt_snippet: "uncategorized".to_string(),
                 prompt_char_count: Some(100),
                 created_at: chrono::Utc::now(),
+                final_provider: String::new(),
+                provider_attempts: 1,
             })
             .await
             .expect("insert should succeed");
@@ -2104,6 +2168,8 @@ mod tests {
                 prompt_snippet: "older record with no char count".to_string(),
                 prompt_char_count: None,
                 created_at: chrono::Utc::now(),
+                final_provider: String::new(),
+                provider_attempts: 1,
             })
             .await
             .expect("insert should succeed");
@@ -2141,6 +2207,8 @@ mod tests {
                 prompt_snippet: "old record".to_string(),
                 prompt_char_count: None,
                 created_at: two_hours_ago,
+                final_provider: String::new(),
+                provider_attempts: 1,
             })
             .await
             .expect("insert should succeed");
@@ -2211,6 +2279,8 @@ mod tests {
                     prompt_snippet: format!("record {}", i),
                     prompt_char_count: None,
                     created_at: now,
+                    final_provider: String::new(),
+                    provider_attempts: 1,
                 })
                 .await
                 .expect("insert");
@@ -2249,6 +2319,8 @@ mod tests {
                     prompt_snippet: format!("record {}", i),
                     prompt_char_count: None,
                     created_at: now,
+                    final_provider: String::new(),
+                    provider_attempts: 1,
                 })
                 .await
                 .expect("insert");
@@ -2269,6 +2341,8 @@ mod tests {
                         prompt_snippet: format!("record {}", i),
                         prompt_char_count: None,
                         created_at: now,
+                        final_provider: String::new(),
+                        provider_attempts: 1,
                     })
                     .await
                     .expect("insert");
@@ -2305,6 +2379,8 @@ mod tests {
                 prompt_snippet: "recent".to_string(),
                 prompt_char_count: None,
                 created_at: now,
+                final_provider: String::new(),
+                provider_attempts: 1,
             })
             .await
             .expect("insert");
@@ -2319,6 +2395,8 @@ mod tests {
                 prompt_snippet: "old".to_string(),
                 prompt_char_count: None,
                 created_at: old,
+                final_provider: String::new(),
+                provider_attempts: 1,
             })
             .await
             .expect("insert");
@@ -2395,6 +2473,8 @@ mod tests {
             prompt_snippet: "sqlite test snippet".to_string(),
             prompt_char_count: Some(100),
             created_at: chrono::Utc::now(),
+            final_provider: String::new(),
+            provider_attempts: 1,
         };
         pc.backend
             .insert_inference(&record)
@@ -2442,6 +2522,8 @@ mod tests {
             prompt_snippet: "isolated".to_string(),
             prompt_char_count: None,
             created_at: chrono::Utc::now(),
+            final_provider: String::new(),
+            provider_attempts: 1,
         };
         pc1.backend.insert_inference(&record).await.expect("insert");
 
@@ -2469,6 +2551,8 @@ mod tests {
             prompt_snippet: "log inference test".to_string(),
             prompt_char_count: Some(25),
             created_at: chrono::Utc::now(),
+            final_provider: String::new(),
+            provider_attempts: 1,
         };
 
         let handle = log_inference(pc.backend.clone(), pc.task_semaphore.clone(), record);
