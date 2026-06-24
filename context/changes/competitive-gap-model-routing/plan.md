@@ -288,8 +288,8 @@ Returns `None` if the request should proceed normally.
 
 #### Automated
 
-- [x] 4.1 cargo test passes with try_optimize_request unit test
-- [x] 4.2 cargo clippy clean
+- [x] 4.1 cargo test passes with try_optimize_request unit test — ecf26b2
+- [x] 4.2 cargo clippy clean — ecf26b2
 
 #### Manual
 
