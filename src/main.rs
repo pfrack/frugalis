@@ -716,6 +716,18 @@ async fn health() -> (StatusCode, &'static str) {
     (StatusCode::OK, "ok")
 }
 
+/// Strip fields that NVIDIA NIM rejects before forwarding translated requests.
+/// Called after protocol translation but before `client.post()`.
+fn sanitize_for_nim(body: &mut serde_json::Value) {
+    if let Some(obj) = body.as_object_mut() {
+        for key in &["top_k", "metadata", "thinking"] {
+            if obj.remove(*key).is_some() {
+                debug!("NIM sanitization: stripped '{}' field", key);
+            }
+        }
+    }
+}
+
 /// GET /v1/models — static model list for Claude Code gateway discovery.
 /// Returns a minimal OpenAI-compatible /v1/models response with known
 /// Claude model identifiers. Placed outside the auth layer so Claude Code
@@ -1901,6 +1913,19 @@ async fn completion_handler(
     }
 
     // ── OpenAI-compatible upstream: pass through ──────────────────────
+    // NIM sanitization: strip fields that NVIDIA NIM rejects
+    let body = if classification.provider_type == "nvidia_nim" {
+        match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(mut v) => {
+                sanitize_for_nim(&mut v);
+                Bytes::from(serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec()))
+            }
+            Err(_) => body,
+        }
+    } else {
+        body
+    };
+
     let (client_wants_stream, upstream_req) = match build_upstream_request(
         client,
         &classification,
@@ -2214,6 +2239,19 @@ async fn messages_handler(
         }
     } else {
         body.clone()
+    };
+
+    // NIM sanitization: strip fields that NVIDIA NIM rejects
+    let request_bytes = if classification.provider_type == "nvidia_nim" {
+        match serde_json::from_slice::<serde_json::Value>(&request_bytes) {
+            Ok(mut v) => {
+                sanitize_for_nim(&mut v);
+                Bytes::from(serde_json::to_vec(&v).unwrap_or_else(|_| request_bytes.to_vec()))
+            }
+            Err(_) => request_bytes,
+        }
+    } else {
+        request_bytes
     };
 
     let (client_wants_stream, upstream_req) = match build_upstream_request(
@@ -3316,6 +3354,25 @@ mod tests {
                 "each model should be owned_by anthropic"
             );
         }
+    }
+
+    #[test]
+    fn test_sanitize_for_nim_strips_unsupported_fields() {
+        let mut body = serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "top_k": 40,
+            "metadata": {"key": "value"},
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "stream": true
+        });
+        sanitize_for_nim(&mut body);
+        assert!(body.get("top_k").is_none(), "top_k should be stripped");
+        assert!(body.get("metadata").is_none(), "metadata should be stripped");
+        assert!(body.get("thinking").is_none(), "thinking should be stripped");
+        assert!(body.get("model").is_some(), "model should be preserved");
+        assert!(body.get("messages").is_some(), "messages should be preserved");
+        assert!(body.get("stream").is_some(), "stream should be preserved");
     }
 
     #[tokio::test]
