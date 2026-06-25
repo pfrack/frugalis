@@ -1074,12 +1074,41 @@ fn is_retryable_error(result: &Result<reqwest::Response, reqwest::Error>) -> boo
     }
 }
 
+/// Collect inbound headers that must be forwarded to Anthropic upstreams as an
+/// open list: any header whose lower-cased name begins with `anthropic-` or
+/// `x-claude-code-`. This is the single extraction point both proxy handlers
+/// reuse before threading the result into `auth_headers_for` / upstream
+/// construction.
+///
+/// SECURITY INVARIANT: never include `authorization` or `x-api-key`. Those
+/// carry the proxy's own inbound credential (consumed by the auth middleware)
+/// and forwarding them would let a client overwrite the resolved upstream key.
+/// The prefix allowlist already excludes them — keep the prefixes restrictive
+/// (do not broaden to a blind copy of all inbound headers). When the same name
+/// appears multiple times, the first value wins so downstream emission stays
+/// deterministic.
+fn collect_forward_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, value) in headers.iter() {
+        let name_lower = name.as_str();
+        if (name_lower.starts_with("anthropic-") || name_lower.starts_with("x-claude-code-"))
+            && !out.iter().any(|(n, _)| *n == name_lower)
+        {
+            if let Ok(v) = value.to_str() {
+                out.push((name_lower.to_string(), v.to_string()));
+            }
+        }
+    }
+    out
+}
+
 fn build_upstream_request(
     client: &reqwest::Client,
     provider: &routing::ProviderEntry,
     body: &Bytes,
     api_key: &str,
     auth_providers: &[config::AuthProviderConfig],
+    forward_headers: &[(String, String)],
 ) -> Result<(bool, reqwest::RequestBuilder), String> {
     let mut req_body: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| format!("invalid JSON body: {e}"))?;
@@ -1100,8 +1129,21 @@ fn build_upstream_request(
 
     let modified_body = serde_json::to_vec(&req_body).unwrap_or_else(|_| body.to_vec());
 
-    let auth_headers =
-        intent_classifier::auth_headers_for(auth_providers, &provider.provider_type, api_key);
+    // `auth_headers_for` is the single emission point for the full upstream
+    // header set: it resolves the credential AND, for anthropic providers,
+    // appends the client-forwarded `anthropic-*` / `x-claude-code-*` headers
+    // (with a client `anthropic-version` preferred over the default). Applying
+    // only its return value here — instead of also forwarding client headers
+    // directly — avoids duplicate headers and keeps one decision point keyed
+    // on provider_type. The auth credential is always applied, and
+    // `collect_forward_headers` excludes `authorization` / `x-api-key`, so a
+    // client can never overwrite the resolved upstream key.
+    let auth_headers = intent_classifier::auth_headers_for(
+        auth_providers,
+        &provider.provider_type,
+        api_key,
+        forward_headers,
+    );
 
     let mut req = client
         .post(&provider.endpoint)
@@ -1852,6 +1894,11 @@ async fn completion_handler(
         }
     };
 
+    // Capture Claude Code / Anthropic client headers once; threaded into every
+    // upstream attempt so beta-gated features and session attribution reach the
+    // upstream. See `collect_forward_headers` for the security invariant.
+    let forward_headers = collect_forward_headers(&headers);
+
     // Request optimization: skip if explicit routing headers are present —
     // explicit directives should take precedence over probe optimization.
     if headers
@@ -2010,6 +2057,7 @@ async fn completion_handler(
                 &state.auth_providers,
                 &provider.provider_type,
                 &api_key,
+                &forward_headers,
             );
             let mut upstream_req = client
                 .post(&provider.endpoint)
@@ -2110,7 +2158,7 @@ async fn completion_handler(
         };
 
         let (client_wants_stream, upstream_req) = match build_upstream_request(
-            client, provider, &provider_body, &api_key, &state.auth_providers,
+            client, provider, &provider_body, &api_key, &state.auth_providers, &forward_headers,
         ) {
             Err(msg) => {
                 if is_last {
@@ -2256,6 +2304,11 @@ async fn messages_handler(
             );
         }
     };
+
+    // Capture Claude Code / Anthropic client headers once; threaded into every
+    // upstream attempt so beta-gated features and session attribution reach the
+    // upstream. See `collect_forward_headers` for the security invariant.
+    let forward_headers = collect_forward_headers(&headers);
 
     // Request optimization: skip if explicit routing headers are present —
     // explicit directives should take precedence over probe optimization.
@@ -2417,7 +2470,7 @@ async fn messages_handler(
         };
 
         let (client_wants_stream, upstream_req) = match build_upstream_request(
-            client, provider, &request_bytes, &api_key, &state.auth_providers,
+            client, provider, &request_bytes, &api_key, &state.auth_providers, &forward_headers,
         ) {
             Err(msg) => {
                 if is_last {
@@ -4680,6 +4733,122 @@ mod tests {
         assert!(
             body_str.contains("msg_1"),
             "expected upstream id in response, got: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_forwards_anthropic_client_headers() {
+        // Claude Code pairs each anthropic-beta capability with an
+        // anthropic-version + x-claude-code-* attribution header. Routed to an
+        // Anthropic upstream, Cerebrum must forward them unchanged, prefer the
+        // client's anthropic-version over the 2023-06-01 default, and still
+        // apply the resolved x-api-key credential. The mock matches only if
+        // every forwarded header is present with the expected value.
+        let env = "TEST_ANTHROPIC_FWD";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .header("x-api-key", "sk-ant-test")
+                .header("anthropic-version", "2024-10-22")
+                .header("anthropic-beta", "context-management-2025-09")
+                .header("x-claude-code-session-id", "sess-123");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+                );
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("anthropic-version", "2024-10-22")
+                    .header("anthropic-beta", "context-management-2025-09")
+                    .header("x-claude-code-session-id", "sess-123")
+                    .body(Body::from(
+                        r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_does_not_forward_anthropic_headers_to_openai() {
+        // anthropic-* headers are meaningless to an OpenAI-compatible upstream
+        // and must be dropped on cross-protocol routing. httpmock 0.7 has no
+        // header-absence matcher and exposes no request inspection, so we use
+        // FIFO "canary" mocks registered BEFORE the serving mock: a canary
+        // matches ONLY if its header_exists criterion is satisfied, so it gets
+        // hit iff that header leaked to the upstream. In the correct case the
+        // canaries never match and the serving mock (Authorization only) wins.
+        let env = "TEST_OPENAI_NO_FWD";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let beta_canary = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header_exists("anthropic-beta");
+            then.status(200).body("canary-beta");
+        });
+        let version_canary = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header_exists("anthropic-version");
+            then.status(200).body("canary-version");
+        });
+        let positive = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header("Authorization", "Bearer sk-test");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body("ok");
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("anthropic-version", "2024-10-22")
+                    .header("anthropic-beta", "context-management-2025-09")
+                    .header("x-claude-code-session-id", "sess-123")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            beta_canary.hits(),
+            0,
+            "anthropic-beta must NOT be forwarded to an OpenAI-compatible upstream"
+        );
+        assert_eq!(
+            version_canary.hits(),
+            0,
+            "anthropic-version must NOT be forwarded to an OpenAI-compatible upstream"
+        );
+        assert_eq!(
+            positive.hits(),
+            1,
+            "request must still reach the upstream with the resolved Authorization credential"
         );
     }
 

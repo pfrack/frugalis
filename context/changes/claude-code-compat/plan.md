@@ -302,9 +302,9 @@ Translate cache tokens in responses so clients see accurate usage in both protoc
 
 #### Automated
 
-- [x] 1.1 `cargo test` passes with updated models tests
-- [x] 1.2 Unit test asserts entries have `display_name` and `claude`/`anthropic`-prefixed `id`
-- [x] 1.3 `cargo test auth` and `cargo test routes_auth` pass (endpoint stays unauthenticated)
+- [x] 1.1 `cargo test` passes with updated models tests — b6f6f1e
+- [x] 1.2 Unit test asserts entries have `display_name` and `claude`/`anthropic`-prefixed `id` — b6f6f1e
+- [x] 1.3 `cargo test auth` and `cargo test routes_auth` pass (endpoint stays unauthenticated) — b6f6f1e
 
 #### Manual
 
@@ -315,9 +315,9 @@ Translate cache tokens in responses so clients see accurate usage in both protoc
 
 #### Automated
 
-- [ ] 2.1 `cargo test` passes
-- [ ] 2.2 httpmock test: Anthropic upstream receives inbound `anthropic-beta`/`anthropic-version` unchanged; OpenAI upstream does not
-- [ ] 2.3 `cargo test auth`, `cargo test routes_auth` pass
+- [x] 2.1 `cargo test` passes
+- [x] 2.2 httpmock test: Anthropic upstream receives inbound `anthropic-beta`/`anthropic-version` unchanged; OpenAI upstream does not
+- [x] 2.3 `cargo test auth`, `cargo test routes_auth` pass
 
 #### Manual
 

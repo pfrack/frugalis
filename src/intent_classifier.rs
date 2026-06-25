@@ -304,7 +304,9 @@ impl LLMClassifier {
             .header("Content-Type", "application/json");
 
         let request = if !api_key.is_empty() {
-            let headers = auth_headers_for(&self.auth_providers, &self.provider_type, &api_key);
+            // The classifier's own LLM probe originates from Cerebrum, not a
+            // proxied client request, so there are no client headers to forward.
+            let headers = auth_headers_for(&self.auth_providers, &self.provider_type, &api_key, &[]);
             let mut req = request;
             for (key, value) in headers {
                 req = req.header(&key, &value);
@@ -429,25 +431,46 @@ pub(crate) struct FewShotExample {
 
 /// Maps a provider_type string and resolved API key to HTTP auth header tuples
 /// using the configured auth provider list. Falls back to Bearer Authorization
-/// for unknown or unconfigured provider types. For `provider_type == "anthropic"`
-/// always appends the protocol-required `anthropic-version` header alongside
-/// whichever auth header was resolved (configured or hard-coded fallback) — the
-/// version is a protocol constant, not a user preference, so we centralize it.
+/// for unknown or unconfigured provider types.
+///
+/// This function is the SINGLE emission point for the full upstream header
+/// set, including client-forwarded headers. For `provider_type == "anthropic"`
+/// it appends the `anthropic-*` / `x-claude-code-*` entries from
+/// `forward_headers` (so beta-gated Claude Code features reach the upstream),
+/// prefers a client-supplied `anthropic-version` over the hard-coded
+/// `2023-06-01` protocol constant, and de-dupes so every name is emitted at
+/// most once. For non-anthropic providers the forward set is dropped entirely —
+/// those headers are meaningless to OpenAI / Ollama upstreams and forwarding
+/// them would only add noise (the plan's contract: drop `anthropic-*` for
+/// non-anthropic).
+///
+/// `forward_headers` is the output of `collect_forward_headers` (see main.rs),
+/// which already excludes `authorization` / `x-api-key`; combined with callers
+/// applying only the set returned here, a client can never overwrite the
+/// resolved upstream credential.
 pub fn auth_headers_for(
     providers: &[AuthProviderConfig],
     provider_type: &str,
     api_key: &str,
+    forward_headers: &[(String, String)],
 ) -> Vec<(String, String)> {
     let pt = if provider_type.is_empty() {
         "openai_compatible"
     } else {
         provider_type
     };
+    // Prefer a client-supplied anthropic-version over the protocol constant so
+    // Claude Code can pin a newer API version without a Cerebrum change. We
+    // resolve it once here and skip the raw entry when appending the forward
+    // set, so the version header is emitted exactly once.
+    let client_version = forward_headers
+        .iter()
+        .find(|(n, _)| n == "anthropic-version")
+        .map(|(_, v)| v.as_str());
     // Anthropic protocol constant: every Anthropic request must carry the
     // version header. Append it to whatever auth header the user configured
     // (or the hard-coded fallback below) so callers don't need to manage two
     // parallel config entries.
-    let anthropic_version = ("anthropic-version".to_string(), "2023-06-01".to_string());
     for provider in providers {
         if provider.type_ == pt {
             let mut headers = match (&provider.header, &provider.value_template) {
@@ -458,7 +481,11 @@ pub fn auth_headers_for(
                 _ => vec![],
             };
             if pt == "anthropic" {
-                headers.push(anthropic_version);
+                headers.push((
+                    "anthropic-version".to_string(),
+                    client_version.unwrap_or("2023-06-01").to_string(),
+                ));
+                append_forward_headers(&mut headers, forward_headers);
             }
             return headers;
         }
@@ -466,12 +493,34 @@ pub fn auth_headers_for(
     // No matching provider config — hard-coded fallback for "anthropic",
     // generic Bearer for everything else.
     if pt == "anthropic" {
-        return vec![
+        let mut headers = vec![
             ("x-api-key".to_string(), api_key.to_string()),
-            anthropic_version,
+            (
+                "anthropic-version".to_string(),
+                client_version.unwrap_or("2023-06-01").to_string(),
+            ),
         ];
+        append_forward_headers(&mut headers, forward_headers);
+        return headers;
     }
     vec![("authorization".into(), format!("Bearer {api_key}"))]
+}
+
+/// Append client-forwarded `anthropic-*` / `x-claude-code-*` headers to `out`,
+/// skipping `anthropic-version` (the caller already emitted it with the
+/// resolved value) and any name already present. De-duplication guarantees a
+/// client value can never duplicate a header the proxy set and keeps emission
+/// deterministic when a name appears more than once in the inbound request.
+fn append_forward_headers(out: &mut Vec<(String, String)>, forward_headers: &[(String, String)]) {
+    for (name, value) in forward_headers {
+        if name == "anthropic-version" {
+            continue;
+        }
+        if out.iter().any(|(n, _)| n == name.as_str()) {
+            continue;
+        }
+        out.push((name.clone(), value.clone()));
+    }
 }
 
 // ── Code-block regex (lazily compiled once) ──
@@ -1273,7 +1322,7 @@ mod tests {
     #[test]
     fn auth_headers_for_openai_compatible() {
         let providers = default_auth_providers();
-        let headers = auth_headers_for(&providers, "openai_compatible", "sk-123");
+        let headers = auth_headers_for(&providers, "openai_compatible", "sk-123", &[]);
         assert_eq!(
             headers,
             vec![("authorization".to_string(), "Bearer sk-123".to_string())]
@@ -1283,7 +1332,7 @@ mod tests {
     #[test]
     fn auth_headers_for_empty_defaults_to_openai_compatible() {
         let providers = default_auth_providers();
-        let headers = auth_headers_for(&providers, "", "sk-123");
+        let headers = auth_headers_for(&providers, "", "sk-123", &[]);
         assert_eq!(
             headers,
             vec![("authorization".to_string(), "Bearer sk-123".to_string())]
@@ -1293,7 +1342,7 @@ mod tests {
     #[test]
     fn auth_headers_for_anthropic() {
         let providers = default_auth_providers();
-        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-123");
+        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-123", &[]);
         assert_eq!(
             headers,
             vec![
@@ -1309,7 +1358,7 @@ mod tests {
         // Anthropic provider_type must still emit x-api-key + the protocol
         // version header so the upstream accepts the request.
         let providers: Vec<AuthProviderConfig> = vec![];
-        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-fb");
+        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-fb", &[]);
         assert_eq!(
             headers,
             vec![
@@ -1322,24 +1371,103 @@ mod tests {
     #[test]
     fn auth_headers_for_ollama() {
         let providers = default_auth_providers();
-        let headers = auth_headers_for(&providers, "ollama", "dummy");
+        let headers = auth_headers_for(&providers, "ollama", "dummy", &[]);
         assert!(headers.is_empty());
     }
 
     #[test]
     fn auth_headers_for_local() {
         let providers = default_auth_providers();
-        let headers = auth_headers_for(&providers, "local", "dummy");
+        let headers = auth_headers_for(&providers, "local", "dummy", &[]);
         assert!(headers.is_empty());
     }
 
     #[test]
     fn auth_headers_for_unknown() {
         let providers = default_auth_providers();
-        let headers = auth_headers_for(&providers, "unknown_provider", "key");
+        let headers = auth_headers_for(&providers, "unknown_provider", "key", &[]);
         assert_eq!(
             headers,
             vec![("authorization".to_string(), "Bearer key".to_string())]
+        );
+    }
+
+    #[test]
+    fn auth_headers_for_anthropic_forwards_client_headers_and_prefers_version() {
+        let providers = default_auth_providers();
+        // Client pinned a newer anthropic-version and sent an anthropic-beta
+        // capability plus a Claude Code session id. The proxy must forward the
+        // beta + session id verbatim, prefer the client's version over the
+        // 2023-06-01 default, and emit the version exactly once.
+        let forward = vec![
+            ("anthropic-version".to_string(), "2024-10-22".to_string()),
+            ("anthropic-beta".to_string(), "context-management-2025-09".to_string()),
+            ("x-claude-code-session-id".to_string(), "sess-abc".to_string()),
+        ];
+        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-123", &forward);
+        assert!(
+            headers.contains(&("anthropic-version".to_string(), "2024-10-22".to_string())),
+            "client-supplied anthropic-version must be preferred, got {headers:?}"
+        );
+        assert!(
+            !headers.contains(&("anthropic-version".to_string(), "2023-06-01".to_string())),
+            "default version must not also be emitted, got {headers:?}"
+        );
+        assert!(
+            headers.contains(&("anthropic-beta".to_string(), "context-management-2025-09".to_string())),
+            "anthropic-beta must be forwarded to an Anthropic upstream, got {headers:?}"
+        );
+        assert!(
+            headers.contains(&("x-claude-code-session-id".to_string(), "sess-abc".to_string())),
+            "x-claude-code-session-id must be forwarded, got {headers:?}"
+        );
+        assert!(
+            headers.contains(&("x-api-key".to_string(), "sk-ant-123".to_string())),
+            "resolved auth header must still be present, got {headers:?}"
+        );
+        let version_count = headers
+            .iter()
+            .filter(|(n, _)| n == "anthropic-version")
+            .count();
+        assert_eq!(version_count, 1, "anthropic-version must be emitted exactly once");
+    }
+
+    #[test]
+    fn auth_headers_for_anthropic_falls_back_to_default_version() {
+        let providers = default_auth_providers();
+        // No client version on the wire -> default 2023-06-01; beta still
+        // forwarded so GA features keep working even when the client omits the
+        // version header.
+        let forward = vec![(
+            "anthropic-beta".to_string(),
+            "prompt-caching-2024-07-31".to_string(),
+        )];
+        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-123", &forward);
+        assert!(
+            headers.contains(&("anthropic-version".to_string(), "2023-06-01".to_string())),
+            "default version must be used when the client sent none, got {headers:?}"
+        );
+        assert!(
+            headers.contains(&("anthropic-beta".to_string(), "prompt-caching-2024-07-31".to_string())),
+            "anthropic-beta must still be forwarded without a client version, got {headers:?}"
+        );
+    }
+
+    #[test]
+    fn auth_headers_for_non_anthropic_drops_forward_headers() {
+        let providers = default_auth_providers();
+        // anthropic-* is meaningless to an OpenAI-compatible upstream and must
+        // be dropped entirely so we never forward Anthropic-only noise.
+        let forward = vec![
+            ("anthropic-beta".to_string(), "should-not-forward".to_string()),
+            ("anthropic-version".to_string(), "2024-10-22".to_string()),
+            ("x-claude-code-session-id".to_string(), "sess-abc".to_string()),
+        ];
+        let headers = auth_headers_for(&providers, "openai_compatible", "sk-123", &forward);
+        assert_eq!(
+            headers,
+            vec![("authorization".to_string(), "Bearer sk-123".to_string())],
+            "non-anthropic providers must drop the entire forward set"
         );
     }
 
