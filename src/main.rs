@@ -854,15 +854,53 @@ fn try_optimize_request(body: &[u8], is_anthropic: bool) -> Option<Response> {
     None
 }
 
-/// GET /v1/models — static model list for Claude Code gateway discovery.
-/// Returns a minimal OpenAI-compatible /v1/models response with known
-/// Claude model identifiers. Placed outside the auth layer so Claude Code
-/// can probe before authenticating (matches its expectation for gateway
-/// model discovery with `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`).
+/// GET /v1/models — model list for Claude Code gateway discovery.
+///
+/// Returns Anthropic-shape entries (each carrying `display_name` and
+/// `type: "model"`) so Claude Code's model picker — gated behind
+/// `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` — shows friendly names
+/// instead of raw IDs. Each entry also retains the OpenAI fields
+/// (`object: "model"`, `owned_by`, `created`) so OpenAI clients hitting the
+/// same endpoint are unaffected; a superset avoids content-negotiation
+/// branching. IDs MUST begin with `claude` or `anthropic` to pass Claude
+/// Code's discovery filter. Placed outside the auth layer so Claude Code can
+/// probe before authenticating.
 async fn models_handler() -> impl IntoResponse {
     debug!("GET /v1/models request received");
-    static MODELS_JSON: &str = r#"{"data":[{"id":"claude-sonnet-4-6-20250514","object":"model","created":1700000000,"owned_by":"anthropic"},{"id":"claude-haiku-4-5-20250514","object":"model","created":1700000000,"owned_by":"anthropic"},{"id":"claude-opus-4-20250514","object":"model","created":1700000000,"owned_by":"anthropic"}],"object":"list","has_more":false}"#;
-    let mut resp = Response::new(Body::from(MODELS_JSON));
+    let body = serde_json::json!({
+        "object": "list",
+        "has_more": false,
+        "data": [
+            {
+                "type": "model",
+                "object": "model",
+                "id": "claude-sonnet-4-6-20250514",
+                "display_name": "Claude Sonnet 4.6",
+                "created_at": "2025-05-14T00:00:00Z",
+                "created": 1700000000,
+                "owned_by": "anthropic"
+            },
+            {
+                "type": "model",
+                "object": "model",
+                "id": "claude-haiku-4-5-20250514",
+                "display_name": "Claude Haiku 4.5",
+                "created_at": "2025-05-14T00:00:00Z",
+                "created": 1700000000,
+                "owned_by": "anthropic"
+            },
+            {
+                "type": "model",
+                "object": "model",
+                "id": "claude-opus-4-20250514",
+                "display_name": "Claude Opus 4",
+                "created_at": "2025-05-14T00:00:00Z",
+                "created": 1700000000,
+                "owned_by": "anthropic"
+            }
+        ]
+    });
+    let mut resp = Response::new(Body::from(body.to_string()));
     *resp.status_mut() = StatusCode::OK;
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -3491,6 +3529,54 @@ mod tests {
                 model.get("owned_by").and_then(|v| v.as_str()),
                 Some("anthropic"),
                 "each model should be owned_by anthropic"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_models_endpoint_entries_have_display_name_and_prefixed_id() {
+        // Claude Code's gateway discovery requires `display_name` for friendly
+        // names and filters entries whose IDs do not begin with `claude` or
+        // `anthropic`. This locks both invariants independently of the
+        // broader shape test above.
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("models request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        let data = json
+            .get("data")
+            .and_then(|v| v.as_array())
+            .expect("data should be an array");
+        assert!(!data.is_empty(), "data should not be empty");
+        for model in data {
+            let id = model
+                .get("id")
+                .and_then(|v| v.as_str())
+                .expect("each entry must have an id");
+            assert!(
+                id.starts_with("claude") || id.starts_with("anthropic"),
+                "id must be claude/anthropic-prefixed for Claude Code discovery, got {id}"
+            );
+            let display_name = model
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .expect("each entry must have a display_name");
+            assert!(
+                !display_name.is_empty(),
+                "display_name must be non-empty for id {id}"
+            );
+            assert_eq!(
+                model.get("type").and_then(|v| v.as_str()),
+                Some("model"),
+                "each Anthropic-shape entry should have type=model for id {id}"
             );
         }
     }
