@@ -328,10 +328,10 @@ Translate cache tokens in responses so clients see accurate usage in both protoc
 
 #### Automated
 
-- [x] 3.1 `cargo test` passes
-- [x] 3.2 httpmock: OAI→Anthropic translated body has top-level `cache_control`
-- [x] 3.3 httpmock: Anth→OpenAI body has no `cache_control`, reports `had_cache_control`
-- [x] 3.4 httpmock: Anth→Anthropic passthrough preserves `cache_control`
+- [x] 3.1 `cargo test` passes — c3b4eeb
+- [x] 3.2 httpmock: OAI→Anthropic translated body has top-level `cache_control` — c3b4eeb
+- [x] 3.3 httpmock: Anth→OpenAI body has no `cache_control`, reports `had_cache_control` — c3b4eeb
+- [x] 3.4 httpmock: Anth→Anthropic passthrough preserves `cache_control` — c3b4eeb
 
 #### Manual
 
@@ -342,10 +342,10 @@ Translate cache tokens in responses so clients see accurate usage in both protoc
 
 #### Automated
 
-- [ ] 4.1 `cargo test` passes; `cargo test persistence` passes
-- [ ] 4.2 Migration `005` applies cleanly and is idempotent
-- [ ] 4.3 httpmock: OpenAI usage chunk carries `cached_tokens` from Anthropic `cache_read_input_tokens` (and reverse)
-- [ ] 4.4 Unit test: `InferenceRecord` token fields round-trip through Postgres + memory backends
+- [x] 4.1 `cargo test` passes; `cargo test persistence` passes
+- [x] 4.2 Migration `005` applies cleanly and is idempotent
+- [x] 4.3 httpmock: OpenAI usage chunk carries `cached_tokens` from Anthropic `cache_read_input_tokens` (and reverse)
+- [x] 4.4 Unit test: `InferenceRecord` token fields round-trip through Postgres + memory backends
 
 #### Manual
 

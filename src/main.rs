@@ -910,11 +910,95 @@ async fn models_handler() -> impl IntoResponse {
 }
 
 
+/// Captured token usage from an upstream response, used to populate the token
+/// fields of an InferenceRecord. Fields hold the upstream's raw values; the
+/// extraction helpers normalize OpenAI's `cached_tokens` into the Anthropic
+/// `cache_read` shape so the record is protocol-agnostic.
+#[derive(Clone, Default)]
+struct UsageBreakdown {
+    input_tokens: i32,
+    output_tokens: i32,
+    cache_read_tokens: i32,
+    cache_creation_tokens: i32,
+}
+
+/// Extract a `UsageBreakdown` from an Anthropic-shaped response body's
+/// `usage` object. Returns `None` when the body carries no usage (e.g.
+/// non-success or untranslated error bodies). Cache fields default to 0 when
+/// the upstream omits them (no caching active).
+fn extract_anthropic_usage(body: &serde_json::Value) -> Option<UsageBreakdown> {
+    let usage = body.get("usage")?;
+    Some(UsageBreakdown {
+        input_tokens: usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+        output_tokens: usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+        cache_read_tokens: usage
+            .get("cache_read_input_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32,
+        cache_creation_tokens: usage
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32,
+    })
+}
+
+/// Extract a `UsageBreakdown` from an OpenAI-shaped response body's `usage`
+/// object. OpenAI reports cache hits as
+/// `usage.prompt_tokens_details.cached_tokens` (a subset of `prompt_tokens`);
+/// we map that to `cache_read_tokens` and derive the non-cached `input_tokens`
+/// so the record matches Anthropic semantics. `cache_creation_tokens` is 0
+/// (OpenAI has no creation concept).
+fn extract_openai_usage(body: &serde_json::Value) -> Option<UsageBreakdown> {
+    let usage = body.get("usage")?;
+    let prompt = usage.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let cached = usage
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    Some(UsageBreakdown {
+        input_tokens: (prompt - cached) as i32,
+        output_tokens: usage.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+        cache_read_tokens: cached as i32,
+        cache_creation_tokens: 0,
+    })
+}
+
+/// Parse a response body string and extract usage in the protocol the client
+/// sees: `anthropic_shape = true` for `/v1/messages` traffic (Anthropic usage),
+/// `false` for `/v1/chat/completions` traffic (OpenAI usage). Returns `None`
+/// when the body is not valid JSON or carries no usage object — callers log
+/// without usage in that case.
+fn parse_usage_from_body(body: &str, anthropic_shape: bool) -> Option<UsageBreakdown> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    if anthropic_shape {
+        extract_anthropic_usage(&v)
+    } else {
+        extract_openai_usage(&v)
+    }
+}
+
+/// Extract the Claude Code session id (`x-claude-code-session-id`) from the
+/// forwarded-header set collected at the handler entry. Returns `None` when
+/// the client did not send it.
+fn session_id_from_forward(forward_headers: &[(String, String)]) -> Option<&str> {
+    forward_headers
+        .iter()
+        .find(|(n, _)| n == "x-claude-code-session-id")
+        .map(|(_, v)| v.as_str())
+}
+
 /// Shared logging helper. Builds the inference record from the pre-extracted
 /// `prompt` and enqueues a fire-and-forget DB write. Callers must extract the
 /// prompt themselves (via `persistence::extract_last_user_message` for OpenAI
 /// traffic or `persistence::extract_last_user_message_anthropic` for Anthropic
 /// traffic) so the persistence log records the same prompt the classifier saw.
+///
+/// This 8-argument variant records NO token usage and NO session attribution
+/// (the new InferenceRecord fields are left `None`). It is the right call for
+/// error / boundary paths where no upstream usage is available. Success paths
+/// that have parsed the response body should call `log_classification_with_usage`
+/// instead so the token counts and Claude Code session id are captured.
 #[allow(clippy::too_many_arguments)]
 fn log_classification(
     state: &AppState,
@@ -926,6 +1010,65 @@ fn log_classification(
     provider_attempts: u8,
     final_provider: &str,
 ) {
+    enqueue_inference_record(
+        state,
+        classification,
+        prompt,
+        start,
+        log_status,
+        provider_attempts,
+        final_provider,
+        None,
+        None,
+    );
+}
+
+/// Success-path logging variant that captures token usage and the Claude Code
+/// session id into the InferenceRecord. Use this once the upstream response
+/// body has been parsed (non-streaming) or the stream has closed with a
+/// terminal usage chunk (streaming). `usage` / `session_id` may be `None`
+/// when that datum was not available for this request.
+#[allow(clippy::too_many_arguments)]
+fn log_classification_with_usage(
+    state: &AppState,
+    classification: &intent_classifier::ClassificationResult,
+    _body_str: &str,
+    prompt: &str,
+    start: std::time::Instant,
+    log_status: &str,
+    provider_attempts: u8,
+    final_provider: &str,
+    usage: Option<&UsageBreakdown>,
+    session_id: Option<&str>,
+) {
+    enqueue_inference_record(
+        state,
+        classification,
+        prompt,
+        start,
+        log_status,
+        provider_attempts,
+        final_provider,
+        usage,
+        session_id,
+    );
+}
+
+/// Build the InferenceRecord (with optional token usage + session id) and
+/// enqueue the fire-and-forget DB write. Shared by `log_classification` and
+/// `log_classification_with_usage` so the two public entry points cannot drift.
+#[allow(clippy::too_many_arguments)]
+fn enqueue_inference_record(
+    state: &AppState,
+    classification: &intent_classifier::ClassificationResult,
+    prompt: &str,
+    start: std::time::Instant,
+    log_status: &str,
+    provider_attempts: u8,
+    final_provider: &str,
+    usage: Option<&UsageBreakdown>,
+    session_id: Option<&str>,
+) {
     if let Some(persistence) = &state.persistence {
         let duration_ms = start.elapsed().as_millis() as i32;
         // Snippet is the 200-char privacy-safe truncation of the FULL prompt,
@@ -935,6 +1078,15 @@ fn log_classification(
             None
         } else {
             Some(prompt.chars().count() as i32)
+        };
+        let (input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) = match usage {
+            Some(u) => (
+                Some(u.input_tokens),
+                Some(u.output_tokens),
+                Some(u.cache_read_tokens),
+                Some(u.cache_creation_tokens),
+            ),
+            None => (None, None, None, None),
         };
         let record = persistence::InferenceRecord {
             request_id: uuid::Uuid::new_v4(),
@@ -947,6 +1099,11 @@ fn log_classification(
             created_at: chrono::Utc::now(),
             provider_attempts,
             final_provider: final_provider.to_string(),
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            client_session_id: session_id.map(|s| s.to_string()),
         };
         persistence::log_inference(
             persistence.backend.clone(),
@@ -1476,6 +1633,7 @@ fn handle_anthropic_streaming_response(
     keepalive_interval_secs: u64,
     provider_attempts: u8,
     final_provider: String,
+    session_id: Option<String>,
 ) -> Response {
     let channel_capacity = state.streaming_channel_capacity;
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(channel_capacity);
@@ -1569,7 +1727,24 @@ fn handle_anthropic_streaming_response(
                 }
             }
         }
-        log_classification(
+        // Finalize the inference record at stream close with the usage
+        // accumulated across message_start/message_delta (Anthropic splits
+        // usage across both events). Only emit token fields when a
+        // message_start was actually seen — otherwise the stream errored
+        // before the upstream produced any usage and a zero-usage row would be
+        // misleading (None is the correct "unknown" signal).
+        let usage = if translate_state.started {
+            let (inp, out, cr, cc) = translate_state.collected_usage();
+            Some(UsageBreakdown {
+                input_tokens: inp as i32,
+                output_tokens: out as i32,
+                cache_read_tokens: cr as i32,
+                cache_creation_tokens: cc as i32,
+            })
+        } else {
+            None
+        };
+        log_classification_with_usage(
             &state,
             &classification,
             &body_str,
@@ -1578,6 +1753,8 @@ fn handle_anthropic_streaming_response(
             stream_status,
             provider_attempts,
             &final_provider,
+            usage.as_ref(),
+            session_id.as_deref(),
         );
     });
 
@@ -1898,6 +2075,8 @@ async fn completion_handler(
     // upstream attempt so beta-gated features and session attribution reach the
     // upstream. See `collect_forward_headers` for the security invariant.
     let forward_headers = collect_forward_headers(&headers);
+    // Claude Code session id for per-request attribution in the inference log.
+    let session_id = session_id_from_forward(&forward_headers);
 
     // Request optimization: skip if explicit routing headers are present —
     // explicit directives should take precedence over probe optimization.
@@ -2097,7 +2276,8 @@ async fn completion_handler(
                                 let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
                                 let (status, response_body) = translate_anthropic_buffered_response(upstream_response, max_upstream_body_bytes).await;
                                 let log_status = if status == StatusCode::OK { "ok" } else { "upstream_error" };
-                                log_classification(&state, &classification, &body_str, &prompt, start, log_status, idx as u8 + 1, &provider.model);
+                                let usage = if status == StatusCode::OK { parse_usage_from_body(&response_body, false) } else { None };
+                                log_classification_with_usage(&state, &classification, &body_str, &prompt, start, log_status, idx as u8 + 1, &provider.model, usage.as_ref(), session_id);
                                 #[cfg(feature = "otel")]
                                 rm.set_status(status);
                                 return json_response(status, response_body);
@@ -2105,12 +2285,13 @@ async fn completion_handler(
                         }
                     if client_wants_stream {
                         let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
-                        return handle_anthropic_streaming_response(state, classification, body_str, prompt, start, upstream_response.bytes_stream(), keepalive_interval_secs, idx as u8 + 1, provider.model.clone());
+                        return handle_anthropic_streaming_response(state, classification, body_str, prompt, start, upstream_response.bytes_stream(), keepalive_interval_secs, idx as u8 + 1, provider.model.clone(), session_id.map(|s| s.to_string()));
                     }
                     let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
                     let (status, response_body) = translate_anthropic_buffered_response(upstream_response, max_upstream_body_bytes).await;
                         let log_status = if status == StatusCode::OK { "ok" } else { "upstream_error" };
-                        log_classification(&state, &classification, &body_str, &prompt, start, log_status, idx as u8 + 1, &provider.model);
+                        let usage = if status == StatusCode::OK { parse_usage_from_body(&response_body, false) } else { None };
+                        log_classification_with_usage(&state, &classification, &body_str, &prompt, start, log_status, idx as u8 + 1, &provider.model, usage.as_ref(), session_id);
                         #[cfg(feature = "otel")]
                         rm.set_status(status);
                         return json_response(status, response_body);
@@ -2199,7 +2380,8 @@ async fn completion_handler(
                         let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
                         let (status, resp_body) = handle_buffered_response(upstream_response, max_upstream_body_bytes, false).await;
                         let log_status = if status == StatusCode::OK { "ok" } else { "upstream_error" };
-                        log_classification(&state, &classification, &body_str, &prompt, start, log_status, idx as u8 + 1, &provider.model);
+                        let usage = if status == StatusCode::OK { parse_usage_from_body(&resp_body, false) } else { None };
+                        log_classification_with_usage(&state, &classification, &body_str, &prompt, start, log_status, idx as u8 + 1, &provider.model, usage.as_ref(), session_id);
                         #[cfg(feature = "otel")]
                         rm.set_status(status);
                         return json_response(status, resp_body);
@@ -2211,7 +2393,8 @@ async fn completion_handler(
                     let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
                     let (status, resp_body) = handle_buffered_response(upstream_response, max_upstream_body_bytes, false).await;
                     let log_status = if status == StatusCode::OK { "ok" } else { "upstream_error" };
-                    log_classification(&state, &classification, &body_str, &prompt, start, log_status, idx as u8 + 1, &provider.model);
+                    let usage = if status == StatusCode::OK { parse_usage_from_body(&resp_body, false) } else { None };
+                    log_classification_with_usage(&state, &classification, &body_str, &prompt, start, log_status, idx as u8 + 1, &provider.model, usage.as_ref(), session_id);
                     #[cfg(feature = "otel")]
                     rm.set_status(status);
                     return json_response(status, resp_body);
@@ -2309,6 +2492,8 @@ async fn messages_handler(
     // upstream attempt so beta-gated features and session attribution reach the
     // upstream. See `collect_forward_headers` for the security invariant.
     let forward_headers = collect_forward_headers(&headers);
+    // Claude Code session id for per-request attribution in the inference log.
+    let session_id = session_id_from_forward(&forward_headers);
 
     // Request optimization: skip if explicit routing headers are present —
     // explicit directives should take precedence over probe optimization.
@@ -2539,7 +2724,8 @@ async fn messages_handler(
                             warn!(upstream_status = status.as_u16(), "upstream returned non-2xx");
                             "upstream_error"
                         };
-                        log_classification(&state, &classification, &body_str, &prompt, start, log_status, idx as u8 + 1, &provider.model);
+                        let usage = if status == StatusCode::OK { parse_usage_from_body(&resp_body, true) } else { None };
+                        log_classification_with_usage(&state, &classification, &body_str, &prompt, start, log_status, idx as u8 + 1, &provider.model, usage.as_ref(), session_id);
                         #[cfg(feature = "otel")]
                         rm.set_status(status);
                         return json_response(status, resp_body);
@@ -2561,7 +2747,8 @@ async fn messages_handler(
                         warn!(upstream_status = status.as_u16(), "upstream returned non-2xx");
                         "upstream_error"
                     };
-                    log_classification(&state, &classification, &body_str, &prompt, start, log_status, idx as u8 + 1, &provider.model);
+                    let usage = if status == StatusCode::OK { parse_usage_from_body(&resp_body, true) } else { None };
+                    log_classification_with_usage(&state, &classification, &body_str, &prompt, start, log_status, idx as u8 + 1, &provider.model, usage.as_ref(), session_id);
                     #[cfg(feature = "otel")]
                     rm.set_status(status);
                     return json_response(status, resp_body);
@@ -3977,13 +4164,19 @@ mod tests {
             created_at: chrono::Utc::now(),
             provider_attempts: 1,
             final_provider: "test-model".to_string(),
+            // Phase 4 token usage + Claude Code attribution fields.
+            input_tokens: Some(100),
+            output_tokens: Some(20),
+            cache_read_tokens: Some(80),
+            cache_creation_tokens: Some(5),
+            client_session_id: Some("sess-integration".to_string()),
         };
         let handle = persistence::log_inference(db_backend, semaphore, record);
         handle.await.expect("logging task should complete");
 
         // Read back using non-macro query (no offline cache required).
         let row =
-            sqlx::query("SELECT status, prompt_snippet, prompt_char_count FROM inferences WHERE request_id = $1")
+            sqlx::query("SELECT status, prompt_snippet, prompt_char_count, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, client_session_id FROM inferences WHERE request_id = $1")
                 .bind(request_id)
                 .fetch_optional(pool.as_ref())
                 .await
@@ -4002,6 +4195,25 @@ mod tests {
             row.try_get::<Option<i32>, _>("prompt_char_count").unwrap(),
             Some(25),
             "prompt_char_count should be stored and retrievable"
+        );
+        // Phase 4 token/attribution columns round-trip through Postgres.
+        assert_eq!(row.try_get::<Option<i32>, _>("input_tokens").unwrap(), Some(100));
+        assert_eq!(row.try_get::<Option<i32>, _>("output_tokens").unwrap(), Some(20));
+        assert_eq!(
+            row.try_get::<Option<i32>, _>("cache_read_tokens").unwrap(),
+            Some(80),
+            "cache_read_tokens must round-trip"
+        );
+        assert_eq!(
+            row.try_get::<Option<i32>, _>("cache_creation_tokens").unwrap(),
+            Some(5)
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("client_session_id")
+                .unwrap()
+                .as_deref(),
+            Some("sess-integration"),
+            "client_session_id must round-trip"
         );
     }
 
@@ -6665,6 +6877,65 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_translates_cache_tokens_in_usage() {
+        // OAI client → Anthropic upstream: the upstream reports
+        // cache_read_input_tokens / cache_creation_input_tokens in Anthropic
+        // shape; the OpenAI client must receive them as
+        // usage.prompt_tokens_details.cached_tokens, with prompt_tokens being
+        // the full prompt (non-cached + cached). End-to-end companion to the
+        // protocol_translation unit tests.
+        let env = "TEST_USAGE_O2A_CACHE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages").header("x-api-key", "sk-ant-test");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"id":"msg_u","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":80,"cache_creation_input_tokens":5}}"#,
+                );
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"max_tokens":100}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        let usage = json.get("usage").expect("usage in client response");
+        assert_eq!(
+            usage.get("prompt_tokens").and_then(|v| v.as_u64()),
+            Some(100 + 80 + 5),
+            "prompt_tokens must be the full prompt (non-cached + cache_read + cache_creation)"
+        );
+        assert_eq!(
+            usage.get("completion_tokens").and_then(|v| v.as_u64()),
+            Some(20)
+        );
+        let cached = usage
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|v| v.as_u64());
+        assert_eq!(
+            cached,
+            Some(80),
+            "cached_tokens must map from Anthropic cache_read_input_tokens end-to-end, got: {usage}"
+        );
         mock.assert();
     }
 
