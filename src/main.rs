@@ -2454,6 +2454,21 @@ async fn messages_handler(
                 }
             }
         } else {
+            // Same-protocol Anthropic→Anthropic passthrough. We deliberately
+            // forward the raw body bytes (`body.clone()`) rather than
+            // parse-normalize-reemit: the translator's explicit field
+            // allowlist would drop unknown Anthropic fields (including
+            // cache_control breakpoints, thinking config, context_management,
+            // etc.), so byte passthrough is what actually preserves them. A
+            // debug log surfaces cache_control presence for operators without
+            // the cost of a full parse.
+            if body_str.contains("\"cache_control\"") {
+                debug!(
+                    "anthropic passthrough: forwarding client cache_control \
+                     breakpoints to upstream unchanged for provider {}",
+                    provider.model
+                );
+            }
             body.clone()
         };
 
@@ -6611,6 +6626,142 @@ mod tests {
             Some(5)
         );
         assert_eq!(usage.get("total_tokens").and_then(|v| v.as_u64()), Some(15));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_anthropic_translation_inserts_cache_control() {
+        // OAI→Anthropic: an OpenAI client request routed to an Anthropic
+        // upstream must arrive with a top-level cache_control so Anthropic
+        // automatic prompt caching activates. The mock matches only if the
+        // translated upstream body contains "cache_control".
+        let env = "TEST_TRANSLATE_O2A_CACHE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .header("x-api-key", "sk-ant-test")
+                .body_contains("\"cache_control\"");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+                );
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"max_tokens":100}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_openai_translation_strips_cache_control() {
+        // Anth→OAI: an Anthropic body carrying a cache_control breakpoint,
+        // routed to an OpenAI upstream, must arrive WITHOUT cache_control
+        // (OpenAI has no native equivalent). A FIFO canary mock registered
+        // before the serving mock matches only if "cache_control" leaked into
+        // the upstream body; in the correct case it is never hit.
+        let env = "TEST_A2O_NO_CACHE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-openai-test");
+        let (app, server) = test_app_with_openai_translation(env);
+        let canary = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .body_contains("cache_control");
+            then.status(200).body("canary");
+        });
+        let positive = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header("authorization", "Bearer sk-openai-test");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-cerebrum-category", "SYNTAX_FIX")
+                    .header("x-cerebrum-model", "gpt-4o")
+                    .body(Body::from(
+                        r#"{"model":"claude-3.5","max_tokens":1024,"messages":[{"role":"user","content":[{"type":"text","text":"fix this bug","cache_control":{"type":"ephemeral"}}]}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            canary.hits(),
+            0,
+            "cache_control must NOT survive Anth→OpenAI translation"
+        );
+        assert_eq!(
+            positive.hits(),
+            1,
+            "translated request must still reach the OpenAI upstream"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_anthropic_passthrough_preserves_cache_control() {
+        // Anth→Anthropic same-protocol passthrough: a client cache_control
+        // breakpoint must reach the upstream unchanged (byte passthrough, not
+        // translator allowlist). The mock matches only if the upstream body
+        // contains "cache_control".
+        let env = "TEST_ANT_PASSTHROUGH_CACHE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .header("x-api-key", "sk-ant-test")
+                .header("anthropic-version", "2023-06-01")
+                .body_contains("\"cache_control\"");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+                );
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":[{"type":"text","text":"fix this bug","cache_control":{"type":"ephemeral"}}]}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
     }
 
     #[tokio::test]

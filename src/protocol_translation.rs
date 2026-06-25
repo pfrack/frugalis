@@ -140,6 +140,18 @@ pub fn translate_request(body: &serde_json::Value) -> Result<serde_json::Value, 
         }
     }
 
+    // ── cache_control (Anthropic automatic prompt caching, GA) ──────────
+    // Insert a top-level ephemeral breakpoint when absent so OpenAI clients
+    // routed to an Anthropic upstream benefit from automatic prompt caching:
+    // Anthropic places the breakpoint on the last cacheable block and moves it
+    // forward as the conversation grows, with no per-block surgery. No
+    // `anthropic-beta` header is required — prompt caching is GA as of the
+    // verified docs (see plan.md references). Respect an explicit
+    // cache_control if one is already present rather than overwriting it.
+    if !out.contains_key("cache_control") {
+        out.insert("cache_control".into(), json!({"type": "ephemeral"}));
+    }
+
     Ok(serde_json::Value::Object(out))
 }
 
@@ -1012,6 +1024,59 @@ pub fn anthropic_to_openai_request(body: &serde_json::Value) -> Result<serde_jso
     Ok(serde_json::Value::Object(out))
 }
 
+/// Translate an Anthropic Messages request body into an OpenAI Chat
+/// Completions request body, also reporting whether the source carried any
+/// `cache_control` breakpoint (`had_cache_control`). OpenAI Chat Completions
+/// has no native cache_control equivalent, so the breakpoint cannot survive
+/// translation and is always absent from the returned body; the signal lets
+/// callers (logging/metrics in Phase 4) account for the fact that the client
+/// requested caching, so a subsequent low/zero `cache_read_input_tokens` is
+/// not misread as a translator bug.
+pub fn anthropic_to_openai_request_with_cache_signal(
+    body: &serde_json::Value,
+) -> Result<(serde_json::Value, bool), String> {
+    let had_cache_control = anthropic_body_has_cache_control(body);
+    let translated = anthropic_to_openai_request(body)?;
+    Ok((translated, had_cache_control))
+}
+
+/// Returns true if the Anthropic body carries a `cache_control` breakpoint
+/// anywhere Anthropic allows one: on a `system` content block, on any message
+/// content block, or on a tool definition. A top-level request cache_control
+/// is also accepted for completeness. Structural scan (no string matching) so
+/// it stays correct if field ordering changes.
+fn anthropic_body_has_cache_control(body: &serde_json::Value) -> bool {
+    if body.get("cache_control").is_some() {
+        return true;
+    }
+    if let Some(system) = body.get("system").and_then(|v| v.as_array()) {
+        for block in system {
+            if block.get("cache_control").is_some() {
+                return true;
+            }
+        }
+    }
+    if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
+        for msg in messages {
+            if let Some(blocks) = msg.get("content").and_then(|v| v.as_array()) {
+                for block in blocks {
+                    if block.get("cache_control").is_some() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(tools) = body.get("tools").and_then(|v| v.as_array()) {
+        for tool in tools {
+            if tool.get("cache_control").is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Convert an Anthropic user message into OpenAI message(s).
 /// tool_result blocks become separate role:"tool" messages.
 fn convert_anthropic_user_message(msg: &serde_json::Value, out: &mut Vec<serde_json::Value>) {
@@ -1552,6 +1617,65 @@ mod tests {
         assert_eq!(msgs[0].get("role").unwrap().as_str().unwrap(), "user");
         let content = msgs[0].get("content").unwrap().as_array().unwrap();
         assert_eq!(content[0].get("text").unwrap().as_str().unwrap(), "Hello");
+    }
+
+    #[test]
+    fn test_translate_request_inserts_top_level_cache_control() {
+        // OpenAI client → Anthropic upstream: the translator must auto-insert
+        // a top-level ephemeral cache_control so Anthropic's automatic prompt
+        // caching activates with no per-block surgery and no beta header.
+        let input = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let result = translate_request(&input).unwrap();
+        let cc = result.get("cache_control").expect("cache_control must be inserted");
+        assert_eq!(
+            cc.get("type").and_then(|v| v.as_str()),
+            Some("ephemeral"),
+            "automatic caching uses an ephemeral top-level breakpoint"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_request_strips_cache_control_and_signals() {
+        // Anthropic body WITH a cache_control breakpoint on a message block.
+        // The OpenAI body must NOT carry cache_control (no native equivalent),
+        // and the signal must report had_cache_control = true so logging can
+        // account for the requested cache.
+        let input = json!({
+            "model": "claude-3.5",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "cached turn", "cache_control": {"type": "ephemeral"}}
+                ]
+            }]
+        });
+        let (translated, had_cc) =
+            anthropic_to_openai_request_with_cache_signal(&input).unwrap();
+        assert!(had_cc, "had_cache_control must be true when a block carries it");
+        assert!(
+            translated.get("cache_control").is_none(),
+            "translated OpenAI body must not carry cache_control, got: {translated}"
+        );
+        // The translated body should still carry the message text.
+        let msgs = translated.get("messages").unwrap().as_array().unwrap();
+        assert!(!msgs.is_empty());
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_request_no_cache_control_signal_when_absent() {
+        // No breakpoint anywhere -> had_cache_control = false.
+        let input = json!({
+            "model": "claude-3.5",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "plain turn"}]
+        });
+        let (_translated, had_cc) =
+            anthropic_to_openai_request_with_cache_signal(&input).unwrap();
+        assert!(!had_cc, "had_cache_control must be false when no breakpoint is present");
     }
 
     #[test]

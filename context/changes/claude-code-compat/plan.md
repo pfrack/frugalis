@@ -315,9 +315,9 @@ Translate cache tokens in responses so clients see accurate usage in both protoc
 
 #### Automated
 
-- [x] 2.1 `cargo test` passes
-- [x] 2.2 httpmock test: Anthropic upstream receives inbound `anthropic-beta`/`anthropic-version` unchanged; OpenAI upstream does not
-- [x] 2.3 `cargo test auth`, `cargo test routes_auth` pass
+- [x] 2.1 `cargo test` passes — 656ca02
+- [x] 2.2 httpmock test: Anthropic upstream receives inbound `anthropic-beta`/`anthropic-version` unchanged; OpenAI upstream does not — 656ca02
+- [x] 2.3 `cargo test auth`, `cargo test routes_auth` pass — 656ca02
 
 #### Manual
 
@@ -328,10 +328,10 @@ Translate cache tokens in responses so clients see accurate usage in both protoc
 
 #### Automated
 
-- [ ] 3.1 `cargo test` passes
-- [ ] 3.2 httpmock: OAI→Anthropic translated body has top-level `cache_control`
-- [ ] 3.3 httpmock: Anth→OpenAI body has no `cache_control`, reports `had_cache_control`
-- [ ] 3.4 httpmock: Anth→Anthropic passthrough preserves `cache_control`
+- [x] 3.1 `cargo test` passes
+- [x] 3.2 httpmock: OAI→Anthropic translated body has top-level `cache_control`
+- [x] 3.3 httpmock: Anth→OpenAI body has no `cache_control`, reports `had_cache_control`
+- [x] 3.4 httpmock: Anth→Anthropic passthrough preserves `cache_control`
 
 #### Manual
 
