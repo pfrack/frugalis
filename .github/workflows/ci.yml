@@ -1,9 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
     branches:
       - main
@@ -26,6 +23,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Lint
+        env:
+          SQLX_OFFLINE: "true"
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Type check
