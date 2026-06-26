@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/pfrack/cerebrum/actions/workflows/deploy.yml/badge.svg)](https://github.com/pfrack/cerebrum/actions/workflows/deploy.yml)
 ![Rust Edition](https://img.shields.io/badge/edition-2021-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
 **Intent-aware LLM request routing gateway.** Cerebrum is a single Rust binary that sits between your agents and upstream model providers. It classifies each incoming prompt into an intent category, selects the cheapest acceptable model for that category, and proxies the request with full SSE streaming support.
 
