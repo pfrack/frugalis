@@ -174,3 +174,31 @@ When a request includes `"stream": true`, the gateway proxies the upstream respo
 - **Character count** — `prompt_char_count` records the true message length for cost estimation without exposing content
 - **Constant-time comparison** — all credential comparisons (bearer token, basic auth user/password) use HMAC-SHA256 via the `subtle` crate to prevent timing attacks
 - **Auth separation** — bearer token authentication for proxy routes (`/v1/*`), HTTP basic authentication for dashboard routes (`/dashboard/*`), each with its own middleware layer
+
+## API Reference
+
+All proxy API routes are mounted under `/v1/` and require the bearer token set via `PROXY_API_BEARER_TOKEN`.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/health` | Public | Liveness check; returns `200 "ok"` |
+| POST | `/v1/chat/completions` | Bearer | Classify intent and proxy to upstream model. Supports SSE streaming when `stream: true` |
+| POST | `/v1/messages` | Bearer | Anthropic Messages API pass-through. Same classification + routing, Anthropic-format body |
+| POST | `/v1/classify` | Bearer | Classify-only endpoint; returns the category, model, and tier without proxying |
+| POST | `/v1/feedback` | Bearer | Submit classification feedback for few-shot retraining |
+| GET | `/dashboard/` | Basic auth | Dashboard overview — status, quick stats, recent inferences |
+| GET | `/dashboard/inferences` | Basic auth | Paginated, filterable inference log |
+| GET | `/dashboard/latency` | Basic auth | Per-category average and p99 latency over a time window |
+| GET | `/dashboard/savings` | Basic auth | Estimated cost savings vs. baseline model |
+| GET | `/dashboard/static/*` | Basic auth | Static assets (dashboard CSS) |
+
+See `openapi/completions.yaml` for full request/response schemas.
+
+## Dashboard
+
+The operator dashboard is served under `/dashboard/` with HTTP basic authentication (credentials from `DASHBOARD_BASIC_USER` and `DASHBOARD_BASIC_PASSWORD`). It has four pages with an auto-generated sidebar navigation driven from a single `PAGES` registry:
+
+- **Dashboard** (`/dashboard/`) — overview page with server status indicator, quick stats (total inferences, classified count), and recent inference records
+- **Inference Logs** (`/dashboard/inferences`) — paginated table of inference records with search/filter by category, model, and date range. Each row shows the prompt snippet, category, model, duration, and timestamp
+- **Latency** (`/dashboard/latency`) — per-category latency breakdown showing average and p99 response times over a configurable time window (default: 24 hours)
+- **Savings** (`/dashboard/savings`) — estimated cost savings compared to the configured `baseline_model`, based on actual model costs and per-category routing decisions

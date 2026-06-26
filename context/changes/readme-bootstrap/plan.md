@@ -301,9 +301,9 @@ N/A — no existing README to migrate from.
 
 #### Automated
 
-- [x] 3.1 Architecture overview section
-- [x] 3.2 Classifier chain and routing description
-- [x] 3.3 Request flow, SSE, privacy, and security sections
+- [x] 3.1 Architecture overview section — 6ecb9fb
+- [x] 3.2 Classifier chain and routing description — 6ecb9fb
+- [x] 3.3 Request flow, SSE, privacy, and security sections — 6ecb9fb
 
 #### Manual
 
@@ -313,9 +313,9 @@ N/A — no existing README to migrate from.
 
 #### Automated
 
-- [ ] 4.1 Routes table written
-- [ ] 4.2 Auth model section
-- [ ] 4.3 Dashboard pages walkthrough
+- [x] 4.1 Routes table written
+- [x] 4.2 Auth model section
+- [x] 4.3 Dashboard pages walkthrough
 
 #### Manual
 
