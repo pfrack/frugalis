@@ -4,6 +4,7 @@ title: Bootstrap README.md for the Cerebrum repository
 status: implementing
 created: 2026-06-13
 updated: 2026-06-26
+
 archived_at: null
 ---
 

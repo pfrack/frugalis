@@ -276,9 +276,9 @@ N/A — no existing README to migrate from.
 
 #### Automated
 
-- [x] 1.1 README.md created with H1 heading and badges
-- [x] 1.2 Feature bullets and elevator pitch written
-- [x] 1.3 Table of contents with valid section anchors
+- [x] 1.1 README.md created with H1 heading and badges — 77ce1a7
+- [x] 1.2 Feature bullets and elevator pitch written — 77ce1a7
+- [x] 1.3 Table of contents with valid section anchors — 77ce1a7
 
 #### Manual
 
@@ -288,9 +288,9 @@ N/A — no existing README to migrate from.
 
 #### Automated
 
-- [ ] 2.1 Quick Start section with copy-paste commands
-- [ ] 2.2 Environment variables table written
-- [ ] 2.3 Configuration and persistence sections written
+- [x] 2.1 Quick Start section with copy-paste commands
+- [x] 2.2 Environment variables table written
+- [x] 2.3 Configuration and persistence sections written
 
 #### Manual
 

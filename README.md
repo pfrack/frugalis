@@ -35,3 +35,90 @@
 - [Testing](#testing)
 - [Development](#development)
 - [OpenTelemetry (Experimental)](#opentelemetry-experimental)
+
+## Quick Start
+
+### Prerequisites
+
+- **Rust toolchain** (stable) — install via [rustup](https://rustup.rs/) if needed
+- No other runtime dependencies (database, Docker, or external services are optional)
+
+### Run the Gateway
+
+```bash
+# Clone and enter the repo
+git clone https://github.com/pfrack/cerebrum.git
+cd cerebrum
+
+# Set the three required environment variables
+export PROXY_API_BEARER_TOKEN="your-secret-token"
+export DASHBOARD_BASIC_USER="admin"
+export DASHBOARD_BASIC_PASSWORD="your-dashboard-password"
+
+# Build and run (this downloads dependencies on first run)
+cargo run
+```
+
+The server starts on the port configured in `config.toml` (default: `10000`):
+
+```bash
+# Verify the gateway is running
+curl http://localhost:10000/health
+# → "ok"
+```
+
+The gateway runs with an in-memory persistence backend by default — no database required. See [Persistence Backends](#persistence-backends) to configure PostgreSQL or SQLite.
+
+## Configuration
+
+Cerebrum uses a **layered configuration model**:
+
+1. **Embedded defaults** — every compiled binary contains a complete `config.toml` with sensible defaults, so a freshly built binary runs with no config file.
+2. **Config overlay** — set `CONFIG_PATH=/path/to/your/config.toml` to override specific sections. Overlay sections (`[classifiers]`, `[categories]`, `[routing]`, etc.) are fully replaced; other sections are merged field-by-field. YAML files are also accepted (auto-detected by extension).
+3. **Environment variables** — secrets (API keys, auth tokens, database URLs) are always read from the environment, never stored in config files.
+
+To validate your configuration without starting the server:
+
+```bash
+CONFIG_PATH=/path/to/config.toml cargo run -- --validate
+```
+
+Run `cerebrum --init` to generate a commented starter configuration file.
+
+### Environment Variables
+
+| Variable | Required | Description | Default |
+|---|---|---|---|
+| `PROXY_API_BEARER_TOKEN` | Yes | Bearer token for API proxy routes | — |
+| `DASHBOARD_BASIC_USER` | Yes | Basic auth username for the dashboard | — |
+| `DASHBOARD_BASIC_PASSWORD` | Yes | Basic auth password for the dashboard | — |
+| `DATABASE_URL` | No | PostgreSQL connection URL | Falls through to SQLite or memory |
+| `CONFIG_PATH` | No | Path to config overlay file | Uses embedded defaults |
+| `OTEL_ENABLED` | No | Enable OpenTelemetry export (`true`/`false`) | `false` (requires `otel` feature) |
+
+### Configuration File Reference
+
+The full configuration schema is documented in `config.toml` at the repo root. Key sections:
+
+- `[server]` — port, log level, log format
+- `[http]` — timeouts, body limits, keepalive, streaming channel capacity
+- `[classifiers]` — enabled classifiers and their evaluation order
+- `[categories]` — intent category definitions with regex patterns and thresholds
+- `[routing]` — model, endpoint, provider, and API key env var per category
+- `[persistence]` — backend selection and SQLite path
+- `[dashboard]` — time window defaults, pagination limits
+- `[model_costs]` — cost per 1M input tokens per model (used for savings estimates)
+- `[[negative_patterns]]` — suppression rules that subtract from category scores
+- `[[auth_provider]]` — upstream authentication provider definitions
+
+## Persistence Backends
+
+Cerebrum supports three persistence backends, resolved in priority order:
+
+| Priority | Condition | Backend | Notes |
+|---|---|---|---|
+| 1 | `DATABASE_URL` is set | **PostgreSQL** | Production-grade. Requires a running Postgres instance. Migrations are applied automatically on startup. |
+| 2 | `[persistence].backend = "sqlite"` | **SQLite** | File-backed (default: `./cerebrum.db`). No external process required. Falls back to in-memory on connection failure. |
+| 3 | Default (no `DATABASE_URL`, no explicit backend) | **In-memory** | Ephemeral — data is lost on restart. Capped at 10,000 records. Zero configuration. |
+
+The persistence layer is fire-and-forget: inference records are written to a background task bounded by a semaphore, so database latency never blocks the response path.
