@@ -4,7 +4,7 @@ project: cerebrum
 version: 1
 status: draft
 created: 2026-05-26
-updated: 2026-06-25
+updated: 2026-06-26
 prd_version: 1
 main_goal: speed
 top_blocker: time
@@ -57,7 +57,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-14 | config-format-upgrade | Config: upgrade format to support YAML + external pattern files; add `--validate` and `--migrate-config` CLI tools | **S-13** | FR-002, FR-003 | done |
 | S-15 | translate-openai-to-anthropic | route existing `/v1/chat/completions` traffic to Anthropic-protocol upstreams (Claude API, DeepSeek, Kimi, Z.ai) with full body + streaming translation | S-01e | FR-003 | done |
 | S-16 | translate-anthropic-to-openai | new `/v1/messages` endpoint accepting Anthropic Messages protocol, translating to OpenAI Chat Completions for upstream routing | S-15 | FR-003 | researched |
-| S-17 | provider-fallback-cascade | when an upstream provider fails (5xx, timeout, rate-limit), automatically retry on the next configured provider in priority order | S-01e, S-01c | FR-003, NFR (resilience) | implemented |
+| S-17 | provider-fallback-cascade | when an upstream provider fails (5xx, timeout, rate-limit), automatically retry on the next configured provider in priority order | S-01e, S-01c | FR-003, NFR (resilience) | done |
 | S-18 | claude-code-compat | forward anthropic-beta/anthropic-version/x-claude-code-* headers + translate cache_control prompt-caching across all protocol crossings + Anthropic /v1/models shape | S-01e, S-15 | FR-003 | planned |
 | S-19 | add-response-cache | semantic + exact-match response caching to cut repeat-prompt cost | S-01e | FR-003, NFR (cost) | proposed |
 | S-20 | provider-retry-backoff | same-provider retries with exponential backoff + cooldowns on top of the S-17 cascade | S-17 | FR-003, NFR (resilience) | proposed |
@@ -461,7 +461,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
   - Config schema: flat array of providers per category, or separate `[[routing.CATEGORY.fallbacks]]` table? Owner: planning. Block: yes.
   - Should 429 retry respect `Retry-After` header or immediately cascade to next provider? Owner: planning. Block: no.
 - **Risk:** Medium — touches the forwarding path in both handlers (completion + messages). The streaming complication (can't switch mid-stream) is a hard constraint that limits fallback to pre-first-byte failures. Protocol translation across fallback providers (e.g., primary is Anthropic, fallback is OpenAI-compatible) adds complexity since the request body may need re-translation.
-- **Status:** implemented (failover-to-next-provider live; same-provider retries/backoff/cooldowns tracked separately as S-20)
+- **Status:** done (failover-to-next-provider live; same-provider retries/backoff/cooldowns tracked separately as S-20)
 
 ### S-10: Post-Review Cleanup, Hardening & Production Reliability
 
@@ -720,6 +720,7 @@ All roadmap items are active or completed; no currently parked items.
 - **S-09: An `LLMClassifier` struct implements `IntentClassify`, sending the user prompt to a small/cheap classification model (e.g., `gpt-4o-mini`) and parsing the intent category from the response. Its config carries: model name, endpoint, `UPSTREAM_API_KEY` env var, and a classification prompt template that instructs the model to output one of the known categories. The `AppState` can hold either `RegexClassifier` or `LLMClassifier` behind the same `Arc<dyn IntentClassify>`.** — Archived 2026-06-08 → `context/archive/2026-06-07-llm-classifier/`. Lesson: —.
 
 - **S-15: The existing `POST /v1/chat/completions` endpoint can route to Anthropic-protocol upstreams with full body + streaming translation.** — Archived 2026-06-23 → `context/archive/2026-06-22-translate-openai-to-anthropic/`. Lesson: —.
+- **S-17: When an upstream provider returns a retryable error (5xx, connection timeout, 429 rate-limit), the proxy automatically retries the request on the next provider in a configured priority list.** — Archived 2026-06-26 → `context/archive/2026-06-24-provider-fallback-cascade/`. Lesson: —.
 - **S-13: Move All Config to File** — Zero hardcoded configuration in Rust — everything lives in `config.toml`. Environment variables reduced to strictly secrets. — Archived 2026-06-11 → `context/archive/2026-06-10-move-all-config-to-file/`. Lesson: —.
 
 - **S-14: Config Format Upgrade — Multi-Format + External Patterns** — Upgrade Cerebrum's configuration system to support both YAML and TOML formats (via serde derives) and externalize regex patterns into pattern files. Users can choose configuration format (YAML favored by DevOps, TOML for Rust-native). Regex patterns live in separate `*.patterns` files with `weight | regex` format, eliminating escaping issues. Fully backward compatible with existing `config.toml`. Adds CLI tools: `--validate` checks config and patterns; `--migrate-config` converts old configs to YAML + pattern files. — Archived 2026-06-13 → `context/archive/2026-06-11-config-format-upgrade/`. Lesson: —.
