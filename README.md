@@ -122,3 +122,55 @@ Cerebrum supports three persistence backends, resolved in priority order:
 | 3 | Default (no `DATABASE_URL`, no explicit backend) | **In-memory** | Ephemeral — data is lost on restart. Capped at 10,000 records. Zero configuration. |
 
 The persistence layer is fire-and-forget: inference records are written to a background task bounded by a semaphore, so database latency never blocks the response path.
+
+## Architecture
+
+Cerebrum is a **single-binary Axum gateway** running on a single Tokio async runtime. The persistence layer is the only side effect — all other processing is in-memory and synchronous from the request handler's perspective.
+
+At startup the binary:
+1. Loads configuration (embedded defaults + optional overlay)
+2. Initializes the classifier chain from the configured backends
+3. Resolves the persistence backend (Postgres / SQLite / in-memory)
+4. Builds the Axum router with middleware and starts the HTTP server
+
+### Intent Classification
+
+Classification is performed by a **pluggable chain** of backends implementing the `IntentClassify` trait. The chain iterates backends in configured order (default: `regex → fewshot → llm`) and returns the first result whose tier is not `Fallback`. If all backends return `Fallback`, the last fallback result is used.
+
+| Backend | Default | Mechanism |
+|---|---|---|
+| **Regex** | Enabled | Built-in pattern matching with weighted regex rules per category. Supports dual-threshold suppression and negative patterns that subtract from competing categories. |
+| **FewShot** | Opt-in | TF-IDF bag-of-words cosine similarity with bootstrap examples from `data/fewshot_bootstrap.yaml`. Learns from feedback submitted via `POST /v1/feedback`. Controlled by `confidence_threshold` and `cold_start_threshold`. |
+| **LLM** | Opt-in | Delegates classification to an external LLM (e.g., `gpt-4o-mini`). Configured via the `[llm_classifier]` section in `config.toml`. |
+
+Routing is **data-driven**: each category in `config.toml` has a corresponding `[routing.<CATEGORY>]` entry specifying the model, endpoint, provider type, and API key environment variable. Adding a new category is a configuration change — no code modification required.
+
+### Request Flow
+
+```
+Request → Bearer auth → Classify → Select route → Proxy upstream → Log inference → Response
+```
+
+1. **Receive** — the gateway accepts HTTP requests on the configured port
+2. **Authenticate** — proxy routes require a valid bearer token (`PROXY_API_BEARER_TOKEN`); dashboard routes require HTTP basic auth (`DASHBOARD_BASIC_USER` / `DASHBOARD_BASIC_PASSWORD`)
+3. **Classify** — the classifier chain evaluates the last user message against all configured backends
+4. **Select route** — the winning category maps to a `[routing.*]` entry with model, endpoint, and provider configuration
+5. **Proxy upstream** — the request is forwarded to the upstream provider. If `stream: true` in the request body, the response is streamed as Server-Sent Events (SSE); otherwise it is buffered and returned as JSON
+6. **Log inference** — a fire-and-forget background task persists the inference metadata (snippet, category, duration, model, token usage)
+7. **Respond** — the upstream response (or classification-only result) is returned to the client
+
+### SSE Streaming
+
+When a request includes `"stream": true`, the gateway proxies the upstream response as Server-Sent Events:
+
+- Upstream data chunks are forwarded directly as SSE `data:` events
+- A `: keepalive` comment is injected after every `keepalive_interval_secs` (default: 15s) of silence on the stream
+- Upstream error responses emit an `event: error` SSE event with a JSON-escaped body capped at **2 KB**
+- The streaming channel capacity is configurable (default: 32 messages)
+
+### Privacy & Security
+
+- **Prompt snippet** — only the first 200 characters of the last user message are stored (`extract_snippet`). The full prompt is never persisted
+- **Character count** — `prompt_char_count` records the true message length for cost estimation without exposing content
+- **Constant-time comparison** — all credential comparisons (bearer token, basic auth user/password) use HMAC-SHA256 via the `subtle` crate to prevent timing attacks
+- **Auth separation** — bearer token authentication for proxy routes (`/v1/*`), HTTP basic authentication for dashboard routes (`/dashboard/*`), each with its own middleware layer

@@ -288,9 +288,9 @@ N/A — no existing README to migrate from.
 
 #### Automated
 
-- [x] 2.1 Quick Start section with copy-paste commands
-- [x] 2.2 Environment variables table written
-- [x] 2.3 Configuration and persistence sections written
+- [x] 2.1 Quick Start section with copy-paste commands — ad3174b
+- [x] 2.2 Environment variables table written — ad3174b
+- [x] 2.3 Configuration and persistence sections written — ad3174b
 
 #### Manual
 
@@ -301,9 +301,9 @@ N/A — no existing README to migrate from.
 
 #### Automated
 
-- [ ] 3.1 Architecture overview section
-- [ ] 3.2 Classifier chain and routing description
-- [ ] 3.3 Request flow, SSE, privacy, and security sections
+- [x] 3.1 Architecture overview section
+- [x] 3.2 Classifier chain and routing description
+- [x] 3.3 Request flow, SSE, privacy, and security sections
 
 #### Manual
 
