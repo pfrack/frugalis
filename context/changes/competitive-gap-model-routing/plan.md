@@ -263,9 +263,10 @@ Detect known trivial Claude Code probes and return canned responses without hitt
 
 **Intent**: Add a function that inspects the request body and returns an optional canned response if the request matches a known trivial pattern. Called early in the handler before classification.
 
-**Contract**: `fn try_optimize_request(body: &[u8]) -> Option<axum::response::Response>` — checks:
-- Empty messages array → return empty assistant response
-- Single message with content matching known probe patterns (e.g., exact match `"hello"`, `"hi"`, `"test"` when body is tiny) → skip classification, return a minimal response
+**Contract**: `fn try_optimize_request(body: &[u8], is_anthropic: bool) -> Option<axum::response::Response>` — checks:
+- Empty messages array → return protocol-shaped empty assistant response (Anthropic or OpenAI shape based on `is_anthropic`)
+- Single message with content matching known probe patterns (`"hello"`, `"hi"`, `"test"`, `"hey"` — case-insensitive) when body <512 bytes and not streaming → skip classification, return a canned "Hello! How can I help you today?" response
+- Skip if `x-cerebrum-category` or `x-cerebrum-model` headers are present (explicit routing takes precedence)
 
 Returns `None` if the request should proceed normally.
 

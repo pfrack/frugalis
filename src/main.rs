@@ -770,6 +770,11 @@ async fn count_tokens_handler(body: Bytes) -> impl IntoResponse {
 /// a canned response, avoiding the full classification + upstream round-trip.
 /// Returns `None` if the request should proceed normally.
 fn try_optimize_request(body: &[u8], is_anthropic: bool) -> Option<Response> {
+    // Skip deserialization entirely for large bodies — probe patterns
+    // only match when body <512 bytes, so this avoids wasted parse work.
+    if body.len() >= 512 {
+        return None;
+    }
     let val: serde_json::Value = serde_json::from_slice(body).ok()?;
     let messages = val.get("messages")?.as_array()?;
 
@@ -802,9 +807,8 @@ fn try_optimize_request(body: &[u8], is_anthropic: bool) -> Option<Response> {
     }
 
     // Single-message known probe patterns — only match when the entire
-    // body is small (<512 bytes) to avoid false positives on real requests.
-    // Skip streaming requests — real probes never stream.
-    if messages.len() == 1 && body.len() < 512
+    // Single-message probe patterns. Skip streaming requests — real probes never stream.
+    if messages.len() == 1
         && val.get("stream") != Some(&serde_json::Value::Bool(true))
     {
         let content = messages[0].get("content")?;
@@ -900,13 +904,7 @@ async fn models_handler() -> impl IntoResponse {
             }
         ]
     });
-    let mut resp = Response::new(Body::from(body.to_string()));
-    *resp.status_mut() = StatusCode::OK;
-    resp.headers_mut().insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static("application/json"),
-    );
-    resp
+    json_response(StatusCode::OK, body.to_string())
 }
 
 

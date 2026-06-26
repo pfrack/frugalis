@@ -1,8 +1,8 @@
 ---
 id: competitive-gap-model-routing
-status: implemented
+status: impl_reviewed
 created: 2026-06-24
-updated: 2026-06-24
+updated: 2026-06-26
 user: pfrack
 tags: [competitive-analysis, providers, model-routing, /v1/models, claude-code]
 ---
