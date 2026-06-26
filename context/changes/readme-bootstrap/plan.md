@@ -313,9 +313,9 @@ N/A — no existing README to migrate from.
 
 #### Automated
 
-- [x] 4.1 Routes table written
-- [x] 4.2 Auth model section
-- [x] 4.3 Dashboard pages walkthrough
+- [x] 4.1 Routes table written — 5ea3565
+- [x] 4.2 Auth model section — 5ea3565
+- [x] 4.3 Dashboard pages walkthrough — 5ea3565
 
 #### Manual
 
@@ -325,9 +325,9 @@ N/A — no existing README to migrate from.
 
 #### Automated
 
-- [ ] 5.1 Deployment and CI/CD sections
-- [ ] 5.2 Testing section with command examples
-- [ ] 5.3 Development guide and OTel section
+- [x] 5.1 Deployment and CI/CD sections — 423ffd1
+- [x] 5.2 Testing section with command examples — 423ffd1
+- [x] 5.3 Development guide and OTel section — 423ffd1
 
 #### Manual
 
@@ -337,9 +337,9 @@ N/A — no existing README to migrate from.
 
 #### Automated
 
-- [ ] 6.1 FAQ/troubleshooting (if needed)
-- [ ] 6.2 Line count verified within target range
-- [ ] 6.3 Cross-reference check against source files
+- [x] 6.1 FAQ/troubleshooting (if needed)
+- [x] 6.2 Line count verified within target range
+- [x] 6.3 Cross-reference check against source files
 
 #### Manual
 

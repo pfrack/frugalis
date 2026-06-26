@@ -25,6 +25,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Type check
+        env:
+          SQLX_OFFLINE: "true"
+        run: cargo check
+
       - name: Run auth verification tests
         run: |
           cargo test auth
