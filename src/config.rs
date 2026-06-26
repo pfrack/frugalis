@@ -543,37 +543,24 @@ pub(crate) fn routing_from_value(
 
     let mut routing = HashMap::new();
     for (key, entry) in routing_table {
-        let model = if !entry.primary().model.is_empty() {
-            entry.primary().model.clone()
-        } else {
-            warn!(category = %key, "routing section missing 'model' for category; using DEFAULT model");
-            default_model.clone()
-        };
-        let endpoint = entry.primary().endpoint.clone();
-        let cost_per_1m_input_tokens = entry.cost_per_1m_input_tokens;
-        let provider_type = if !entry.primary().provider_type.is_empty() {
-            entry.primary().provider_type.clone()
-        } else {
-            warn!(category = %key, "routing section missing 'provider_type' for category; defaulting to empty");
-            String::new()
-        };
-        let api_key_env = if entry.primary().api_key_env.is_some() {
-            entry.primary().api_key_env.clone()
-        } else {
-            warn!(category = %key, "routing section missing 'api_key_env' for category; no API key will be resolved");
-            None
-        };
+        let mut providers = entry.providers.clone();
+        for provider in &mut providers {
+            if provider.model.is_empty() {
+                warn!(category = %key, "routing section missing 'model' for category; using DEFAULT model");
+                provider.model = default_model.clone();
+            }
+            if provider.provider_type.is_empty() {
+                warn!(category = %key, "routing section missing 'provider_type' for category; defaulting to empty");
+            }
+            if provider.api_key_env.is_none() {
+                warn!(category = %key, "routing section missing 'api_key_env' for category; no API key will be resolved");
+            }
+        }
         routing.insert(
             key.to_uppercase(),
             RouteEntry {
-                providers: vec![ProviderEntry {
-                    model,
-                    endpoint,
-                    provider_type,
-                    api_key_env,
-                    timeout_ms: None,
-                }],
-                cost_per_1m_input_tokens,
+                providers,
+                cost_per_1m_input_tokens: entry.cost_per_1m_input_tokens,
             },
         );
     }

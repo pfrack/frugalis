@@ -342,10 +342,10 @@ Translate cache tokens in responses so clients see accurate usage in both protoc
 
 #### Automated
 
-- [x] 4.1 `cargo test` passes; `cargo test persistence` passes
-- [x] 4.2 Migration `005` applies cleanly and is idempotent
-- [x] 4.3 httpmock: OpenAI usage chunk carries `cached_tokens` from Anthropic `cache_read_input_tokens` (and reverse)
-- [x] 4.4 Unit test: `InferenceRecord` token fields round-trip through Postgres + memory backends
+- [x] 4.1 `cargo test` passes; `cargo test persistence` passes — 12ebb2d
+- [x] 4.2 Migration `005` applies cleanly and is idempotent — 12ebb2d
+- [x] 4.3 httpmock: OpenAI usage chunk carries `cached_tokens` from Anthropic `cache_read_input_tokens` (and reverse) — 12ebb2d
+- [x] 4.4 Unit test: `InferenceRecord` token fields round-trip through Postgres + memory backends — 12ebb2d
 
 #### Manual
 

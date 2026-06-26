@@ -4,7 +4,7 @@ project: cerebrum
 version: 1
 status: draft
 created: 2026-05-26
-updated: 2026-06-23
+updated: 2026-06-25
 prd_version: 1
 main_goal: speed
 top_blocker: time
@@ -57,6 +57,21 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-14 | config-format-upgrade | Config: upgrade format to support YAML + external pattern files; add `--validate` and `--migrate-config` CLI tools | **S-13** | FR-002, FR-003 | done |
 | S-15 | translate-openai-to-anthropic | route existing `/v1/chat/completions` traffic to Anthropic-protocol upstreams (Claude API, DeepSeek, Kimi, Z.ai) with full body + streaming translation | S-01e | FR-003 | done |
 | S-16 | translate-anthropic-to-openai | new `/v1/messages` endpoint accepting Anthropic Messages protocol, translating to OpenAI Chat Completions for upstream routing | S-15 | FR-003 | researched |
+| S-17 | provider-fallback-cascade | when an upstream provider fails (5xx, timeout, rate-limit), automatically retry on the next configured provider in priority order | S-01e, S-01c | FR-003, NFR (resilience) | implemented |
+| S-18 | claude-code-compat | forward anthropic-beta/anthropic-version/x-claude-code-* headers + translate cache_control prompt-caching across all protocol crossings + Anthropic /v1/models shape | S-01e, S-15 | FR-003 | planned |
+| S-19 | add-response-cache | semantic + exact-match response caching to cut repeat-prompt cost | S-01e | FR-003, NFR (cost) | proposed |
+| S-20 | provider-retry-backoff | same-provider retries with exponential backoff + cooldowns on top of the S-17 cascade | S-17 | FR-003, NFR (resilience) | proposed |
+| S-21 | codex-responses-api | `/v1/responses` (OpenAI Responses API) shim so modern Codex CLI can use Cerebrum | S-01e, S-15 | FR-003 | proposed |
+| S-22 | agent-trace-spans | OpenInference span semantics (tokens/cost/prompt I/O) so OTel export feeds Phoenix/Langfuse multi-step traces | S-11 | FR-005 | proposed |
+| S-23 | slice-cost-analytics | per-user/session/feature/model cost breakdowns replacing the single savings-vs-baseline number | S-18, S-02 | FR-007 | proposed |
+| S-24 | guardrails | PII redaction, prompt-injection detection, JSON-schema validation, deny semantics | S-01e | NFR (security) | proposed |
+| S-25 | learned-prompt-router | embedding/BERT/calibrated-threshold router + cost/quality dial + published benchmarks (replaces the regex/fewshot primitive) | S-09 | FR-002 | enterprise |
+| S-26 | alerting | cost/latency/error threshold + anomaly alerts | S-02, S-11 | FR-005 | proposed |
+| S-27 | evals-datasets | LLM-as-judge evals + datasets/experiments for routing-quality regression testing | S-02 | FR-002 | proposed |
+| S-28 | prompt-management | versioned, centrally-stored prompts deployable without code changes | S-01e | FR-002 | proposed |
+| S-29 | circuit-breaker-health | proactive upstream health checks + circuit breaker (vs reactive S-17 failover) | S-20 | FR-003, NFR (resilience) | proposed |
+| S-30 | real-tokenizer | real tokenization for `/v1/messages/count_tokens` (replaces chars/4 heuristic) | — | FR-003 | proposed |
+| S-31 | multi-tenant-keys-budgets | per-user API keys + RBAC + budgets/quotas + audit logs | S-18 | Access Control | enterprise |
 
 ## Streams
 
@@ -71,6 +86,7 @@ Navigation aid — groups items that share a Prerequisites chain. Canonical orde
 | E | Observability | `S-10` → `S-11` | Production hardening followed by OpenTelemetry integration for distributed tracing, metrics export, and log correlation. |
 | F | Config | `S-09a` → `S-14` → `S-13` | Config boundary formalization (S-09a) → serde refactor + multi-format upgrade (S-14) → unified TOML config for ALL settings (S-13). |
 | G | Protocol Translation | `S-01e` → `S-15` → `S-16` | Bidirectional Anthropic ↔ OpenAI protocol translation. S-15 (OpenAI→Anthropic) first because it enhances the existing endpoint and produces the shared translation module. S-16 (Anthropic→OpenAI) adds the new `/v1/messages` endpoint using the shared module. |
+| H | Competitive gaps (from `competitive-landscape-gaps` research) | `S-18` → `S-19` / `S-20` / `S-21` (parallel) → `S-22`..`S-24`, `S-26`..`S-30` → `S-25` / `S-31` (enterprise) | Tier-1 gaps (S-18..S-21) close deal-breakers vs LiteLLM/Portkey/OpenRouter/Helicone; Tier-2 (S-22..S-25) restore credibility/differentiation; Tier-3 (S-26..S-31) are smaller-leverage + enterprise. See "Slices — Competitive Landscape Gaps" below. |
 
 ## Baseline
 
@@ -433,6 +449,20 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Risk:** Medium-High — the stateful SSE emitter (tracking open block type, block indices, tool call state) is the most complex piece. Must handle thinking blocks, tool_use streaming, and block transitions correctly. Research complete: `context/changes/translate-anthropic-to-openai/research.md`.
 - **Status:** researched
 
+### S-17: Provider Fallback / Cascade
+
+- **Outcome:** When an upstream provider returns a retryable error (5xx, connection timeout, 429 rate-limit), the proxy automatically retries the request on the next provider in a configured priority list. Each routing category can define an ordered list of providers; the first healthy one wins. Operators see which provider served each request in the inference log. Streaming requests that fail before the first byte are retried transparently; mid-stream failures are not retried (the connection is already committed to the client).
+- **Change ID:** `provider-fallback-cascade`
+- **PRD refs:** FR-003 (routing), NFR (resilience)
+- **Prerequisites:** S-01e (end-to-end proxy working), S-01c (provider-agnostic config)
+- **Parallel with:** — (independent of protocol translation work)
+- **Blockers:** —
+- **Unknowns:**
+  - Config schema: flat array of providers per category, or separate `[[routing.CATEGORY.fallbacks]]` table? Owner: planning. Block: yes.
+  - Should 429 retry respect `Retry-After` header or immediately cascade to next provider? Owner: planning. Block: no.
+- **Risk:** Medium — touches the forwarding path in both handlers (completion + messages). The streaming complication (can't switch mid-stream) is a hard constraint that limits fallback to pre-first-byte failures. Protocol translation across fallback providers (e.g., primary is Anthropic, fallback is OpenAI-compatible) adds complexity since the request body may need re-translation.
+- **Status:** implemented (failover-to-next-provider live; same-provider retries/backoff/cooldowns tracked separately as S-20)
+
 ### S-10: Post-Review Cleanup, Hardening & Production Reliability
 
 - **Outcome:** All code review findings from 2026-06-08 and 2026-06-09 plus production hardening gaps addressed in 12 ordered phases: (1) SSE streaming log timing fix, (2) `completion_handler` decomposition and error deduplication, (3) `QueryError`/`timeout`/`timeout_secs`/`EnvGuard` cleanup, (4) `serial_test` for UB elimination, (5) `sqlx::migrate!()` embedded migrations, (6) LLM API key refresh, (7) auth constant-time comparison hardening, (8) streaming and JSON edge-case fixes, (9) dead code cleanup, (10) graceful shutdown + slow_tests + DB validation, (11) configurable limits and env parsing, (12) Prometheus metrics + health enhancements + docs.
@@ -444,6 +474,178 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Blockers:** —
 - **Unknowns:** —
 - **Risk:** Low-Medium — 12-phase plan touches all core modules (`main.rs`, `persistence.rs`, `config.rs`, `intent_classifier.rs`, `auth.rs`). `completion_handler` decomposition is the riskiest change (documented regression history — see `lessons.md:12-17`); mitigated by comprehensive test suite. Production hardening phases (10-12) are additive and independently verifiable.
+
+## Slices — Competitive Landscape Gaps
+
+> Derived from `context/changes/competitive-landscape-gaps/research.md` (Jun 2026): a landscape-level gap analysis vs. LiteLLM, Portkey, OpenRouter, RouteLLM, Helicone (gateways); Langfuse, LangSmith, Braintrust, Phoenix (observability); and Claude Code / Codex CLI / Cursor integration contracts. Items are tiered: Tier-1 = deal-breakers/table-stakes, Tier-2 = credibility/differentiation, Tier-3 = smaller-leverage/enterprise. Decision: keep the regex/fewshot classifier as the core primitive (S-25 learned router is enterprise-tier, not core).
+
+### S-18: Claude Code compatibility — header passthrough + prompt-cache translation
+
+- **Outcome:** Cerebrum is a true drop-in for Claude Code: `anthropic-beta`/`anthropic-version`/`x-claude-code-*` headers forward to Anthropic upstreams as an open list; `cache_control` prompt-caching blocks translate across all four protocol crossings (auto-insert on OpenAI→Anthropic); cache tokens translate in responses and log to `InferenceRecord`; `/v1/models` serves the Anthropic shape with `display_name`.
+- **Change ID:** `claude-code-compat`
+- **PRD refs:** FR-003 (routing/translation)
+- **Prerequisites:** S-01e, S-15 (bidirectional translation exists)
+- **Parallel with:** S-19, S-20, S-21 (independent gap-closing work)
+- **Blockers:** —
+- **Unknowns:** — (resolved during planning)
+- **Risk:** Medium-High — header plumbing is a signature change across 3 call sites; Phase 4 streaming-log finalization restructure touches ~20 `log_classification` sites. Prompt caching verified GA (no beta header needed). Plan: `context/changes/claude-code-compat/plan.md`.
+- **Status:** planned
+
+### S-19: Response caching — semantic + exact-match
+
+- **Outcome:** Repeat (and near-repeat) prompts return cached responses, cutting cost/latency. Supports exact-match and semantic (embedding similarity) caches with TTL controls. Universal across all surveyed gateways; Cerebrum is the only one with zero caching today.
+- **Change ID:** `add-response-cache`
+- **PRD refs:** FR-003, NFR (cost)
+- **Prerequisites:** S-01e
+- **Parallel with:** S-18, S-20, S-21
+- **Blockers:** —
+- **Unknowns:** Cache backend choice (in-memory vs Redis vs SQLite) — owner: planning. Block: yes.
+- **Risk:** Medium — adds a cache-lookup layer in both handlers; streaming cache semantics (replay vs re-stream) need care. Semantic cache needs an embedding model dependency.
+- **Status:** proposed
+
+### S-20: Provider retries + backoff + cooldowns
+
+- **Outcome:** A failed provider is retried with exponential backoff (with jitter) before cascading to the next; unhealthy providers enter a cooldown so traffic avoids them. Closes the reliability gap left by S-17, which only does next-provider failover (each provider tried exactly once).
+- **Change ID:** `provider-retry-backoff`
+- **PRD refs:** FR-003, NFR (resilience)
+- **Prerequisites:** S-17 (cascade implemented)
+- **Parallel with:** S-18, S-19, S-21
+- **Blockers:** —
+- **Unknowns:** Cooldown state backend (in-process vs Redis for multi-pod) — owner: planning. Block: no (in-process first).
+- **Risk:** Medium — touches the forwarding path; retry/idempotency for non-`GET` chat completions is generally safe but streaming pre-first-byte retry boundary (already in S-17) must be preserved.
+- **Status:** proposed
+
+### S-21: Codex CLI Responses API shim
+
+- **Outcome:** A new `POST /v1/responses` endpoint implements the OpenAI Responses API so modern Codex CLI (which now speaks only `responses`, not Chat Completions) can use Cerebrum. Implemented as a translation layer on top of the existing `/v1/chat/completions` core (reasoning items ↔ `reasoning_content`, tool-call items ↔ `tool_calls`, SSE event translation).
+- **Change ID:** `codex-responses-api`
+- **PRD refs:** FR-003
+- **Prerequisites:** S-01e, S-15 (translation patterns established)
+- **Parallel with:** S-18, S-19, S-20
+- **Blockers:** —
+- **Unknowns:** Full Responses API fidelity vs a Chat-Completions-backed shim sufficient for Codex CLI's streaming/tool-call paths — owner: planning. Block: yes.
+- **Risk:** Medium-High — Responses API has its own event/streaming model and reasoning-item semantics; the stateful SSE emitter is the most complex piece (mirrors the S-16 risk profile).
+- **Status:** proposed
+
+### S-22: Agent trace spans — OpenInference semantics
+
+- **Outcome:** OTel export carries LLM-specific span semantics (token counts, cost, prompt I/O as structured fields per OpenInference/OpenLLMetry conventions) so Cerebrum feeds Phoenix/Langfuse/Jaeger multi-step agent traces for free, instead of the current request-count/duration-only instruments.
+- **Change ID:** `agent-trace-spans`
+- **PRD refs:** FR-005 (observability)
+- **Prerequisites:** S-11 (OTel integration)
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** —
+- **Risk:** Low-Medium — additive instrumentation; no business-logic change. Decides build-vs-feed: enrich spans vs. rebuild app-layer features.
+- **Status:** proposed
+
+### S-23: Slice-by-user cost analytics
+
+- **Outcome:** The dashboard's single "savings vs baseline" number is replaced with per-developer/per-agent/per-feature/per-model cost breakdowns, enabled by capturing `x-claude-code-*` attribution headers (landed in S-18) and token counts.
+- **Change ID:** `slice-cost-analytics`
+- **PRD refs:** FR-007
+- **Prerequisites:** S-18 (attribution capture), S-02 (inference log)
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** —
+- **Risk:** Low — dashboard/SQL aggregation over columns S-18 adds.
+- **Status:** proposed
+
+### S-24: Guardrails
+
+- **Outcome:** PII redaction, prompt-injection detection, JSON-schema validation, and deny/log-only semantics run on requests (and optionally responses), able to trigger fallback/retry. Leverages the existing prompt-inspection surface already used for classification.
+- **Change ID:** `guardrails`
+- **PRD refs:** NFR (security)
+- **Prerequisites:** S-01e
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** Sync vs async guardrail execution; action vocabulary (Portkey uses 446 deny / 246 log-only) — owner: planning. Block: no.
+- **Risk:** Medium — runs in the hot path; async/sync choice affects latency.
+- **Status:** proposed
+
+### S-25: Learned prompt router + cost/quality dial (ENTERPRISE)
+
+- **Outcome:** The regex/fewshot intent classifier (the core primitive, kept as default) gains an enterprise-tier learned router: embedding/BERT/matrix-factorization/similarity-weighted-Elo (à la RouteLLM) with a calibrated cost/quality threshold dial (à la OpenRouter NotDiamond `cost_quality_tradeoff` 0–10) and published cost-quality benchmarks. Restores credibility for Cerebrum's core "route by prompt" value, which the industry has commoditized.
+- **Change ID:** `learned-prompt-router`
+- **PRD refs:** FR-002 (intent classification)
+- **Prerequisites:** S-09 (LLM classifier / trait)
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** Router model choice + training/evaluation data source; benchmark publication venue — owner: planning. Block: yes.
+- **Risk:** High — new ML dependency, eval framework, and benchmark methodology. Treated as enterprise-tier (not core): the primitive regex/fewshot classifier remains the default.
+- **Status:** enterprise (deferred)
+
+### S-26: Alerting
+
+- **Outcome:** Cost/latency/error threshold and anomaly alerts (graduated budget alerts à la Helicone) via a configurable notification sink.
+- **Change ID:** `alerting`
+- **PRD refs:** FR-005
+- **Prerequisites:** S-02, S-11
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** Notification sink (email/Slack/webhook) — owner: planning. Block: no.
+- **Risk:** Low — Cerebrum already has the data; thresholds + sink only.
+- **Status:** proposed
+
+### S-27: Evals + datasets
+
+- **Outcome:** Automated LLM-as-judge and code evaluators, plus datasets/experiments to regression-test routing quality and A/B prompt/model versions.
+- **Change ID:** `evals-datasets`
+- **PRD refs:** FR-002
+- **Prerequisites:** S-02
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** —
+- **Risk:** Medium — new eval pipeline surface.
+- **Status:** proposed
+
+### S-28: Prompt management
+
+- **Outcome:** Versioned, centrally-stored prompt templates deployable without code changes; prompt-version attribution in the inference log.
+- **Change ID:** `prompt-management`
+- **PRD refs:** FR-002
+- **Prerequisites:** S-01e
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** Storage backend (DB vs file vs config) — owner: planning. Block: no.
+- **Risk:** Low-Medium.
+- **Status:** proposed
+
+### S-29: Circuit breaker + upstream health checks
+
+- **Outcome:** Proactive upstream health probes and a circuit breaker that opens on sustained failures, so traffic avoids degraded providers before a request fails (vs S-17/S-20 reactive failover).
+- **Change ID:** `circuit-breaker-health`
+- **PRD refs:** FR-003, NFR (resilience)
+- **Prerequisites:** S-20 (cooldown state to build on)
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** Health-check probe shape (synthetic completion vs lightweight endpoint) — owner: planning. Block: no.
+- **Risk:** Medium — adds background probing + shared breaker state.
+- **Status:** proposed
+
+### S-30: Real tokenizer
+
+- **Outcome:** `/v1/messages/count_tokens` uses a real tokenizer instead of the `chars/4` heuristic, so Claude Code's token estimates are accurate.
+- **Change ID:** `real-tokenizer`
+- **PRD refs:** FR-003
+- **Prerequisites:** —
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** Tokenizer library / per-model tokenizers — owner: planning. Block: no.
+- **Risk:** Low — localized to the count_tokens path.
+- **Status:** proposed
+
+### S-31: Multi-tenant keys + budgets (ENTERPRISE)
+
+- **Outcome:** Per-user API keys, RBAC, per-key/team budgets/quotas, and audit logs — unlocking multi-developer/team use. Pairs with the attribution capture in S-18.
+- **Change ID:** `multi-tenant-keys-budgets`
+- **PRD refs:** Access Control
+- **Prerequisites:** S-18
+- **Parallel with:** —
+- **Blockers:** —
+- **Unknowns:** —
+- **Risk:** High — new identity/tenant model; conflicts with the flat single-operator MVP design (explicit Non-Goal in PRD). Treated as enterprise-tier.
+- **Status:** enterprise (deferred)
 
 ## Backlog Handoff
 
@@ -476,6 +678,20 @@ Foundations below assume these are present and do NOT re-scaffold them.
 | S-14 | config-format-upgrade | Config: upgrade format to support YAML + external pattern files; add `--validate` and `--migrate-config` CLI tools | yes | Research complete: `context/changes/config-format-upgrade/research-config-format.md`. Prerequisite: S-13. |
 | S-15 | translate-openai-to-anthropic | Protocol: Translate OpenAI Chat requests → Anthropic Messages for upstream routing to Claude/DeepSeek/Kimi/Z.ai | yes | Research complete: `context/changes/translate-openai-to-anthropic/research.md`. Prerequisite: S-01e (done). |
 | S-16 | translate-anthropic-to-openai | Protocol: New `/v1/messages` endpoint translating Anthropic → OpenAI for upstream routing to NIM/OpenRouter/Groq | yes | Research complete: `context/changes/translate-anthropic-to-openai/research.md`. Prerequisite: S-15. |
+| S-18 | claude-code-compat | Compat: forward anthropic-beta/cache_control headers + translate prompt-caching + Anthropic /v1/models shape (Claude Code drop-in) | no | Plan complete: `context/changes/claude-code-compat/plan.md`. Prerequisites: S-01e, S-15 (done). Tier-1 gap #3/#4. |
+| S-19 | add-response-cache | Cache: semantic + exact-match response caching | yes | From `competitive-landscape-gaps` research (Tier-1 #1). Prerequisite: S-01e. Universal table-stake; Cerebrum has zero caching today. |
+| S-20 | provider-retry-backoff | Reliability: same-provider retries + exponential backoff + cooldowns on top of S-17 | yes | From `competitive-landscape-gaps` research (Tier-1 #2). Prerequisite: S-17 (done — failover only). |
+| S-21 | codex-responses-api | Protocol: `/v1/responses` shim so modern Codex CLI (Responses-API-only) can use Cerebrum | yes | From `competitive-landscape-gaps` research (Tier-1 #5). Prerequisites: S-01e, S-15. Without it Codex CLI cannot use Cerebrum at all. |
+| S-22 | agent-trace-spans | Observability: OpenInference span semantics so OTel feeds Phoenix/Langfuse multi-step traces | yes | From research (Tier-2 #8). Prerequisite: S-11. Decides build-vs-feed for observability app-layers. |
+| S-23 | slice-cost-analytics | Observability: per-user/session/feature cost breakdowns (replaces single savings-vs-baseline #) | yes | From research (Tier-2 #9). Prerequisites: S-18, S-02. |
+| S-24 | guardrails | Security: PII, prompt-injection, JSON-schema checks + deny semantics | yes | From research (Tier-2 #10). Prerequisite: S-01e. Reuses prompt-inspection surface. |
+| S-25 | learned-prompt-router | Classifier (ENTERPRISE): embedding/BERT/calibrated router + cost/quality dial + benchmarks | no | From research (Tier-2 #6/#7). Enterprise-tier — primitive regex/fewshot stays core default. Prerequisite: S-09. |
+| S-26 | alerting | Observability: cost/latency/error threshold + anomaly alerts | yes | From research (Tier-3 #12). Prerequisites: S-02, S-11. |
+| S-27 | evals-datasets | Quality: LLM-as-judge evals + datasets/experiments for routing regression testing | yes | From research (Tier-3 #13). Prerequisite: S-02. |
+| S-28 | prompt-management | Config: versioned, centrally-stored prompts deployable without code changes | yes | From research (Tier-3 #14). Prerequisite: S-01e. |
+| S-29 | circuit-breaker-health | Reliability: proactive upstream health checks + circuit breaker | yes | From research (Tier-3 #16). Prerequisite: S-20. |
+| S-30 | real-tokenizer | Compat: real tokenizer for count_tokens (replaces chars/4 heuristic) | yes | From research (Tier-3 #17). No prerequisites. |
+| S-31 | multi-tenant-keys-budgets | Enterprise: per-user API keys + RBAC + budgets/quotas + audit logs | no | From research (Tier-3 #11). Enterprise-tier — conflicts with flat single-operator MVP Non-Goal. Prerequisite: S-18. |
 
 ## Open Roadmap Questions
 
@@ -551,7 +767,7 @@ The 3-week MVP budget under a 6-week hard deadline makes calendar time the #1 bl
 
 ## Your next move
 
-**► `/10x-plan translate-openai-to-anthropic` on S-15: Protocol Translation — OpenAI → Anthropic**
+**► `/10x-implement claude-code-compat phase 1` on S-18: Claude Code compatibility**
 
-**Why this one:** Research complete. Prerequisite S-01e already implemented. Enhances the existing `/v1/chat/completions` endpoint (no new route surface). Produces the shared translation module that S-16 builds on. Immediately unlocks Claude API, DeepSeek, Kimi, Z.ai, and Fireworks AI as upstream providers.
+**Why this one:** Plan complete (`context/changes/claude-code-compat/plan.md`); the highest-priority competitive gap (Tier-1 #3/#4). Prerequisites S-01e and S-15 are done. Closes the deal-breakers that currently make Cerebrum an incomplete Claude Code drop-in (dropped `anthropic-beta` headers, stripped `cache_control` caching, OpenAI-shape `/v1/models`), unlocking the full value of the existing 2,763-line bidirectional translator. Tier-1 siblings S-19 (caching), S-20 (retry/backoff), S-21 (Codex Responses API) follow per the user-set priority order.
 *** End Updated File ***- **S-09a: With both `RegexClassifier` and `LLMClassifier` backends operational, the config boundary between generic and classifier-specific settings is formalized. Per-backend enable/disable and ordering flags control chain construction at startup.** — Archived 2026-06-09 → `context/archive/2026-06-07-classifier-config-boundary/`. Lesson: —.

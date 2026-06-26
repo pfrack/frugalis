@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use tokio::fs;
@@ -13,8 +13,8 @@ use crate::intent_classifier::{
 use crate::routing::DEFAULT_MODEL;
 
 pub(crate) struct FewShotClassifier {
-    vocabulary: dashmap::DashMap<String, usize>,
-    intent_patterns: dashmap::DashMap<String, Vec<Vec<f64>>>,
+    vocabulary: RwLock<dashmap::DashMap<String, usize>>,
+    intent_patterns: RwLock<dashmap::DashMap<String, Vec<Vec<f64>>>>,
     training_data: Arc<tokio::sync::RwLock<Vec<FewShotExample>>>,
     routing: HashMap<String, RouteEntry>,
     fallback_entry: RouteEntry,
@@ -54,8 +54,8 @@ impl FewShotClassifier {
         let training_data = Arc::new(tokio::sync::RwLock::new(merged.clone()));
 
         let classifier = Self {
-            vocabulary: dashmap::DashMap::new(),
-            intent_patterns: dashmap::DashMap::new(),
+            vocabulary: RwLock::new(dashmap::DashMap::new()),
+            intent_patterns: RwLock::new(dashmap::DashMap::new()),
             training_data,
             routing,
             fallback_entry,
@@ -74,7 +74,8 @@ impl FewShotClassifier {
         collapsed.join(" ")
     }
 
-    fn extract_features(&self, text: &str, vocab: &dashmap::DashMap<String, usize>) -> Vec<f64> {
+    fn extract_features(&self, text: &str) -> Vec<f64> {
+        let vocab = self.vocabulary.read().unwrap();
         let tokens: Vec<&str> = text.split_whitespace().collect();
         let total_words = tokens.len();
         if total_words == 0 {
@@ -97,7 +98,7 @@ impl FewShotClassifier {
 
     fn score_categories(&self, input_features: &[f64]) -> HashMap<String, f64> {
         let mut scores = HashMap::new();
-        for entry in self.intent_patterns.iter() {
+        for entry in self.intent_patterns.read().unwrap().iter() {
             let category = entry.key();
             let patterns = entry.value();
             let mut max_score = 0.0_f64;
@@ -135,8 +136,8 @@ impl FewShotClassifier {
     }
 
     fn retrain_internal(&self, data: &[FewShotExample]) {
-        self.vocabulary.clear();
-        self.intent_patterns.clear();
+        let new_vocab: dashmap::DashMap<String, usize> = dashmap::DashMap::new();
+        let new_patterns: dashmap::DashMap<String, Vec<Vec<f64>>> = dashmap::DashMap::new();
 
         let mut vocab_map: HashMap<String, usize> = HashMap::new();
         let mut next_idx = 0usize;
@@ -173,13 +174,13 @@ impl FewShotClassifier {
         }
 
         for (word, idx) in &vocab_map {
-            self.vocabulary.insert(word.clone(), *idx);
+            new_vocab.insert(word.clone(), *idx);
         }
         for (category, patterns) in category_patterns {
-            self.intent_patterns.insert(category, patterns);
+            new_patterns.insert(category, patterns);
         }
 
-        let vocab_len = self.vocabulary.len();
+        let vocab_len = new_vocab.len();
         if vocab_len > self.config.max_vocabulary_warn {
             tracing::warn!(
                 "Few-shot vocabulary size ({}) exceeds max_vocabulary_warn ({}); consider resetting training data",
@@ -187,6 +188,10 @@ impl FewShotClassifier {
                 self.config.max_vocabulary_warn
             );
         }
+
+        // Atomically swap: only hold write locks for the assignment
+        *self.vocabulary.write().unwrap() = new_vocab;
+        *self.intent_patterns.write().unwrap() = new_patterns;
     }
 
     pub async fn add_feedback(
@@ -330,7 +335,7 @@ impl IntentClassify for FewShotClassifier {
             };
         }
 
-        let features = self.extract_features(&preprocessed, &self.vocabulary);
+        let features = self.extract_features(&preprocessed);
         let scores = self.score_categories(&features);
 
         let threshold = Self::effective_threshold_for(&td, &self.config);
@@ -546,6 +551,6 @@ mod tests {
                 )
                 .await;
         }
-        assert!(!classifier.vocabulary.is_empty());
+        assert!(!classifier.vocabulary.read().unwrap().is_empty());
     }
 }

@@ -50,10 +50,12 @@ struct RouteEntryRaw {
 impl From<RouteEntryRaw> for RouteEntry {
     fn from(raw: RouteEntryRaw) -> Self {
         if let Some(providers) = raw.providers {
-            return RouteEntry {
-                providers,
-                cost_per_1m_input_tokens: raw.cost_per_1m_input_tokens,
-            };
+            if !providers.is_empty() {
+                return RouteEntry {
+                    providers,
+                    cost_per_1m_input_tokens: raw.cost_per_1m_input_tokens,
+                };
+            }
         }
         RouteEntry {
             providers: vec![ProviderEntry {

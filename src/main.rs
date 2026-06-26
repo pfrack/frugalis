@@ -1891,9 +1891,15 @@ async fn translate_openai_buffered_to_anthropic(
                 let body_str = serde_json::to_string(&translated).unwrap_or(upstream_body);
                 (StatusCode::OK, body_str)
             }
-            Err(_) => (StatusCode::OK, upstream_body),
+            Err(e) => {
+                warn!("OAI→Anthropic response translation failed: {e}");
+                (StatusCode::OK, upstream_body)
+            }
         },
-        Err(_) => (StatusCode::OK, upstream_body),
+        Err(e) => {
+            warn!("OAI→Anthropic response JSON parse failed: {e}");
+            (StatusCode::OK, upstream_body)
+        }
     }
 }
 
