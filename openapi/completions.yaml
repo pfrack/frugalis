@@ -1,6 +1,6 @@
 openapi: "3.0.3"
 info:
-  title: Cerebrum Proxy API
+  title: Frugalis Proxy API
   description: Intent-aware request routing for autonomous agent workflows. Provides classify and chat completion endpoints.
   version: "0.1.0"
 paths:

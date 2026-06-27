@@ -4,13 +4,13 @@ Two independent implementation slices for bidirectional Anthropic ↔ OpenAI tra
 
 ## Slice A: Anthropic → OpenAI (`research-slice-a-anthropic-to-openai.md`)
 
-**Client speaks Anthropic** (e.g. Claude Code) → cerebrum translates → **upstream speaks OpenAI** (NVIDIA NIM, OpenRouter, Groq, Cerebras, Ollama).
+**Client speaks Anthropic** (e.g. Claude Code) → frugalis translates → **upstream speaks OpenAI** (NVIDIA NIM, OpenRouter, Groq, Cerebras, Ollama).
 
 New endpoint: `POST /v1/messages`
 
 ## Slice B: OpenAI → Anthropic (`research-slice-b-openai-to-anthropic.md`)
 
-**Client speaks OpenAI** (existing `/v1/chat/completions` users) → cerebrum translates → **upstream speaks Anthropic** (Claude API, DeepSeek /anthropic, Kimi, Z.ai, Fireworks).
+**Client speaks OpenAI** (existing `/v1/chat/completions` users) → frugalis translates → **upstream speaks Anthropic** (Claude API, DeepSeek /anthropic, Kimi, Z.ai, Fireworks).
 
 Enhancement to existing endpoint: `POST /v1/chat/completions`
 

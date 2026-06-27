@@ -111,23 +111,23 @@ pub fn init(service_name: &str) -> Option<(OtelGuard, Metrics)> {
     let meter = meter_provider.meter(svc_name);
 
     let requests_total = meter
-        .u64_counter("cerebrum.requests.total")
+        .u64_counter("frugalis.requests.total")
         .with_description("Total number of requests received")
         .build();
 
     let request_duration_seconds = meter
-        .f64_histogram("cerebrum.request.duration_seconds")
+        .f64_histogram("frugalis.request.duration_seconds")
         .with_description("Request duration in seconds")
         .with_unit("s")
         .build();
 
     let classification_total = meter
-        .u64_counter("cerebrum.classification.total")
+        .u64_counter("frugalis.classification.total")
         .with_description("Total number of classifications performed")
         .build();
 
     let upstream_duration_seconds = meter
-        .f64_histogram("cerebrum.upstream.duration_seconds")
+        .f64_histogram("frugalis.upstream.duration_seconds")
         .with_description("Upstream request duration in seconds")
         .with_unit("s")
         .build();

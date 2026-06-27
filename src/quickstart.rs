@@ -1,4 +1,4 @@
-//! Interactive setup wizard for `cerebrum --quickstart`.
+//! Interactive setup wizard for `frugalis --quickstart`.
 //!
 //! Walks the user through provider selection, model names, and (optionally)
 //! an API key env var, then writes a complete routing config — one entry
@@ -103,7 +103,7 @@ pub fn run_quickstart() -> Result<(), String> {
     let stdin = io::stdin();
     let mut input = stdin.lock();
 
-    println!("Welcome to cerebrum quickstart!\n");
+    println!("Welcome to frugalis quickstart!\n");
     println!("Select your provider:");
     for (i, preset) in PROVIDER_PRESETS.iter().enumerate() {
         println!("  {}. {} ({})", i + 1, preset.label, preset.endpoint);
@@ -225,10 +225,10 @@ pub fn run_quickstart() -> Result<(), String> {
         None => None,
     };
 
-    let output_path_raw = prompt(&mut input, "Output path", Some("./cerebrum-config.toml"))?;
+    let output_path_raw = prompt(&mut input, "Output path", Some("./frugalis-config.toml"))?;
     let output_path_str = output_path_raw.trim();
     let output_path_str = if output_path_str.is_empty() {
-        "./cerebrum-config.toml"
+        "./frugalis-config.toml"
     } else {
         output_path_str
     };
@@ -259,7 +259,7 @@ pub fn run_quickstart() -> Result<(), String> {
         .map_err(|e| format!("failed to write {}: {e}", output_path.display()))?;
 
     eprintln!("Wrote starter config to {}", output_path.display());
-    eprintln!("Start with: CONFIG_PATH={} cerebrum", output_path.display());
+    eprintln!("Start with: CONFIG_PATH={} frugalis", output_path.display());
     Ok(())
 }
 
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn test_generated_toml_writes_to_file_and_round_trips() {
         let dir = std::env::temp_dir().join(format!(
-            "cerebrum-quickstart-test-{}",
+            "frugalis-quickstart-test-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()

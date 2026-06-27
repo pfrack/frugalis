@@ -213,7 +213,7 @@ model_env_var = "CUSTOM_MODEL"
 
 ## Cross-Check: Verify Classification Output
 
-For each test scenario, you can also check the `/v1/chat/completions` response for the `X-Cerebrum-Category` header (if enabled) or infer from the model selected.
+For each test scenario, you can also check the `/v1/chat/completions` response for the `X-Frugalis-Category` header (if enabled) or infer from the model selected.
 
 The `manual-test/run.sh` script demonstrates this: it checks which model was used to infer the classification.
 

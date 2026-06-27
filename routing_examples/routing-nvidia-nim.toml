@@ -1,5 +1,5 @@
 # NVIDIA NIM Free Model Routing Configuration
-# Usage: CONFIG_PATH=this-file.toml cerebrum
+# Usage: CONFIG_PATH=this-file.toml frugalis
 # Requires NVIDIA_API_KEY env var to be set.
 #
 # Cerebrum's merge semantics for [routing] are per-key additive — unmentioned

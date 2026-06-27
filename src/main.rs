@@ -75,6 +75,9 @@ mod protocol_translation;
 mod quickstart;
 mod routing;
 
+#[cfg(test)]
+mod test_util;
+
 use intent_classifier::IntentClassify;
 
 /// Shared application state injected into handlers via Axum's `State` extractor.
@@ -113,7 +116,7 @@ fn run_init(path: Option<&str>, force: bool) -> Result<(), String> {
     match path {
         Some(p) => {
             // Reject flag-shaped paths to avoid silently swallowing unknown
-            // flags (e.g. `cerebrum --init --validate` would otherwise drop
+            // flags (e.g. `frugalis --init --validate` would otherwise drop
             // `--validate` and treat --init as having no path). The check is
             // intentionally narrow — paths that happen to contain `--` in
             // the middle are unaffected.
@@ -237,10 +240,10 @@ async fn main() {
     if let CliMode::Help = mode {
         print!(
             "\
-cerebrum — intent-aware routing gateway
+frugalis — intent-aware routing gateway
 
 USAGE:
-    cerebrum [OPTIONS]
+    frugalis [OPTIONS]
 
 OPTIONS:
     --help         Show this help
@@ -327,7 +330,7 @@ ENVIRONMENT:
 
     // Initialize OpenTelemetry providers before tracing (layers reference the providers)
     #[cfg(feature = "otel")]
-    let otel: Option<(telemetry::OtelGuard, telemetry::Metrics)> = telemetry::init("cerebrum");
+    let otel: Option<(telemetry::OtelGuard, telemetry::Metrics)> = telemetry::init("frugalis");
 
     // Initialize tracing using server_config with RUST_LOG override
     let log_filter = EnvFilter::try_from_default_env()
@@ -363,7 +366,7 @@ ENVIRONMENT:
     // reaches both the fmt layer and the OTel log bridge (when the otel
     // feature is enabled).
     panic::set_hook(Box::new(|info| {
-        tracing::error!("Panic in Cerebrum: {info}");
+        tracing::error!("Panic in Frugalis: {info}");
     }));
 
     let auth_config = auth::AuthConfig::from_env().unwrap_or_else(|err| {
@@ -372,7 +375,7 @@ ENVIRONMENT:
     let auth_config = Arc::new(auth_config);
 
     if !config_path_was_set {
-        info!("No CONFIG_PATH set — using embedded defaults. Run `cerebrum --init` to generate a starter config.");
+        info!("No CONFIG_PATH set — using embedded defaults. Run `frugalis --init` to generate a starter config.");
     }
 
     let regex_config = config::load_regex_classifier_config_from_value(&config_root);
@@ -674,7 +677,7 @@ ENVIRONMENT:
 
     let app = build_app(auth_config, app_state);
     let bind_addr = format!("0.0.0.0:{port}");
-    info!("Starting cerebrum on {bind_addr}");
+    info!("Starting frugalis on {bind_addr}");
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
@@ -793,7 +796,7 @@ fn try_optimize_request(body: &[u8], is_anthropic: bool) -> Option<Response> {
                 "type": "message",
                 "role": "assistant",
                 "content": [],
-                "model": "cerebrum-optimized",
+                "model": "frugalis-optimized",
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 0, "output_tokens": 0}
             })
@@ -839,7 +842,7 @@ fn try_optimize_request(body: &[u8], is_anthropic: bool) -> Option<Response> {
                     "type": "message",
                     "role": "assistant",
                     "content": [{"type": "text", "text": "Hello! How can I help you today?"}],
-                    "model": "cerebrum-optimized",
+                    "model": "frugalis-optimized",
                     "stop_reason": "end_turn",
                     "usage": {"input_tokens": 1, "output_tokens": 8}
                 })
@@ -1540,7 +1543,7 @@ fn handle_streaming_response(
 /// `handle_streaming_response` (chunk stream error) — call this helper
 /// with the raw upstream error string.
 pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
-    let mut escaped = String::with_capacity(error_msg.len());
+    let mut escaped = String::with_capacity(error_msg.len() * 2);
     for c in error_msg.chars() {
         match c {
             '\\' => escaped.push_str("\\\\"),
@@ -2080,7 +2083,7 @@ fn handle_translating_anthropic_stream(
 }
 
 /// Completion handler: classifies intent, optionally skips classification via
-/// X-Cerebrum-Category / X-Cerebrum-Model headers, resolves the API key from
+/// X-Frugalis-Category / X-Frugalis-Model headers, resolves the API key from
 /// the env var named by the classification result, builds auth headers,
 /// overrides the model field, forwards the body to the upstream endpoint,
 /// and returns the buffered response with Content-Type: application/json.
@@ -2129,25 +2132,25 @@ async fn completion_handler(
 
     // Request optimization: skip if explicit routing headers are present —
     // explicit directives should take precedence over probe optimization.
-    if headers.get("x-cerebrum-category").is_none() && headers.get("x-cerebrum-model").is_none() {
+    if headers.get("x-frugalis-category").is_none() && headers.get("x-frugalis-model").is_none() {
         if let Some(response) = try_optimize_request(&body, false) {
             return response;
         }
     }
 
     let x_category = headers
-        .get("x-cerebrum-category")
+        .get("x-frugalis-category")
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
     let x_model = headers
-        .get("x-cerebrum-model")
+        .get("x-frugalis-model")
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
 
     // Extract the prompt once and reuse it for both classification and the
-    // persistence log. When X-Cerebrum-Category/Model headers bypass the
+    // persistence log. When X-Frugalis-Category/Model headers bypass the
     // classifier, we still log an empty prompt rather than re-extracting
     // — the classifier never ran, so there is nothing meaningful to log.
     let prompt = persistence::extract_last_user_message(&body_str);
@@ -2164,7 +2167,7 @@ async fn completion_handler(
                 providers: entry.providers.clone(),
             },
             None => {
-                warn!("X-Cerebrum-Category '{category}' not found in routing configuration; degrading to classification JSON");
+                warn!("X-Frugalis-Category '{category}' not found in routing configuration; degrading to classification JSON");
                 let fallback = match state.classifier.as_ref() {
                     Some(c) => c.classify("").await,
                     None => intent_classifier::ClassificationResult::fallback(),
@@ -2858,19 +2861,19 @@ async fn messages_handler(
 
     // Request optimization: skip if explicit routing headers are present —
     // explicit directives should take precedence over probe optimization.
-    if headers.get("x-cerebrum-category").is_none() && headers.get("x-cerebrum-model").is_none() {
+    if headers.get("x-frugalis-category").is_none() && headers.get("x-frugalis-model").is_none() {
         if let Some(response) = try_optimize_request(&body, true) {
             return response;
         }
     }
 
     let x_category = headers
-        .get("x-cerebrum-category")
+        .get("x-frugalis-category")
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
     let x_model = headers
-        .get("x-cerebrum-model")
+        .get("x-frugalis-model")
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
@@ -2892,7 +2895,7 @@ async fn messages_handler(
                 providers: entry.providers.clone(),
             },
             None => {
-                warn!("X-Cerebrum-Category '{category}' not found in routing configuration; degrading to classification JSON");
+                warn!("X-Frugalis-Category '{category}' not found in routing configuration; degrading to classification JSON");
                 let fallback = match state.classifier.as_ref() {
                     Some(c) => c.classify("").await,
                     None => intent_classifier::ClassificationResult::fallback(),
@@ -3620,14 +3623,7 @@ mod tests {
     use serial_test::serial;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::util::ServiceExt;
-
-    /// Guard that removes an env var on drop to prevent test pollution.
-    struct EnvGuard(&'static str);
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            std::env::remove_var(self.0);
-        }
-    }
+    use super::test_util::EnvGuard;
 
     /// Read a response body as a `serde_json::Value` so assertions can target
     /// the parsed structure instead of brittle substring matches. Refusing to
@@ -5183,7 +5179,23 @@ mod tests {
         mock.assert();
 
         // Wait for the fire-and-forget log task to attempt + fail.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Poll with a 2s timeout instead of a fixed sleep to reduce flakiness.
+        let poll_start = std::time::Instant::now();
+        let poll_timeout = std::time::Duration::from_secs(2);
+        loop {
+            match backend.as_ref() {
+                persistence::DbBackend::Memory(mb) => {
+                    if !mb.fail_next.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
+                }
+                _ => panic!("test fixture invariant: backend must be DbBackend::Memory"),
+            }
+            if poll_start.elapsed() >= poll_timeout {
+                panic!("log task did not consume fail_next within 2s; test setup failed");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
 
         // (b) The failed insert means the record was NOT persisted AND
         // `fail_next` was atomically consumed. The consumption check confirms
@@ -5239,8 +5251,8 @@ mod tests {
             .expect("body should be readable");
         let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
         assert!(
-            body.contains("Cerebrum Dashboard"),
-            "body should contain 'Cerebrum Dashboard'"
+            body.contains("Frugalis Dashboard"),
+            "body should contain 'Frugalis Dashboard'"
         );
     }
 
@@ -5607,7 +5619,7 @@ mod tests {
     async fn test_messages_handler_forwards_anthropic_client_headers() {
         // Claude Code pairs each anthropic-beta capability with an
         // anthropic-version + x-claude-code-* attribution header. Routed to an
-        // Anthropic upstream, Cerebrum must forward them unchanged, prefer the
+        // Anthropic upstream, Frugalis must forward them unchanged, prefer the
         // client's anthropic-version over the 2023-06-01 default, and still
         // apply the resolved x-api-key credential. The mock matches only if
         // every forwarded header is present with the expected value.
@@ -6226,8 +6238,8 @@ mod tests {
                     .uri("/v1/chat/completions")
                     .header(header::AUTHORIZATION, "Bearer proxy-token")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .header("x-cerebrum-category", "SYNTAX_FIX")
-                    .header("x-cerebrum-model", "gpt-4o-mini")
+                    .header("x-frugalis-category", "SYNTAX_FIX")
+                    .header("x-frugalis-model", "gpt-4o-mini")
                     .body(Body::from(
                         r#"{"messages":[{"role":"user","content":"hello"}]}"#,
                     ))
@@ -6898,9 +6910,12 @@ mod tests {
             "SSE error data: payload must contain an 'error' string field, got: {parsed}"
         );
 
-        // Wait for the server task to finish cleanly (it drops the
-        // socket on its own once the response is complete).
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_task).await;
+        // Wait for the server task to finish; propagate panics or timeouts.
+        match tokio::time::timeout(std::time::Duration::from_secs(2), server_task).await {
+            Ok(Ok(())) => {} // task completed cleanly
+            Ok(Err(e)) => panic!("server task panicked: {e:?}"),
+            Err(_) => panic!("server task did not complete within 2s"),
+        }
     }
 
     #[tokio::test]
@@ -7310,7 +7325,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("cerebrum-init-{label}-{nanos}"));
+        let dir = std::env::temp_dir().join(format!("frugalis-init-{label}-{nanos}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir should be creatable");
         dir
@@ -7356,7 +7371,7 @@ mod tests {
     #[test]
     fn run_init_writes_template_to_new_file() {
         let dir = init_scratch("write");
-        let path = dir.join("cerebrum.toml");
+        let path = dir.join("frugalis.toml");
         run_init(Some(path.to_str().unwrap()), false).expect("write should succeed");
         let content = std::fs::read_to_string(&path).expect("file should be readable");
         assert_eq!(content, INIT_TEMPLATE);
@@ -7365,7 +7380,7 @@ mod tests {
     #[test]
     fn run_init_refuses_to_overwrite_existing_file() {
         let dir = init_scratch("refuse");
-        let path = dir.join("cerebrum.toml");
+        let path = dir.join("frugalis.toml");
         std::fs::write(&path, "preexisting content").expect("seed write should succeed");
         let err = run_init(Some(path.to_str().unwrap()), false)
             .expect_err("overwrite must be refused without --force");
@@ -7381,7 +7396,7 @@ mod tests {
     #[test]
     fn run_init_force_overwrites_existing_file() {
         let dir = init_scratch("force");
-        let path = dir.join("cerebrum.toml");
+        let path = dir.join("frugalis.toml");
         std::fs::write(&path, "preexisting content").expect("seed write should succeed");
         run_init(Some(path.to_str().unwrap()), true).expect("force overwrite should succeed");
         let content = std::fs::read_to_string(&path).expect("file should be readable");
@@ -7391,7 +7406,7 @@ mod tests {
     #[test]
     fn run_init_creates_missing_parent_directories() {
         let dir = init_scratch("mkdir");
-        let nested = dir.join("a").join("b").join("cerebrum.toml");
+        let nested = dir.join("a").join("b").join("frugalis.toml");
         run_init(Some(nested.to_str().unwrap()), false).expect("nested write should succeed");
         assert!(nested.exists(), "file should exist at nested path");
         let content = std::fs::read_to_string(&nested).expect("file should be readable");
@@ -7605,8 +7620,8 @@ mod tests {
                     .uri("/v1/messages")
                     .header(header::AUTHORIZATION, "Bearer proxy-token")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .header("x-cerebrum-category", "SYNTAX_FIX")
-                    .header("x-cerebrum-model", "gpt-4o")
+                    .header("x-frugalis-category", "SYNTAX_FIX")
+                    .header("x-frugalis-model", "gpt-4o")
                     .body(Body::from(
                         r#"{"model":"claude-3.5","max_tokens":1024,"messages":[{"role":"user","content":[{"type":"text","text":"fix this bug","cache_control":{"type":"ephemeral"}}]}]}"#,
                     ))
@@ -7864,8 +7879,8 @@ mod tests {
                     .uri("/v1/messages")
                     .header(header::AUTHORIZATION, "Bearer proxy-token")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .header("x-cerebrum-category", "SYNTAX_FIX")
-                    .header("x-cerebrum-model", "gpt-4o")
+                    .header("x-frugalis-category", "SYNTAX_FIX")
+                    .header("x-frugalis-model", "gpt-4o")
                     .body(Body::from(
                         r#"{"model":"claude-3.5","max_tokens":1024,"messages":[{"role":"user","content":"fix this bug"}]}"#,
                     ))
@@ -7926,8 +7941,8 @@ mod tests {
                     .uri("/v1/messages")
                     .header(header::AUTHORIZATION, "Bearer proxy-token")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .header("x-cerebrum-category", "SYNTAX_FIX")
-                    .header("x-cerebrum-model", "gpt-4o")
+                    .header("x-frugalis-category", "SYNTAX_FIX")
+                    .header("x-frugalis-model", "gpt-4o")
                     .body(Body::from(
                         r#"{"model":"claude-3.5","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"fix this bug"}]}"#,
                     ))
@@ -7993,8 +8008,8 @@ mod tests {
                     .uri("/v1/messages")
                     .header(header::AUTHORIZATION, "Bearer proxy-token")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .header("x-cerebrum-category", "SYNTAX_FIX")
-                    .header("x-cerebrum-model", "gpt-4o")
+                    .header("x-frugalis-category", "SYNTAX_FIX")
+                    .header("x-frugalis-model", "gpt-4o")
                     .body(Body::from(
                         r#"{"model":"claude-3.5","max_tokens":1024,"messages":[{"role":"user","content":"fix this bug"}]}"#,
                     ))
@@ -8034,13 +8049,7 @@ mod slow_tests {
     use serial_test::serial;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::util::ServiceExt;
-
-    struct EnvGuard(&'static str);
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            std::env::remove_var(self.0);
-        }
-    }
+    use super::test_util::EnvGuard;
 
     // ── Keepalive test ──────────────────────────────────────────────────────
     // Uses a real TCP server that sends headers immediately, waits for the

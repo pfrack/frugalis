@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================================
-# Cerebrum Manual & Automated Tests for Shared Category Config (S-07b)
+# Frugalis Manual & Automated Tests for Shared Category Config (S-07b)
 # ============================================================================
 # USAGE:
 #   ./run.sh                  # Interactive manual testing (default)
@@ -70,7 +70,7 @@ if [ "$AUTO_MODE" = true ]; then
     test_hardcoded_defaults() {
         section "Test 1: Hardcoded Defaults (no config.toml)"
         
-        rm -f /tmp/cerebrum-config-test.toml
+        rm -f /tmp/frugalis-config-test.toml
         unset CONFIG_PATH
         
         if ! start_server ""; then
@@ -104,7 +104,7 @@ if [ "$AUTO_MODE" = true ]; then
     test_threshold_override() {
         section "Test 2: Threshold Override (FILE_READING threshold = 100)"
         
-         cat > /tmp/cerebrum-config-test.toml << 'EOF'
+         cat > /tmp/frugalis-config-test.toml << 'EOF'
 [categories.FILE_READING]
 description = "Reading, viewing, inspecting, searching, or navigating files or code"
 threshold = 100
@@ -156,7 +156,7 @@ endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 api_key_env = "NVIDIA_API_KEY"
 EOF
         
-        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        if ! start_server "/tmp/frugalis-config-test.toml"; then
             log_fail "Failed to start server"
             return 1
         fi
@@ -181,7 +181,7 @@ EOF
     test_partial_categories() {
         section "Test 3: Partial Categories (FILE_READING + CASUAL only)"
         
-         cat > /tmp/cerebrum-config-test.toml << 'EOF'
+         cat > /tmp/frugalis-config-test.toml << 'EOF'
 [categories.FILE_READING]
 description = "Reading files"
 threshold = 3
@@ -214,7 +214,7 @@ endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 api_key_env = "NVIDIA_API_KEY"
 EOF
         
-        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        if ! start_server "/tmp/frugalis-config-test.toml"; then
             log_fail "Failed to start server"
             return 1
         fi
@@ -252,7 +252,7 @@ EOF
     test_legacy_routing() {
         section "Test 4: Legacy routing.toml (no config.toml)"
         
-        cp routing_examples/routing-manual-tests.toml /tmp/cerebrum-routing-legacy.toml
+        cp routing_examples/routing-manual-tests.toml /tmp/frugalis-routing-legacy.toml
         unset CONFIG_PATH
         
         if ! start_server ""; then
@@ -279,7 +279,7 @@ EOF
      test_combined_config() {
          section "Test 5: Combined config.toml (categories + routing)"
          
-          cat > /tmp/cerebrum-config-test.toml << 'EOF'
+          cat > /tmp/frugalis-config-test.toml << 'EOF'
 [categories.FILE_READING]
 description = "Reading, viewing, inspecting, searching, or navigating files or code"
 threshold = 3
@@ -343,7 +343,7 @@ endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 api_key_env = "NVIDIA_API_KEY"
 EOF
         
-        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        if ! start_server "/tmp/frugalis-config-test.toml"; then
             log_fail "Failed to start server"
             return 1
         fi
@@ -375,7 +375,7 @@ EOF
     test_field_integrity() {
         section "Test 6: Field Value Integrity"
         
-         cat > /tmp/cerebrum-config-test.toml << 'EOF'
+         cat > /tmp/frugalis-config-test.toml << 'EOF'
 [categories.FILE_READING]
 description = "Reading files"
 threshold = 100
@@ -430,7 +430,7 @@ endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 api_key_env = "NVIDIA_API_KEY"
 EOF
         
-        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        if ! start_server "/tmp/frugalis-config-test.toml"; then
             log_fail "Failed to start server"
             return 1
         fi
@@ -503,7 +503,7 @@ EOF
     test_phase1_informative_errors() {
         section "Phase 1 - Test 9: Error messages remain informative"
 
-        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+        cat > /tmp/frugalis-config-test.toml << 'EOF'
 [categories.BAD_CAT]
 description = "Bad"
 threshold = 0
@@ -513,7 +513,7 @@ EOF
         export PROXY_API_BEARER_TOKEN="$TOKEN"
         export DASHBOARD_BASIC_USER="admin"
         export DASHBOARD_BASIC_PASSWORD="admin"
-        export CONFIG_PATH="/tmp/cerebrum-config-test.toml"
+        export CONFIG_PATH="/tmp/frugalis-config-test.toml"
 
         local output rc
         set +e
@@ -537,7 +537,7 @@ EOF
     test_phase2_yaml_config() {
         section "Phase 2 - Test 10: YAML config starts and classifies"
 
-        cat > /tmp/cerebrum-config-test.yaml << 'YAMLEOF'
+        cat > /tmp/frugalis-config-test.yaml << 'YAMLEOF'
 server:
   port: 10000
   log_level: info
@@ -658,7 +658,7 @@ dashboard:
   recent_count: 5
 YAMLEOF
 
-        if ! start_server "/tmp/cerebrum-config-test.yaml"; then
+        if ! start_server "/tmp/frugalis-config-test.yaml"; then
             log_fail "Failed to start server with YAML config"
             return 1
         fi
@@ -688,7 +688,7 @@ YAMLEOF
     test_phase2_yaml_validate() {
         section "Phase 2 - Test 11: YAML config validates successfully"
 
-        export CONFIG_PATH="/tmp/cerebrum-config-test.yaml"
+        export CONFIG_PATH="/tmp/frugalis-config-test.yaml"
         export PROXY_API_BEARER_TOKEN="$TOKEN"
         export DASHBOARD_BASIC_USER="admin"
         export DASHBOARD_BASIC_PASSWORD="admin"
@@ -713,20 +713,20 @@ YAMLEOF
     test_phase3_external_patterns() {
         section "Phase 3 - Test 12: External pattern files load and classify"
 
-        mkdir -p /tmp/cerebrum-patterns
+        mkdir -p /tmp/frugalis-patterns
 
-        cat > /tmp/cerebrum-patterns/file_reading.patterns << 'EOF'
+        cat > /tmp/frugalis-patterns/file_reading.patterns << 'EOF'
 3 | (?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b
 2 | (?i)\b(?:look|go|navigate)\s+(?:at|through|to|into)\s+(?:the\s+)?(?:file|directory|code|source)
 EOF
 
-        cat > /tmp/cerebrum-patterns/casual.patterns << 'EOF'
+        cat > /tmp/frugalis-patterns/casual.patterns << 'EOF'
 3 | (?i)^\s*(?:hi|hey|hello|greetings|good\s+morning|good\s+afternoon|good\s+evening|howdy)(?:\s+there)?[\s!.,]*$
 2 | (?i)^\s*(?:thanks|thank\s+you|thx|ty|appreciate\s+it|cheers|thanks\s+a\s+lot)[\s!.,]*$
 EOF
 
-        cat > /tmp/cerebrum-config-test.toml << 'EOF'
-patterns_dir = "/tmp/cerebrum-patterns"
+        cat > /tmp/frugalis-config-test.toml << 'EOF'
+patterns_dir = "/tmp/frugalis-patterns"
 
 [categories.FILE_READING]
 description = "Reading files"
@@ -759,7 +759,7 @@ endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
 api_key_env = "NVIDIA_API_KEY"
 EOF
 
-        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        if ! start_server "/tmp/frugalis-config-test.toml"; then
             log_fail "Failed to start server with external pattern files"
             return 1
         fi
@@ -783,23 +783,23 @@ EOF
         fi
 
         stop_server
-        rm -rf /tmp/cerebrum-patterns
+        rm -rf /tmp/frugalis-patterns
         return $([ "$all_pass" = true ] && echo 0 || echo 1)
     }
 
     test_phase3_pattern_file_validation() {
         section "Phase 3 - Test 13: Invalid pattern file detected by --validate"
 
-        mkdir -p /tmp/cerebrum-patterns
+        mkdir -p /tmp/frugalis-patterns
 
-        cat > /tmp/cerebrum-patterns/bad.patterns << 'EOF'
+        cat > /tmp/frugalis-patterns/bad.patterns << 'EOF'
 3 | (?i)\b(?:read|show)\s+file\b
 BADWEIGHT | not a number
 NO_DELIMITER_LINE
 EOF
 
-        cat > /tmp/cerebrum-config-test.toml << 'EOF'
-patterns_dir = "/tmp/cerebrum-patterns"
+        cat > /tmp/frugalis-config-test.toml << 'EOF'
+patterns_dir = "/tmp/frugalis-patterns"
 
 [categories.TEST_CAT]
 description = "Test"
@@ -814,7 +814,7 @@ endpoint = "https://example.com"
 api_key_env = "NVIDIA_API_KEY"
 EOF
 
-        export CONFIG_PATH="/tmp/cerebrum-config-test.toml"
+        export CONFIG_PATH="/tmp/frugalis-config-test.toml"
         export PROXY_API_BEARER_TOKEN="$TOKEN"
         export DASHBOARD_BASIC_USER="admin"
         export DASHBOARD_BASIC_PASSWORD="admin"
@@ -826,7 +826,7 @@ EOF
         set -e
 
         unset CONFIG_PATH
-        rm -rf /tmp/cerebrum-patterns
+        rm -rf /tmp/frugalis-patterns
 
         if [ $rc -ne 0 ] && echo "$output" | grep -q "invalid weight"; then
             log_pass "Invalid pattern file detected with informative error"
@@ -868,7 +868,7 @@ EOF
     test_phase4_validate_invalid_regex() {
         section "Phase 4 - Test 15: --validate detects invalid regex"
 
-        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+        cat > /tmp/frugalis-config-test.toml << 'EOF'
 [categories.BAD_REGEX]
 description = "Bad regex test"
 threshold = 3
@@ -885,7 +885,7 @@ endpoint = "https://example.com"
 api_key_env = "NVIDIA_API_KEY"
 EOF
 
-        export CONFIG_PATH="/tmp/cerebrum-config-test.toml"
+        export CONFIG_PATH="/tmp/frugalis-config-test.toml"
         export PROXY_API_BEARER_TOKEN="$TOKEN"
         export DASHBOARD_BASIC_USER="admin"
         export DASHBOARD_BASIC_PASSWORD="admin"
@@ -910,7 +910,7 @@ EOF
     test_phase4_validate_schema_errors() {
         section "Phase 4 - Test 16: --validate detects schema errors"
 
-        cat > /tmp/cerebrum-config-test.toml << 'EOF'
+        cat > /tmp/frugalis-config-test.toml << 'EOF'
 [server]
 port = 0
 log_level = "invalid_level"
@@ -925,7 +925,7 @@ threshold = 0
 priority = 0
 EOF
 
-        export CONFIG_PATH="/tmp/cerebrum-config-test.toml"
+        export CONFIG_PATH="/tmp/frugalis-config-test.toml"
         export PROXY_API_BEARER_TOKEN="$TOKEN"
         export DASHBOARD_BASIC_USER="admin"
         export DASHBOARD_BASIC_PASSWORD="admin"
@@ -1261,15 +1261,15 @@ else:
 
     # ── Claude Code Compat: Header Forwarding & Cache-Control ──────────────
     # Phases 2–3: Uses a mock Anthropic upstream server that writes
-    # diagnostics (headers + body structure) to a temp file. Cerebrum
+    # diagnostics (headers + body structure) to a temp file. Frugalis
     # proxies the request to the mock; the test reads the diagnostics file
     # to verify header pass-through and cache_control translation.
 
     MOCK_CC_ANTHROPIC_PORT=10043
-    MOCK_CC_DIAG_FILE="/tmp/cerebrum-cc-mock-diag.txt"
+    MOCK_CC_DIAG_FILE="/tmp/frugalis-cc-mock-diag.txt"
 
     start_mock_cc_anthropic_server() {
-        local mock_script="/tmp/cerebrum-mock-cc-anthropic-$$.py"
+        local mock_script="/tmp/frugalis-mock-cc-anthropic-$$.py"
         cat > "$mock_script" << 'PYEOF'
 import http.server
 import json
@@ -1277,7 +1277,7 @@ import os
 import sys
 
 PORT = int(sys.argv[1])
-DIAG_FILE = os.environ.get("MOCK_CC_DIAG_FILE", "/tmp/cerebrum-cc-mock-diag.txt")
+DIAG_FILE = os.environ.get("MOCK_CC_DIAG_FILE", "/tmp/frugalis-cc-mock-diag.txt")
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -1362,13 +1362,13 @@ PYEOF
             wait "$MOCK_CC_PID" 2>/dev/null || true
             MOCK_CC_PID=""
         fi
-        rm -f /tmp/cerebrum-mock-cc-anthropic-*.py
+        rm -f /tmp/frugalis-mock-cc-anthropic-*.py
         rm -f "$MOCK_CC_DIAG_FILE"
     }
 
     _cc_anth_config() {
         local _mock_url="http://127.0.0.1:${MOCK_CC_ANTHROPIC_PORT}/v1/messages"
-        cat > /tmp/cerebrum-config-test.toml << HEREDOC
+        cat > /tmp/frugalis-config-test.toml << HEREDOC
 [categories.FILE_READING]
 description = "Reading files"
 threshold = 3
@@ -1433,7 +1433,7 @@ HEREDOC
 
         export ANTHROPIC_API_KEY="sk-ant-test-key"
 
-        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        if ! start_server "/tmp/frugalis-config-test.toml"; then
             log_fail "Failed to start server"
             stop_mock_cc_anthropic_server
             unset ANTHROPIC_API_KEY
@@ -1534,7 +1534,7 @@ print(usage.get('cache_read_input_tokens', ''))
 
         export ANTHROPIC_API_KEY="sk-ant-test-key"
 
-        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        if ! start_server "/tmp/frugalis-config-test.toml"; then
             log_fail "Failed to start server"
             stop_mock_cc_anthropic_server
             unset ANTHROPIC_API_KEY
@@ -1626,7 +1626,7 @@ print(details.get('cached_tokens', ''))
 
         export ANTHROPIC_API_KEY="sk-ant-test-key"
 
-        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        if ! start_server "/tmp/frugalis-config-test.toml"; then
             log_fail "Failed to start server"
             stop_mock_cc_anthropic_server
             unset ANTHROPIC_API_KEY
@@ -1690,7 +1690,7 @@ print(details.get('cached_tokens', ''))
     # These tests spin up a lightweight Python HTTP server that mimics an
     # Anthropic upstream. It validates that incoming requests are in
     # Anthropic Messages format (has "system" field, content blocks, etc.)
-    # and returns Anthropic-format responses. Cerebrum translates the
+    # and returns Anthropic-format responses. Frugalis translates the
     # OpenAI request → Anthropic before forwarding, and translates the
     # Anthropic response → OpenAI before returning to the client.
 
@@ -1698,7 +1698,7 @@ print(details.get('cached_tokens', ''))
 
     start_mock_anthropic_server() {
         local mode="$1"  # "ok" or "error"
-        local mock_script="/tmp/cerebrum-mock-anthropic-$$.py"
+        local mock_script="/tmp/frugalis-mock-anthropic-$$.py"
         cat > "$mock_script" << 'PYEOF'
 import http.server
 import json
@@ -1787,7 +1787,7 @@ PYEOF
             wait "$MOCK_PID" 2>/dev/null || true
             MOCK_PID=""
         fi
-        rm -f /tmp/cerebrum-mock-anthropic-*.py
+        rm -f /tmp/frugalis-mock-anthropic-*.py
     }
 
     test_o2a_translation_non_streaming() {
@@ -1797,7 +1797,7 @@ PYEOF
         start_mock_anthropic_server "ok"
 
         local _mock_url="http://127.0.0.1:${MOCK_ANTHROPIC_PORT}/v1/messages"
-        cat > /tmp/cerebrum-config-test.toml << HEREDOC
+        cat > /tmp/frugalis-config-test.toml << HEREDOC
 [categories.FILE_READING]
 description = "Reading files"
 threshold = 3
@@ -1854,7 +1854,7 @@ HEREDOC
 
         export ANTHROPIC_API_KEY="sk-ant-test-key"
 
-        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        if ! start_server "/tmp/frugalis-config-test.toml"; then
             log_fail "Failed to start server"
             stop_mock_anthropic_server
             unset ANTHROPIC_API_KEY
@@ -1961,7 +1961,7 @@ else:
         section "OpenAI→Anthropic Translation: streaming SSE"
         trap stop_mock_anthropic_server EXIT
 
-        local mock_script="/tmp/cerebrum-mock-stream-$$.py"
+        local mock_script="/tmp/frugalis-mock-stream-$$.py"
         cat > "$mock_script" << 'PYEOF'
 import http.server
 import json
@@ -2019,7 +2019,7 @@ PYEOF
         sleep 0.5
 
         local _mock_url="http://127.0.0.1:${MOCK_ANTHROPIC_PORT}/v1/messages"
-        cat > /tmp/cerebrum-config-test.toml << HEREDOC
+        cat > /tmp/frugalis-config-test.toml << HEREDOC
 [categories.FILE_READING]
 description = "Reading files"
 threshold = 3
@@ -2076,7 +2076,7 @@ HEREDOC
 
         export ANTHROPIC_API_KEY="sk-ant-test-key"
 
-        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        if ! start_server "/tmp/frugalis-config-test.toml"; then
             log_fail "Failed to start server"
             stop_mock_anthropic_server
             unset ANTHROPIC_API_KEY
@@ -2161,7 +2161,7 @@ HEREDOC
         start_mock_anthropic_server "error"
 
         local _mock_url="http://127.0.0.1:${MOCK_ANTHROPIC_PORT}/v1/messages"
-        cat > /tmp/cerebrum-config-test.toml << HEREDOC
+        cat > /tmp/frugalis-config-test.toml << HEREDOC
 [categories.FILE_READING]
 description = "Reading files"
 threshold = 3
@@ -2218,7 +2218,7 @@ HEREDOC
 
         export ANTHROPIC_API_KEY="sk-ant-test-key"
 
-        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+        if ! start_server "/tmp/frugalis-config-test.toml"; then
             log_fail "Failed to start server"
             stop_mock_anthropic_server
             unset ANTHROPIC_API_KEY
@@ -2442,8 +2442,8 @@ run_test_headers() {
         "$URL" \
         -H "Authorization: Bearer $TOKEN" \
         -H "Content-Type: application/json" \
-        -H "X-Cerebrum-Category: $_category" \
-        -H "X-Cerebrum-Model: $_model" \
+        -H "X-Frugalis-Category: $_category" \
+        -H "X-Frugalis-Model: $_model" \
         -d '{"messages":[{"role":"user","content":"hello"}]}' > "$_tmpfile" 2>/dev/null ) &
     _curl_pid=$!
     while kill -0 "$_curl_pid" 2>/dev/null; do
@@ -2475,7 +2475,7 @@ run_test_headers() {
 if [ -z "$DISPATCH_MODE" ]; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo " Cerebrum Manual Route Tests (Shared Category Config Validation)"
+    echo " Frugalis Manual Route Tests (Shared Category Config Validation)"
     echo " Target: $URL"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
@@ -2524,7 +2524,7 @@ echo "── FALLBACK / EDGE CASES ──"
 run_test "empty message" \
     '{"messages":[{"role":"user","content":""}]}'
 
-# ── Classification bypass: X-Cerebrum-Category + X-Cerebrum-Model ──
+# ── Classification bypass: X-Frugalis-Category + X-Frugalis-Model ──
 echo ""
 echo "── BYPASS HEADERS ──"
 run_test_headers "bypass category+model" COMPLEX_REASONING "meta/llama-3.3-70b-instruct"

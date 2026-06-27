@@ -73,7 +73,7 @@ build-release-otel:
 
 # Run tests (forwards args: just test auth)
 test *ARGS:
-    cargo test {{ ARGS | quote }}
+    cargo test {{quote(ARGS)}}
 
 # Run tests with otel feature
 test-otel:
@@ -140,19 +140,19 @@ migrate-revert:
 
 # ── Run ───────────────────────────────────────────────────────────────
 
-# Run cerebrum with sensible dev defaults
+# Run frugalis with sensible dev defaults
 run:
     RUST_LOG=info cargo run
 
-# Run cerebrum with OTel enabled (requires otel-collector via compose)
+# Run frugalis with OTel enabled (requires otel-collector via compose)
 run-otel:
     RUST_LOG=info OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 cargo run --features otel
 
-# Run cerebrum release binary
+# Run frugalis release binary
 run-release:
     RUST_LOG=info cargo run --release
 
-# Run cerebrum release binary with OTel
+# Run frugalis release binary with OTel
 run-otel-release:
     RUST_LOG=info OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 cargo run --release --features otel
 
@@ -202,8 +202,8 @@ clean:
 # Clean build artifacts and temp files
 clean-all:
     cargo clean
-    rm -f /tmp/cerebrum-config-*.toml /tmp/cerebrum-config-*.yaml /tmp/cerebrum-test-*.log /tmp/cerebrum_test_*.db /tmp/cerebrum.db
-    rm -rf /tmp/cerebrum-patterns/ /tmp/fewshot_int_*.yaml
+    rm -f /tmp/frugalis-config-*.toml /tmp/frugalis-config-*.yaml /tmp/frugalis-test-*.log /tmp/frugalis_test_*.db /tmp/frugalis.db
+    rm -rf /tmp/frugalis-patterns/ /tmp/fewshot_int_*.yaml
 
 # ── OTel compose helpers ─────────────────────────────────────────────
 

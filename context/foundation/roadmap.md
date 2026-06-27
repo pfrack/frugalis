@@ -1,6 +1,6 @@
 *** Begin Updated File ***
 ---
-project: cerebrum
+project: frugalis
 version: 1
 status: draft
 created: 2026-05-26
@@ -10,7 +10,7 @@ main_goal: speed
 top_blocker: time
 ---
 
-# Roadmap: Cerebrum
+# Roadmap: Frugalis
 
 > Derived from `context/foundation/prd.md` (v1) + auto-researched codebase baseline.
 > Edit-in-place; archive when superseded.
@@ -61,7 +61,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-18 | claude-code-compat | forward anthropic-beta/anthropic-version/x-claude-code-* headers + translate cache_control prompt-caching across all protocol crossings + Anthropic /v1/models shape | S-01e, S-15 | FR-003 | planned |
 | S-19 | add-response-cache | semantic + exact-match response caching to cut repeat-prompt cost | S-01e | FR-003, NFR (cost) | proposed |
 | S-20 | provider-retry-backoff | same-provider retries with exponential backoff + cooldowns on top of the S-17 cascade | S-17 | FR-003, NFR (resilience) | proposed |
-| S-21 | codex-responses-api | `/v1/responses` (OpenAI Responses API) shim so modern Codex CLI can use Cerebrum | S-01e, S-15 | FR-003 | proposed |
+| S-21 | codex-responses-api | `/v1/responses` (OpenAI Responses API) shim so modern Codex CLI can use Frugalis | S-01e, S-15 | FR-003 | proposed |
 | S-22 | agent-trace-spans | OpenInference span semantics (tokens/cost/prompt I/O) so OTel export feeds Phoenix/Langfuse multi-step traces | S-11 | FR-005 | proposed |
 | S-23 | slice-cost-analytics | per-user/session/feature/model cost breakdowns replacing the single savings-vs-baseline number | S-18, S-02 | FR-007 | proposed |
 | S-24 | guardrails | PII redaction, prompt-injection detection, JSON-schema validation, deny semantics | S-01e | NFR (security) | proposed |
@@ -341,7 +341,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 
 ### S-08: Provider URL derivation from type (descoped)
 
-- **Outcome:** ~~Routing configuration no longer stores full URLs with path suffixes.~~ Descoped after research: not worth adding `base_url`/`endpoint` config complexity at cerebrum's current scale (single provider, 5 routing entries). Research documented in `context/archive/2026-06-07-provider-url-derivation/research.md`.
+- **Outcome:** ~~Routing configuration no longer stores full URLs with path suffixes.~~ Descoped after research: not worth adding `base_url`/`endpoint` config complexity at frugalis's current scale (single provider, 5 routing entries). Research documented in `context/archive/2026-06-07-provider-url-derivation/research.md`.
 - **Change ID:** `provider-url-derivation`
 - **PRD refs:** FR-003 (routing)
 - **Prerequisites:** —
@@ -415,7 +415,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 
 ### S-14: Config Format Upgrade — Multi-Format + External Patterns
 
-- **Outcome:** Upgrade Cerebrum's configuration system to support both YAML and TOML formats (via serde derives) and externalize regex patterns into pattern files. Users can choose configuration format (YAML favored by DevOps, TOML for Rust-native). Regex patterns live in separate `*.patterns` files with `weight | regex` format, eliminating escaping issues. Fully backward compatible with existing `config.toml`. Adds CLI tools: `--validate` checks config and patterns; `--migrate-config` converts old configs to YAML + pattern files.
+- **Outcome:** Upgrade Frugalis's configuration system to support both YAML and TOML formats (via serde derives) and externalize regex patterns into pattern files. Users can choose configuration format (YAML favored by DevOps, TOML for Rust-native). Regex patterns live in separate `*.patterns` files with `weight | regex` format, eliminating escaping issues. Fully backward compatible with existing `config.toml`. Adds CLI tools: `--validate` checks config and patterns; `--migrate-config` converts old configs to YAML + pattern files.
 - **Change ID:** `config-format-upgrade`
 - **PRD refs:** FR-002, FR-003 (config ergonomics)
 - **Prerequisites:** S-13 (move-all-config-to-file) — unified config system in place
@@ -427,7 +427,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 
 ### S-15: Protocol translation — OpenAI client → Anthropic upstream
 
-- **Outcome:** The existing `POST /v1/chat/completions` endpoint can route to Anthropic-protocol upstreams. When `provider_type = "anthropic"`, the request body is translated from OpenAI Chat Completions format to Anthropic Messages format, forwarded with correct headers (`x-api-key`, `anthropic-version: 2023-06-01`), and the response (including SSE streaming) is translated back to OpenAI format. Enables existing OpenAI-speaking clients to use Claude API, DeepSeek /anthropic, Kimi, Z.ai, and Fireworks AI through cerebrum.
+- **Outcome:** The existing `POST /v1/chat/completions` endpoint can route to Anthropic-protocol upstreams. When `provider_type = "anthropic"`, the request body is translated from OpenAI Chat Completions format to Anthropic Messages format, forwarded with correct headers (`x-api-key`, `anthropic-version: 2023-06-01`), and the response (including SSE streaming) is translated back to OpenAI format. Enables existing OpenAI-speaking clients to use Claude API, DeepSeek /anthropic, Kimi, Z.ai, and Fireworks AI through frugalis.
 - **Change ID:** `translate-openai-to-anthropic`
 - **PRD refs:** FR-003 (routing)
 - **Prerequisites:** S-01e (end-to-end proxy working)
@@ -439,7 +439,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 
 ### S-16: Protocol translation — Anthropic client → OpenAI upstream
 
-- **Outcome:** A new `POST /v1/messages` endpoint accepts Anthropic Messages API format (as sent by Claude Code), translates to OpenAI Chat Completions, routes to an OpenAI-compatible upstream, and translates the response back to Anthropic SSE. Includes a stateful streaming emitter that converts OpenAI flat SSE chunks into Anthropic's structured event sequence (`message_start` → `content_block_start` → `content_block_delta` → `content_block_stop` → `message_delta` → `message_stop`). Enables Claude Code to use NVIDIA NIM, OpenRouter, Groq, Cerebras, and Ollama through cerebrum.
+- **Outcome:** A new `POST /v1/messages` endpoint accepts Anthropic Messages API format (as sent by Claude Code), translates to OpenAI Chat Completions, routes to an OpenAI-compatible upstream, and translates the response back to Anthropic SSE. Includes a stateful streaming emitter that converts OpenAI flat SSE chunks into Anthropic's structured event sequence (`message_start` → `content_block_start` → `content_block_delta` → `content_block_stop` → `message_delta` → `message_stop`). Enables Claude Code to use NVIDIA NIM, OpenRouter, Groq, Cerebras, and Ollama through frugalis.
 - **Change ID:** `translate-anthropic-to-openai`
 - **PRD refs:** FR-003 (routing)
 - **Prerequisites:** S-15 (shared translation module exists)
@@ -481,7 +481,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 
 ### S-18: Claude Code compatibility — header passthrough + prompt-cache translation
 
-- **Outcome:** Cerebrum is a true drop-in for Claude Code: `anthropic-beta`/`anthropic-version`/`x-claude-code-*` headers forward to Anthropic upstreams as an open list; `cache_control` prompt-caching blocks translate across all four protocol crossings (auto-insert on OpenAI→Anthropic); cache tokens translate in responses and log to `InferenceRecord`; `/v1/models` serves the Anthropic shape with `display_name`.
+- **Outcome:** Frugalis is a true drop-in for Claude Code: `anthropic-beta`/`anthropic-version`/`x-claude-code-*` headers forward to Anthropic upstreams as an open list; `cache_control` prompt-caching blocks translate across all four protocol crossings (auto-insert on OpenAI→Anthropic); cache tokens translate in responses and log to `InferenceRecord`; `/v1/models` serves the Anthropic shape with `display_name`.
 - **Change ID:** `claude-code-compat`
 - **PRD refs:** FR-003 (routing/translation)
 - **Prerequisites:** S-01e, S-15 (bidirectional translation exists)
@@ -493,7 +493,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 
 ### S-19: Response caching — semantic + exact-match
 
-- **Outcome:** Repeat (and near-repeat) prompts return cached responses, cutting cost/latency. Supports exact-match and semantic (embedding similarity) caches with TTL controls. Universal across all surveyed gateways; Cerebrum is the only one with zero caching today.
+- **Outcome:** Repeat (and near-repeat) prompts return cached responses, cutting cost/latency. Supports exact-match and semantic (embedding similarity) caches with TTL controls. Universal across all surveyed gateways; Frugalis is the only one with zero caching today.
 - **Change ID:** `add-response-cache`
 - **PRD refs:** FR-003, NFR (cost)
 - **Prerequisites:** S-01e
@@ -517,7 +517,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 
 ### S-21: Codex CLI Responses API shim
 
-- **Outcome:** A new `POST /v1/responses` endpoint implements the OpenAI Responses API so modern Codex CLI (which now speaks only `responses`, not Chat Completions) can use Cerebrum. Implemented as a translation layer on top of the existing `/v1/chat/completions` core (reasoning items ↔ `reasoning_content`, tool-call items ↔ `tool_calls`, SSE event translation).
+- **Outcome:** A new `POST /v1/responses` endpoint implements the OpenAI Responses API so modern Codex CLI (which now speaks only `responses`, not Chat Completions) can use Frugalis. Implemented as a translation layer on top of the existing `/v1/chat/completions` core (reasoning items ↔ `reasoning_content`, tool-call items ↔ `tool_calls`, SSE event translation).
 - **Change ID:** `codex-responses-api`
 - **PRD refs:** FR-003
 - **Prerequisites:** S-01e, S-15 (translation patterns established)
@@ -529,7 +529,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 
 ### S-22: Agent trace spans — OpenInference semantics
 
-- **Outcome:** OTel export carries LLM-specific span semantics (token counts, cost, prompt I/O as structured fields per OpenInference/OpenLLMetry conventions) so Cerebrum feeds Phoenix/Langfuse/Jaeger multi-step agent traces for free, instead of the current request-count/duration-only instruments.
+- **Outcome:** OTel export carries LLM-specific span semantics (token counts, cost, prompt I/O as structured fields per OpenInference/OpenLLMetry conventions) so Frugalis feeds Phoenix/Langfuse/Jaeger multi-step agent traces for free, instead of the current request-count/duration-only instruments.
 - **Change ID:** `agent-trace-spans`
 - **PRD refs:** FR-005 (observability)
 - **Prerequisites:** S-11 (OTel integration)
@@ -565,7 +565,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 
 ### S-25: Learned prompt router + cost/quality dial (ENTERPRISE)
 
-- **Outcome:** The regex/fewshot intent classifier (the core primitive, kept as default) gains an enterprise-tier learned router: embedding/BERT/matrix-factorization/similarity-weighted-Elo (à la RouteLLM) with a calibrated cost/quality threshold dial (à la OpenRouter NotDiamond `cost_quality_tradeoff` 0–10) and published cost-quality benchmarks. Restores credibility for Cerebrum's core "route by prompt" value, which the industry has commoditized.
+- **Outcome:** The regex/fewshot intent classifier (the core primitive, kept as default) gains an enterprise-tier learned router: embedding/BERT/matrix-factorization/similarity-weighted-Elo (à la RouteLLM) with a calibrated cost/quality threshold dial (à la OpenRouter NotDiamond `cost_quality_tradeoff` 0–10) and published cost-quality benchmarks. Restores credibility for Frugalis's core "route by prompt" value, which the industry has commoditized.
 - **Change ID:** `learned-prompt-router`
 - **PRD refs:** FR-002 (intent classification)
 - **Prerequisites:** S-09 (LLM classifier / trait)
@@ -584,7 +584,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Parallel with:** —
 - **Blockers:** —
 - **Unknowns:** Notification sink (email/Slack/webhook) — owner: planning. Block: no.
-- **Risk:** Low — Cerebrum already has the data; thresholds + sink only.
+- **Risk:** Low — Frugalis already has the data; thresholds + sink only.
 - **Status:** proposed
 
 ### S-27: Evals + datasets
@@ -679,9 +679,9 @@ Foundations below assume these are present and do NOT re-scaffold them.
 | S-15 | translate-openai-to-anthropic | Protocol: Translate OpenAI Chat requests → Anthropic Messages for upstream routing to Claude/DeepSeek/Kimi/Z.ai | yes | Research complete: `context/changes/translate-openai-to-anthropic/research.md`. Prerequisite: S-01e (done). |
 | S-16 | translate-anthropic-to-openai | Protocol: New `/v1/messages` endpoint translating Anthropic → OpenAI for upstream routing to NIM/OpenRouter/Groq | yes | Research complete: `context/changes/translate-anthropic-to-openai/research.md`. Prerequisite: S-15. |
 | S-18 | claude-code-compat | Compat: forward anthropic-beta/cache_control headers + translate prompt-caching + Anthropic /v1/models shape (Claude Code drop-in) | no | Plan complete: `context/changes/claude-code-compat/plan.md`. Prerequisites: S-01e, S-15 (done). Tier-1 gap #3/#4. |
-| S-19 | add-response-cache | Cache: semantic + exact-match response caching | yes | From `competitive-landscape-gaps` research (Tier-1 #1). Prerequisite: S-01e. Universal table-stake; Cerebrum has zero caching today. |
+| S-19 | add-response-cache | Cache: semantic + exact-match response caching | yes | From `competitive-landscape-gaps` research (Tier-1 #1). Prerequisite: S-01e. Universal table-stake; Frugalis has zero caching today. |
 | S-20 | provider-retry-backoff | Reliability: same-provider retries + exponential backoff + cooldowns on top of S-17 | yes | From `competitive-landscape-gaps` research (Tier-1 #2). Prerequisite: S-17 (done — failover only). |
-| S-21 | codex-responses-api | Protocol: `/v1/responses` shim so modern Codex CLI (Responses-API-only) can use Cerebrum | yes | From `competitive-landscape-gaps` research (Tier-1 #5). Prerequisites: S-01e, S-15. Without it Codex CLI cannot use Cerebrum at all. |
+| S-21 | codex-responses-api | Protocol: `/v1/responses` shim so modern Codex CLI (Responses-API-only) can use Frugalis | yes | From `competitive-landscape-gaps` research (Tier-1 #5). Prerequisites: S-01e, S-15. Without it Codex CLI cannot use Frugalis at all. |
 | S-22 | agent-trace-spans | Observability: OpenInference span semantics so OTel feeds Phoenix/Langfuse multi-step traces | yes | From research (Tier-2 #8). Prerequisite: S-11. Decides build-vs-feed for observability app-layers. |
 | S-23 | slice-cost-analytics | Observability: per-user/session/feature cost breakdowns (replaces single savings-vs-baseline #) | yes | From research (Tier-2 #9). Prerequisites: S-18, S-02. |
 | S-24 | guardrails | Security: PII, prompt-injection, JSON-schema checks + deny semantics | yes | From research (Tier-2 #10). Prerequisite: S-01e. Reuses prompt-inspection surface. |
@@ -723,7 +723,7 @@ All roadmap items are active or completed; no currently parked items.
 - **S-17: When an upstream provider returns a retryable error (5xx, connection timeout, 429 rate-limit), the proxy automatically retries the request on the next provider in a configured priority list.** — Archived 2026-06-26 → `context/archive/2026-06-24-provider-fallback-cascade/`. Lesson: —.
 - **S-13: Move All Config to File** — Zero hardcoded configuration in Rust — everything lives in `config.toml`. Environment variables reduced to strictly secrets. — Archived 2026-06-11 → `context/archive/2026-06-10-move-all-config-to-file/`. Lesson: —.
 
-- **S-14: Config Format Upgrade — Multi-Format + External Patterns** — Upgrade Cerebrum's configuration system to support both YAML and TOML formats (via serde derives) and externalize regex patterns into pattern files. Users can choose configuration format (YAML favored by DevOps, TOML for Rust-native). Regex patterns live in separate `*.patterns` files with `weight | regex` format, eliminating escaping issues. Fully backward compatible with existing `config.toml`. Adds CLI tools: `--validate` checks config and patterns; `--migrate-config` converts old configs to YAML + pattern files. — Archived 2026-06-13 → `context/archive/2026-06-11-config-format-upgrade/`. Lesson: —.
+- **S-14: Config Format Upgrade — Multi-Format + External Patterns** — Upgrade Frugalis's configuration system to support both YAML and TOML formats (via serde derives) and externalize regex patterns into pattern files. Users can choose configuration format (YAML favored by DevOps, TOML for Rust-native). Regex patterns live in separate `*.patterns` files with `weight | regex` format, eliminating escaping issues. Fully backward compatible with existing `config.toml`. Adds CLI tools: `--validate` checks config and patterns; `--migrate-config` converts old configs to YAML + pattern files. — Archived 2026-06-13 → `context/archive/2026-06-11-config-format-upgrade/`. Lesson: —.
 
 ---
 
@@ -748,7 +748,7 @@ The 3-week MVP budget under a 6-week hard deadline makes calendar time the #1 bl
 **ROADMAP GENERATED**
 ════════════════════════════════════════════════════════════
 
-**Project:** cerebrum
+**Project:** frugalis
 **Path:** context/foundation/roadmap.md
 **Main goal:** speed (sequencing bias)
 **#1 blocker:** time (6-week hard deadline)
@@ -770,5 +770,5 @@ The 3-week MVP budget under a 6-week hard deadline makes calendar time the #1 bl
 
 **► `/10x-implement claude-code-compat phase 1` on S-18: Claude Code compatibility**
 
-**Why this one:** Plan complete (`context/changes/claude-code-compat/plan.md`); the highest-priority competitive gap (Tier-1 #3/#4). Prerequisites S-01e and S-15 are done. Closes the deal-breakers that currently make Cerebrum an incomplete Claude Code drop-in (dropped `anthropic-beta` headers, stripped `cache_control` caching, OpenAI-shape `/v1/models`), unlocking the full value of the existing 2,763-line bidirectional translator. Tier-1 siblings S-19 (caching), S-20 (retry/backoff), S-21 (Codex Responses API) follow per the user-set priority order.
+**Why this one:** Plan complete (`context/changes/claude-code-compat/plan.md`); the highest-priority competitive gap (Tier-1 #3/#4). Prerequisites S-01e and S-15 are done. Closes the deal-breakers that currently make Frugalis an incomplete Claude Code drop-in (dropped `anthropic-beta` headers, stripped `cache_control` caching, OpenAI-shape `/v1/models`), unlocking the full value of the existing 2,763-line bidirectional translator. Tier-1 siblings S-19 (caching), S-20 (retry/backoff), S-21 (Codex Responses API) follow per the user-set priority order.
 *** End Updated File ***- **S-09a: With both `RegexClassifier` and `LLMClassifier` backends operational, the config boundary between generic and classifier-specific settings is formalized. Per-backend enable/disable and ordering flags control chain construction at startup.** — Archived 2026-06-09 → `context/archive/2026-06-07-classifier-config-boundary/`. Lesson: —.

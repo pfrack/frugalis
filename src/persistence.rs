@@ -55,7 +55,7 @@ impl MemoryBackend {
 }
 
 /// SQLite persistence backend backed by `sqlx::SqlitePool`.
-/// File-backed (`./cerebrum.db`) or in-memory via shared-cache URI.
+/// File-backed (`./frugalis.db`) or in-memory via shared-cache URI.
 /// Schema is created via `CREATE TABLE IF NOT EXISTS` on construction.
 pub struct SqliteBackend {
     pub pool: SqlitePool,
@@ -66,7 +66,7 @@ impl SqliteBackend {
     /// For `:memory:`, uses a shared-cache in-memory URI.
     pub async fn from_path(path: &str) -> Result<Self, String> {
         let uri = if path == ":memory:" {
-            "sqlite:file:cerebrum?mode=memory&cache=shared".to_string()
+            "sqlite:file:frugalis?mode=memory&cache=shared".to_string()
         } else {
             format!("sqlite:{path}?mode=rwc")
         };
@@ -289,7 +289,7 @@ impl PersistenceBackend for MemoryBackend {
                 category: r.category.clone(),
                 upstream_model: r.upstream_model.clone(),
                 duration_ms: r.duration_ms,
-                provider_attempts: Some(r.provider_attempts as i32),
+                provider_attempts: Some(r.provider_attempts as i16),
                 final_provider: Some(r.final_provider.clone()),
             })
             .collect();
@@ -596,7 +596,7 @@ impl PersistenceBackend for SqliteBackend {
                 let category: Option<String> = row.try_get("category")?;
                 let upstream_model: Option<String> = row.try_get("upstream_model")?;
                 let duration_ms: Option<i32> = row.try_get("duration_ms")?;
-                let provider_attempts: Option<i32> = row.try_get("provider_attempts")?;
+                let provider_attempts: Option<i16> = row.try_get("provider_attempts")?;
                 let final_provider: Option<String> = row.try_get("final_provider")?;
                 Ok(InferenceLog {
                     timestamp,
@@ -870,7 +870,7 @@ impl PersistenceBackend for PostgresBackend {
                 let category: Option<String> = row.try_get("category")?;
                 let upstream_model: Option<String> = row.try_get("upstream_model")?;
                 let duration_ms: Option<i32> = row.try_get("duration_ms")?;
-                let provider_attempts: Option<i32> = row.try_get("provider_attempts")?;
+                let provider_attempts: Option<i16> = row.try_get("provider_attempts")?;
                 let final_provider: Option<String> = row.try_get("final_provider")?;
                 Ok(InferenceLog {
                     timestamp,
@@ -1062,7 +1062,7 @@ pub struct InferenceLog {
     pub upstream_model: Option<String>,
     pub duration_ms: Option<i32>,
     #[allow(dead_code)]
-    pub provider_attempts: Option<i32>,
+    pub provider_attempts: Option<i16>,
     #[allow(dead_code)]
     pub final_provider: Option<String>,
 }
@@ -1322,7 +1322,7 @@ async fn insert_once(pool: &PgPool, record: &InferenceRecord) -> Result<(), sqlx
     .bind(record.duration_ms)
     .bind(&record.prompt_snippet)
     .bind(record.prompt_char_count)
-    .bind(record.provider_attempts as i32)
+    .bind(record.provider_attempts as i16)
     .bind(&record.final_provider)
     .bind(record.input_tokens)
     .bind(record.output_tokens)
@@ -1351,7 +1351,7 @@ async fn insert_once_sqlite(
     .bind(record.duration_ms)
     .bind(&record.prompt_snippet)
     .bind(record.prompt_char_count)
-    .bind(record.provider_attempts as i32)
+    .bind(record.provider_attempts as i16)
     .bind(&record.final_provider)
     .bind(record.input_tokens)
     .bind(record.output_tokens)
@@ -2344,12 +2344,7 @@ mod tests {
     async fn test_db_connection_retry_panics_after_failures() {
         // Use an invalid DATABASE_URL to trigger connection failure.
         // The function should retry according to DB_CONNECTION_RETRIES and then panic.
-        struct EnvGuard(&'static str);
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                std::env::remove_var(self.0);
-            }
-        }
+        use crate::test_util::EnvGuard;
         let _guard1 = EnvGuard("DATABASE_URL");
         let _guard2 = EnvGuard("DB_CONNECTION_RETRIES");
         let _guard3 = EnvGuard("DB_RETRY_BASE_MS");
@@ -2703,12 +2698,7 @@ mod tests {
             return;
         }
 
-        struct EnvGuard(&'static str);
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                std::env::remove_var(self.0);
-            }
-        }
+        use crate::test_util::EnvGuard;
         let _guard1 = EnvGuard("LOG_CONCURRENCY_LIMIT");
         let _guard2 = EnvGuard("DB_CONNECTION_RETRIES");
         let _guard3 = EnvGuard("DB_RETRY_BASE_MS");

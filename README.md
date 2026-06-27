@@ -1,14 +1,14 @@
-# Cerebrum
+# Frugalis
 
-[![CI](https://github.com/pfrack/cerebrum/actions/workflows/deploy.yml/badge.svg)](https://github.com/pfrack/cerebrum/actions/workflows/deploy.yml)
+[![CI](https://github.com/pfrack/frugalis/actions/workflows/deploy.yml/badge.svg)](https://github.com/pfrack/frugalis/actions/workflows/deploy.yml)
 ![Rust Edition](https://img.shields.io/badge/edition-2021-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-**Intent-aware LLM request routing gateway.** Cerebrum is a single Rust binary that sits between your agents and upstream model providers. It classifies each incoming prompt into an intent category, selects the cheapest acceptable model for that category, and proxies the request with full SSE streaming support.
+**Intent-aware LLM request routing gateway.** Frugalis is a single Rust binary that sits between your agents and upstream model providers. It classifies each incoming prompt into an intent category, selects the cheapest acceptable model for that category, and proxies the request with full SSE streaming support.
 
 ## Features
 
-Cerebrum is designed for solo developers and operators running autonomous agent workflows who need lower inference cost and direct visibility into routing behavior. Its key capabilities:
+Frugalis is designed for solo developers and operators running autonomous agent workflows who need lower inference cost and direct visibility into routing behavior. Its key capabilities:
 
 - **Intent-aware routing** — classifies prompts by category and dispatches to the cheapest suitable upstream model
 - **Pluggable classifier chain** — configurable backends: regex (built‑in), few‑shot (TF‑IDF cosine similarity), and LLM (opt‑in); first non‑fallback wins
@@ -52,8 +52,8 @@ Cerebrum is designed for solo developers and operators running autonomous agent 
 
 ```bash
 # Clone and enter the repo
-git clone https://github.com/pfrack/cerebrum.git
-cd cerebrum
+git clone https://github.com/pfrack/frugalis.git
+cd frugalis
 
 # Set the three required environment variables
 export PROXY_API_BEARER_TOKEN="your-secret-token"
@@ -90,7 +90,7 @@ The gateway runs with an in-memory persistence backend by default — no databas
 
 ## Configuration
 
-Cerebrum uses a **layered configuration model**:
+Frugalis uses a **layered configuration model**:
 
 1. **Embedded defaults** — every compiled binary contains a complete `config.toml` with sensible defaults, so a freshly built binary runs with no config file.
 2. **Config overlay** — set `CONFIG_PATH=/path/to/your/config.toml` to override specific sections. Overlay sections (`[classifiers]`, `[categories]`, `[routing]`, etc.) are fully replaced; other sections are merged field-by-field. YAML files are also accepted (auto-detected by extension).
@@ -102,7 +102,7 @@ To validate your configuration without starting the server:
 CONFIG_PATH=/path/to/config.toml cargo run -- --validate
 ```
 
-Run `cerebrum --init` to generate a commented starter configuration file.
+Run `frugalis --init` to generate a commented starter configuration file.
 
 A minimal overlay config that changes the port and enables SQLite persistence:
 
@@ -112,7 +112,7 @@ port = 3000
 
 [persistence]
 backend = "sqlite"
-sqlite_path = "./data/cerebrum.db"
+sqlite_path = "./data/frugalis.db"
 ```
 
 ### Environment Variables
@@ -143,19 +143,19 @@ The full configuration schema is documented in `config.toml` at the repo root. K
 
 ## Persistence Backends
 
-Cerebrum supports three persistence backends, resolved in priority order:
+Frugalis supports three persistence backends, resolved in priority order:
 
 | Priority | Condition | Backend | Notes |
 |---|---|---|---|
 | 1 | `DATABASE_URL` is set | **PostgreSQL** | Production-grade. Requires a running Postgres instance. Migrations are applied automatically on startup. |
-| 2 | `[persistence].backend = "sqlite"` | **SQLite** | File-backed (default: `./cerebrum.db`). No external process required. Falls back to in-memory on connection failure. |
+| 2 | `[persistence].backend = "sqlite"` | **SQLite** | File-backed (default: `./frugalis.db`). No external process required. Falls back to in-memory on connection failure. |
 | 3 | Default (no `DATABASE_URL`, no explicit backend) | **In-memory** | Ephemeral — data is lost on restart. Capped at 10,000 records. Zero configuration. |
 
 The persistence layer is fire-and-forget: inference records are written to a background task bounded by a semaphore, so database latency never blocks the response path.
 
 ## Architecture
 
-Cerebrum is a **single-binary Axum gateway** running on a single Tokio async runtime. The persistence layer is the only side effect — all other processing is in-memory and synchronous from the request handler's perspective.
+Frugalis is a **single-binary Axum gateway** running on a single Tokio async runtime. The persistence layer is the only side effect — all other processing is in-memory and synchronous from the request handler's perspective.
 
 At startup the binary:
 1. Reads configuration from embedded defaults, merges any overlay from `CONFIG_PATH`, and overrides secrets from environment variables
@@ -210,7 +210,7 @@ When a request includes `"stream": true`, the gateway proxies the upstream respo
 
 ## API Reference
 
-Cerebrum exposes an OpenAI-compatible API surface for chat completions, plus dedicated classify and feedback endpoints. All proxy routes are mounted under `/v1/` and require the bearer token set via `PROXY_API_BEARER_TOKEN`. The dashboard routes are mounted under `/dashboard/` with basic authentication.
+Frugalis exposes an OpenAI-compatible API surface for chat completions, plus dedicated classify and feedback endpoints. All proxy routes are mounted under `/v1/` and require the bearer token set via `PROXY_API_BEARER_TOKEN`. The dashboard routes are mounted under `/dashboard/` with basic authentication.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
@@ -244,14 +244,14 @@ The operator dashboard is served under `/dashboard/` with HTTP basic authenticat
 cargo build --release
 ```
 
-The compiled binary is at `target/release/cerebrum`. It has no runtime dependencies beyond the system libraries required by the Rust standard library — no interpreter, JVM, or container runtime is required.
+The compiled binary is at `target/release/frugalis`. It has no runtime dependencies beyond the system libraries required by the Rust standard library — no interpreter, JVM, or container runtime is required.
 
 ### Render
 
 The repository includes a `render.yaml` that defines a web service with the following configuration:
 
 - **Build command**: `cargo build --release`
-- **Start command**: `./target/release/cerebrum`
+- **Start command**: `./target/release/frugalis`
 - **Health check path**: `/health`
 - **Environment variables** (set in the Render dashboard, not committed):
   - `PROXY_API_BEARER_TOKEN` — required
@@ -362,13 +362,13 @@ All proxy routes (`/v1/*`) require a valid bearer token set via the `PROXY_API_B
 
 Yes. The config overlay path (set via `CONFIG_PATH`) accepts both `.toml` and `.yaml` files. The format is auto-detected from the file extension.
 
-**Q: Do I need a database to run Cerebrum?**
+**Q: Do I need a database to run Frugalis?**
 
 No. The gateway runs with an in-memory persistence backend out of the box — no database required. For production use, configure PostgreSQL or SQLite.
 
 **Q: How do I reset the in-memory database?**
 
-The in-memory backend is ephemeral — simply restart the server. For SQLite, delete the `cerebrum.db` file (or the path configured in `config.toml`).
+The in-memory backend is ephemeral — simply restart the server. For SQLite, delete the `frugalis.db` file (or the path configured in `config.toml`).
 
 **Q: How do I add a new intent category?**
 
@@ -378,13 +378,13 @@ Add a `[categories.NEW_CATEGORY]` section and a matching `[routing.NEW_CATEGORY]
 
 Set `"stream": true` in the `POST /v1/chat/completions` request body. The gateway will proxy the upstream response as Server-Sent Events.
 
-**Q: Does Cerebrum store my prompts?**
+**Q: Does Frugalis store my prompts?**
 
 Only a 200-character snippet of the last user message is persisted. The full prompt is never stored. The character count of the full message is recorded separately for cost estimation.
 
-**Q: Can I run Cerebrum in a Docker container?**
+**Q: Can I run Frugalis in a Docker container?**
 
-Yes. Build the binary with `cargo build --release` and copy `target/release/cerebrum` into a minimal runtime image (e.g., `debian:stable-slim`). No runtime dependencies beyond the system's C library are required.
+Yes. Build the binary with `cargo build --release` and copy `target/release/frugalis` into a minimal runtime image (e.g., `debian:stable-slim`). No runtime dependencies beyond the system's C library are required.
 
 **Q: How do I update the few-shot classifier's training data?**
 
@@ -396,4 +396,4 @@ The gateway returns a `502` response with an `upstream_error` JSON body that inc
 
 ## License
 
-Cerebrum is distributed under the terms of the MIT license.
+Frugalis is distributed under the terms of the MIT license.

@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-Cerebrum is a Rust/Axum gateway service that provides intent-aware request routing for autonomous agent workflows. It runs on Render, deploys automatically on merge to main, and exposes a health endpoint, proxy routes with bearer-token auth, and a basic-auth dashboard.
+Frugalis is a Rust/Axum gateway service that provides intent-aware request routing for autonomous agent workflows. It runs on Render, deploys automatically on merge to main, and exposes a health endpoint, proxy routes with bearer-token auth, and a basic-auth dashboard.
 
 ## Required Setup Before Testing or Deploying
 

@@ -1,6 +1,6 @@
-# Manual Tests for Cerebrum
+# Manual Tests for Frugalis
 
-This directory contains integration test scripts for validating Cerebrum's category configuration, routing, persistence, and API behavior.
+This directory contains integration test scripts for validating Frugalis's category configuration, routing, persistence, and API behavior.
 
 ## Files
 
@@ -85,7 +85,7 @@ The automated suite (`--auto`) covers:
 
 ### "Server failed to start"
 - Check if port 10000 is already in use
-- Look at `/tmp/cerebrum-test-*.log` for server errors
+- Look at `/tmp/frugalis-test-*.log` for server errors
 - Ensure you have permission to bind to the port
 
 ### Classification mismatches
