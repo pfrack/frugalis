@@ -273,7 +273,7 @@ impl PersistenceBackend for MemoryBackend {
         }
 
         // Sort by created_at DESC (newest first).
-        filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        filtered.sort_by_key(|b| std::cmp::Reverse(b.created_at));
 
         let total = filtered.len() as i64;
 

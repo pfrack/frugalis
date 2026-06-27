@@ -235,12 +235,10 @@ async fn inferences_handler(
         .await
     {
         Ok((records, total_count)) => {
-            let page = if limit > 0 { offset / limit } else { 0 };
-            let total_pages = if limit > 0 {
-                ((total_count as u32).saturating_add(limit - 1)) / limit
-            } else {
-                0
-            };
+            let page = offset.checked_div(limit).unwrap_or(0);
+            let total_pages = ((total_count as u32).saturating_add(limit.saturating_sub(1)))
+                .checked_div(limit)
+                .unwrap_or(0);
             InferencesTemplate {
                 nav: nav_for("inferences"),
                 records,
