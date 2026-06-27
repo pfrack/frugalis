@@ -56,7 +56,7 @@ fn default_penalty() -> u8 {
 /// External files hardcoding category name strings:
 /// - routing_examples/routing-*.toml (4 files) — section names
 /// - openapi/completions.yaml — enum constraint values (line 44, 111)
-/// - manual-test/run.sh — x-cerebrum-category header (line 179)
+/// - manual-test/run.sh — x-frugalis-category header (line 179)
 /// - templates/dashboard/inferences.html — placeholder text (line 19)
 ///
 /// Category names are a PUBLIC API contract. Renaming any value here
@@ -299,7 +299,7 @@ impl LLMClassifier {
             .header("Content-Type", "application/json");
 
         let request = if !api_key.is_empty() {
-            // The classifier's own LLM probe originates from Cerebrum, not a
+            // The classifier's own LLM probe originates from Frugalis, not a
             // proxied client request, so there are no client headers to forward.
             let headers =
                 auth_headers_for(&self.auth_providers, &self.provider_type, &api_key, &[]);
@@ -453,7 +453,7 @@ pub fn auth_headers_for(
         provider_type
     };
     // Prefer a client-supplied anthropic-version over the protocol constant so
-    // Claude Code can pin a newer API version without a Cerebrum change. We
+    // Claude Code can pin a newer API version without a Frugalis change. We
     // resolve it once here and skip the raw entry when appending the forward
     // set, so the version header is emitted exactly once.
     let client_version = forward_headers

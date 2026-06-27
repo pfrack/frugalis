@@ -1,5 +1,5 @@
 ---
-project: cerebrum
+project: frugalis
 version: 1
 status: draft
 created: 2026-05-25

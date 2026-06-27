@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# Shared test infrastructure for Cerebrum manual & automated integration tests.
+# Shared test infrastructure for Frugalis manual & automated integration tests.
 # Source this file from test scripts: source "$(dirname "$0")/lib.sh"
 # ============================================================================
 
@@ -12,7 +12,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Configuration (overridable via env)
-BINARY="./target/release/cerebrum"
+BINARY="./target/release/frugalis"
 HOST="${HOST:-127.0.0.1:10000}"
 HEALTH_URL="http://$HOST/health"
 CLASSIFY_URL="http://$HOST/v1/classify"
@@ -58,7 +58,7 @@ build_server() {
 
 start_server() {
     local config_file="$1"
-    local log_file="/tmp/cerebrum-test-$$.log"
+    local log_file="/tmp/frugalis-test-$$.log"
 
     log_info "Starting server with config: ${config_file:-<none>}"
 
@@ -101,13 +101,13 @@ stop_server() {
 
 cleanup() {
     stop_server
-    rm -f /tmp/cerebrum-config-*.toml
-    rm -f /tmp/cerebrum-config-*.yaml
-    rm -rf /tmp/cerebrum-patterns
+    rm -f /tmp/frugalis-config-*.toml
+    rm -f /tmp/frugalis-config-*.yaml
+    rm -rf /tmp/frugalis-patterns
     if [ $FAIL -eq 0 ]; then
-        rm -f /tmp/cerebrum-test-$$.log
+        rm -f /tmp/frugalis-test-$$.log
     else
-        echo "Server log preserved at: /tmp/cerebrum-test-$$.log" >&2
+        echo "Server log preserved at: /tmp/frugalis-test-$$.log" >&2
     fi
 }
 

@@ -1,7 +1,7 @@
 ---
 starter_id: axum
 package_manager: cargo
-project_name: cerebrum
+project_name: frugalis
 hints:
   language_family: rust
   team_size: solo

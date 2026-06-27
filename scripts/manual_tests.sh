@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Unified manual & integration tests for Cerebrum
+# Unified manual & integration tests for Frugalis
 # Modes:
 #   --basic      quick smoke: health, dashboard auth, classification-only, truncation, graceful shutdown
 #   --auto       full automated suite: runs all scenario tests (categories, routing, Phase 2 limits, etc.)

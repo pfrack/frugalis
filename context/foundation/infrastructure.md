@@ -1,5 +1,5 @@
 ---
-project: cerebrum
+project: frugalis
 researched_at: 2026-05-25
 recommended_platform: Render
 runner_up: Railway
@@ -123,10 +123,10 @@ The following steps assume `cargo` and `render` CLI (v2.10+) are installed, and 
    ```yaml
    services:
      - type: web
-       name: cerebrum
+       name: frugalis
        runtime: rust
        buildCommand: cargo build --release
-       startCommand: ./target/release/cerebrum
+       startCommand: ./target/release/frugalis
        healthCheckPath: /health
        envVars:
          - key: RUST_LOG
@@ -136,7 +136,7 @@ The following steps assume `cargo` and `render` CLI (v2.10+) are installed, and 
    ```yaml
    services:
      - type: web
-       name: cerebrum
+       name: frugalis
        runtime: docker
        healthCheckPath: /health
    ```
@@ -157,7 +157,7 @@ The following steps assume `cargo` and `render` CLI (v2.10+) are installed, and 
 
 5. **Verify with agent debug skill.** After first deploy, ask your agent:
    ```
-   Debug my Render deployment for cerebrum
+   Debug my Render deployment for frugalis
    ```
    The `render-debug` skill will check for missing env vars, port binding errors, and resource constraints automatically.
 

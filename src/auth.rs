@@ -213,7 +213,7 @@ fn dashboard_unauthorized_response() -> Response<Body> {
         .status(StatusCode::UNAUTHORIZED)
         .header(
             header::WWW_AUTHENTICATE,
-            "Basic realm=\"cerebrum-dashboard\"",
+            "Basic realm=\"frugalis-dashboard\"",
         )
         .body(Body::from("unauthorized"))
         .expect("dashboard unauthorized response should be valid")

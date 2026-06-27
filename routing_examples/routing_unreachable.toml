@@ -1,5 +1,5 @@
 # Routing overlay with unreachable endpoints to test error logging.
-# Usage: CONFIG_PATH=this-file.toml cerebrum
+# Usage: CONFIG_PATH=this-file.toml frugalis
 #
 # Cerebrum's merge semantics for [routing] are per-key additive — unmentioned
 # routes inherit from the built-in defaults.

@@ -72,7 +72,7 @@ Old `[FALLBACK]` config format still works for backward compatibility.
 
 1. **Builds** the binary once with `cargo build --release`
 2. For each test:
-   - Writes a `config.toml` to `/tmp/cerebrum-config-*.toml`
+   - Writes a `config.toml` to `/tmp/frugalis-config-*.toml`
    - Launches the server with that config
    - Polls `http://localhost:10000/health` until ready
    - Sends classification requests and validates responses
@@ -84,7 +84,7 @@ Old `[FALLBACK]` config format still works for backward compatibility.
 ### "Server failed to start"
 - Port 10000 in use? Check `lsof -i :10000`
 - Build failed? Run `cargo build --release` manually
-- Check `/tmp/cerebrum-test-*.log` for server errors
+- Check `/tmp/frugalis-test-*.log` for server errors
 
 ### Classification mismatches
 - Look for `loaded N categories from config.toml` in server logs
@@ -100,6 +100,6 @@ Old `[FALLBACK]` config format still works for backward compatibility.
 The script uses `trap` for cleanup. Manual cleanup if needed:
 
 ```bash
-pkill -f cerebrum 2>/dev/null || true
-rm -f /tmp/cerebrum-config-*.toml /tmp/cerebrum-test-*.log
+pkill -f frugalis 2>/dev/null || true
+rm -f /tmp/frugalis-config-*.toml /tmp/frugalis-test-*.log
 ```

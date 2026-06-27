@@ -1,10 +1,10 @@
-# Cerebrum Starter Config
+# Frugalis Starter Config
 # ----------------------
 # This file is meant to be used as a CONFIG_PATH overlay:
 #
-#     CONFIG_PATH=/path/to/this-file.toml cerebrum
+#     CONFIG_PATH=/path/to/this-file.toml frugalis
 #
-# Cerebrum's merge semantics for [routing] are per-key additive: only the
+# Frugalis's merge semantics for [routing] are per-key additive: only the
 # categories you list here will override the embedded defaults. Unmentioned
 # routes inherit from the built-in defaults, so you only need to fill in
 # the routes you actually want to change.
@@ -12,7 +12,7 @@
 # Placeholder values below (e.g. "<your-model>") are NOT valid; replace them
 # with real model names, endpoints, and env var names before running.
 #
-# Provider types Cerebrum recognizes today:
+# Provider types Frugalis recognizes today:
 #   - openai_compatible   generic OpenAI-format /v1/chat/completions endpoint
 #   - anthropic           Anthropic Messages API
 #   - ollama              local Ollama (no api_key required)
@@ -20,7 +20,7 @@
 #   - nvidia_nim          NVIDIA NIM (OpenAI-compatible at integrate.api.nvidia.com)
 #
 # Each route references an env var by NAME (e.g. "OPENAI_API_KEY") — set that
-# env var before starting cerebrum. cerebrum does not store the secret itself.
+# env var before starting frugalis. frugalis does not store the secret itself.
 
 [routing.DEFAULT]
 model = "<your-default-model>"

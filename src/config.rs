@@ -60,7 +60,7 @@ fn default_backend() -> String {
     "memory".to_string()
 }
 fn default_db_path() -> String {
-    "./cerebrum.db".to_string()
+    "./frugalis.db".to_string()
 }
 fn default_dashboard_hours() -> u32 {
     24
@@ -315,7 +315,7 @@ impl Default for PersistenceSettings {
     fn default() -> Self {
         Self {
             backend: "memory".to_string(),
-            sqlite_path: "./cerebrum.db".to_string(),
+            sqlite_path: "./frugalis.db".to_string(),
         }
     }
 }
