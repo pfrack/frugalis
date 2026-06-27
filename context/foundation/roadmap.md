@@ -56,7 +56,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-13 | move-all-config-to-file | Config: eliminate all hardcoded values — 25 hardcoded Rust values + 19 env var reads moved to config.toml; env vars reduced to API_KEYS + auth creds + DATABASE_URL only; categories and regex patterns fully configurable | S-09a, **S-14** | FR-002, FR-003 | done |
 | S-14 | config-format-upgrade | Config: upgrade format to support YAML + external pattern files; add `--validate` and `--migrate-config` CLI tools | **S-13** | FR-002, FR-003 | done |
 | S-15 | translate-openai-to-anthropic | route existing `/v1/chat/completions` traffic to Anthropic-protocol upstreams (Claude API, DeepSeek, Kimi, Z.ai) with full body + streaming translation | S-01e | FR-003 | done |
-| S-16 | translate-anthropic-to-openai | new `/v1/messages` endpoint accepting Anthropic Messages protocol, translating to OpenAI Chat Completions for upstream routing | S-15 | FR-003 | researched |
+| S-16 | translate-anthropic-to-openai | new `/v1/messages` endpoint accepting Anthropic Messages protocol, translating to OpenAI Chat Completions for upstream routing | S-15 | FR-003 | implemented |
 | S-17 | provider-fallback-cascade | when an upstream provider fails (5xx, timeout, rate-limit), automatically retry on the next configured provider in priority order | S-01e, S-01c | FR-003, NFR (resilience) | done |
 | S-18 | claude-code-compat | forward anthropic-beta/anthropic-version/x-claude-code-* headers + translate cache_control prompt-caching across all protocol crossings + Anthropic /v1/models shape | S-01e, S-15 | FR-003 | planned |
 | S-19 | add-response-cache | semantic + exact-match response caching to cut repeat-prompt cost | S-01e | FR-003, NFR (cost) | proposed |
@@ -489,7 +489,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Blockers:** —
 - **Unknowns:** — (resolved during planning)
 - **Risk:** Medium-High — header plumbing is a signature change across 3 call sites; Phase 4 streaming-log finalization restructure touches ~20 `log_classification` sites. Prompt caching verified GA (no beta header needed). Plan: `context/changes/claude-code-compat/plan.md`.
-- **Status:** planned
+- **Status:** implemented (reviewed, manual tests added, archived 2026-06-27)
 
 ### S-19: Response caching — semantic + exact-match
 

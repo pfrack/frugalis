@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use regex::Regex;
 use regex::RegexSet;
 
-pub use crate::routing::{ModelCosts, ProviderEntry, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX};
+pub use crate::routing::{
+    ModelCosts, ProviderEntry, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX,
+};
 
 /// A single regex pattern entry with its weight for intent classification.
 #[derive(Clone, Debug, Deserialize)]
@@ -88,14 +90,7 @@ fn default_priority() -> u8 {
 pub struct ClassificationResult {
     pub category: String,
     pub model: String,
-    #[allow(dead_code)]
-    pub endpoint: String,
     pub tier: ClassificationTier,
-    #[allow(dead_code)]
-    pub provider_type: String,
-    #[allow(dead_code)]
-    pub api_key_env: Option<String>,
-    #[allow(dead_code)]
     pub providers: Vec<ProviderEntry>,
 }
 
@@ -306,7 +301,8 @@ impl LLMClassifier {
         let request = if !api_key.is_empty() {
             // The classifier's own LLM probe originates from Cerebrum, not a
             // proxied client request, so there are no client headers to forward.
-            let headers = auth_headers_for(&self.auth_providers, &self.provider_type, &api_key, &[]);
+            let headers =
+                auth_headers_for(&self.auth_providers, &self.provider_type, &api_key, &[]);
             let mut req = request;
             for (key, value) in headers {
                 req = req.header(&key, &value);
@@ -357,10 +353,7 @@ impl LLMClassifier {
                         return ClassificationResult {
                             category: cat.name.clone(),
                             model: self.model.clone(),
-                            endpoint: self.endpoint.clone(),
                             tier: ClassificationTier::Regex,
-                            provider_type: self.provider_type.clone(),
-                            api_key_env: Some(self.api_key_env.clone()),
                             providers: vec![],
                         };
                     }
@@ -590,10 +583,7 @@ impl ClassificationResult {
         ClassificationResult {
             category: "unknown".to_string(),
             model: DEFAULT_MODEL.to_string(),
-            endpoint: String::new(),
             tier: ClassificationTier::Fallback,
-            provider_type: String::new(),
-            api_key_env: None,
             providers: vec![],
         }
     }
@@ -730,10 +720,7 @@ impl RegexClassifier {
         ClassificationResult {
             category: category.to_string(),
             model: route.primary().model.clone(),
-            endpoint: route.primary().endpoint.clone(),
             tier: ClassificationTier::Regex,
-            provider_type: route.primary().provider_type.clone(),
-            api_key_env: route.primary().api_key_env.clone(),
             providers: route.providers.clone(),
         }
     }
@@ -742,10 +729,7 @@ impl RegexClassifier {
         ClassificationResult {
             category: category.to_string(),
             model: self.fallback_entry.primary().model.clone(),
-            endpoint: self.fallback_entry.primary().endpoint.clone(),
             tier: ClassificationTier::Fallback,
-            provider_type: self.fallback_entry.primary().provider_type.clone(),
-            api_key_env: self.fallback_entry.primary().api_key_env.clone(),
             providers: self.fallback_entry.providers.clone(),
         }
     }
@@ -1019,23 +1003,17 @@ mod tests {
             result: ClassificationResult {
                 category: "CAT1".to_string(),
                 model: "model1".to_string(),
-                endpoint: "ep1".to_string(),
                 tier: ClassificationTier::Regex,
-                provider_type: "prov1".to_string(),
-                api_key_env: None,
                 providers: vec![],
-            },        
+            },
         };
         let stub2 = StubClassifier {
             result: ClassificationResult {
                 category: "CAT2".to_string(),
                 model: "model2".to_string(),
-                endpoint: "ep2".to_string(),
                 tier: ClassificationTier::Regex,
-                provider_type: "prov2".to_string(),
-                api_key_env: None,
                 providers: vec![],
-            },        
+            },
         };
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
         let result = chain.classify("any prompt").await;
@@ -1049,23 +1027,17 @@ mod tests {
             result: ClassificationResult {
                 category: "CASUAL".to_string(),
                 model: "fallback1".to_string(),
-                endpoint: String::new(),
                 tier: ClassificationTier::Fallback,
-                provider_type: String::new(),
-                api_key_env: None,
                 providers: vec![],
-            },        
+            },
         };
         let stub2 = StubClassifier {
             result: ClassificationResult {
                 category: "COMPLEX_REASONING".to_string(),
                 model: "model2".to_string(),
-                endpoint: "ep2".to_string(),
                 tier: ClassificationTier::Regex,
-                provider_type: "prov2".to_string(),
-                api_key_env: None,
                 providers: vec![],
-            },        
+            },
         };
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
         let result = chain.classify("prompt").await;
@@ -1082,12 +1054,9 @@ mod tests {
             result: ClassificationResult {
                 category: "CASUAL".to_string(),
                 model: "last".to_string(),
-                endpoint: String::new(),
                 tier: ClassificationTier::Fallback,
-                provider_type: String::new(),
-                api_key_env: None,
                 providers: vec![],
-            },        
+            },
         };
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
         let result = chain.classify("any").await;
@@ -1112,10 +1081,7 @@ mod tests {
                 ClassificationResult {
                     category: "STUB".to_string(),
                     model: "stub-model".to_string(),
-                    endpoint: "stub-endpoint".to_string(),
                     tier: ClassificationTier::Regex,
-                    provider_type: "stub".to_string(),
-                    api_key_env: None,
                     providers: vec![],
                 }
             }
@@ -1147,12 +1113,9 @@ mod tests {
             result: ClassificationResult {
                 category: "FIRST".to_string(),
                 model: "first-model".to_string(),
-                endpoint: String::new(),
                 tier: ClassificationTier::Regex,
-                provider_type: String::new(),
-                api_key_env: None,
                 providers: vec![],
-            },        
+            },
         };
         let stub2 = CountingClassifier {
             counter: counter2.clone(),
@@ -1203,24 +1166,18 @@ mod tests {
             result: ClassificationResult {
                 category: "MIDDLE".to_string(),
                 model: "middle-model".to_string(),
-                endpoint: String::new(),
                 tier: ClassificationTier::FewShot,
-                provider_type: String::new(),
-                api_key_env: None,
                 providers: vec![],
-            },        
+            },
         };
         let stub3 = CountingClassifier {
             counter: counter3.clone(),
             result: ClassificationResult {
                 category: "LAST".to_string(),
                 model: "last-model".to_string(),
-                endpoint: String::new(),
                 tier: ClassificationTier::Regex,
-                provider_type: String::new(),
-                api_key_env: None,
                 providers: vec![],
-            },        
+            },
         };
 
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2), Arc::new(stub3)]);
@@ -1267,12 +1224,9 @@ mod tests {
             result: ClassificationResult {
                 category: "LAST_FALLBACK".to_string(),
                 model: "last-fb-model".to_string(),
-                endpoint: String::new(),
                 tier: ClassificationTier::Fallback,
-                provider_type: String::new(),
-                api_key_env: None,
                 providers: vec![],
-            },        
+            },
         };
 
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2), Arc::new(stub3)]);
@@ -1401,8 +1355,14 @@ mod tests {
         // 2023-06-01 default, and emit the version exactly once.
         let forward = vec![
             ("anthropic-version".to_string(), "2024-10-22".to_string()),
-            ("anthropic-beta".to_string(), "context-management-2025-09".to_string()),
-            ("x-claude-code-session-id".to_string(), "sess-abc".to_string()),
+            (
+                "anthropic-beta".to_string(),
+                "context-management-2025-09".to_string(),
+            ),
+            (
+                "x-claude-code-session-id".to_string(),
+                "sess-abc".to_string(),
+            ),
         ];
         let headers = auth_headers_for(&providers, "anthropic", "sk-ant-123", &forward);
         assert!(
@@ -1414,11 +1374,17 @@ mod tests {
             "default version must not also be emitted, got {headers:?}"
         );
         assert!(
-            headers.contains(&("anthropic-beta".to_string(), "context-management-2025-09".to_string())),
+            headers.contains(&(
+                "anthropic-beta".to_string(),
+                "context-management-2025-09".to_string()
+            )),
             "anthropic-beta must be forwarded to an Anthropic upstream, got {headers:?}"
         );
         assert!(
-            headers.contains(&("x-claude-code-session-id".to_string(), "sess-abc".to_string())),
+            headers.contains(&(
+                "x-claude-code-session-id".to_string(),
+                "sess-abc".to_string()
+            )),
             "x-claude-code-session-id must be forwarded, got {headers:?}"
         );
         assert!(
@@ -1429,7 +1395,10 @@ mod tests {
             .iter()
             .filter(|(n, _)| n == "anthropic-version")
             .count();
-        assert_eq!(version_count, 1, "anthropic-version must be emitted exactly once");
+        assert_eq!(
+            version_count, 1,
+            "anthropic-version must be emitted exactly once"
+        );
     }
 
     #[test]
@@ -1448,7 +1417,10 @@ mod tests {
             "default version must be used when the client sent none, got {headers:?}"
         );
         assert!(
-            headers.contains(&("anthropic-beta".to_string(), "prompt-caching-2024-07-31".to_string())),
+            headers.contains(&(
+                "anthropic-beta".to_string(),
+                "prompt-caching-2024-07-31".to_string()
+            )),
             "anthropic-beta must still be forwarded without a client version, got {headers:?}"
         );
     }
@@ -1459,9 +1431,15 @@ mod tests {
         // anthropic-* is meaningless to an OpenAI-compatible upstream and must
         // be dropped entirely so we never forward Anthropic-only noise.
         let forward = vec![
-            ("anthropic-beta".to_string(), "should-not-forward".to_string()),
+            (
+                "anthropic-beta".to_string(),
+                "should-not-forward".to_string(),
+            ),
             ("anthropic-version".to_string(), "2024-10-22".to_string()),
-            ("x-claude-code-session-id".to_string(), "sess-abc".to_string()),
+            (
+                "x-claude-code-session-id".to_string(),
+                "sess-abc".to_string(),
+            ),
         ];
         let headers = auth_headers_for(&providers, "openai_compatible", "sk-123", &forward);
         assert_eq!(

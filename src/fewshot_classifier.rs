@@ -327,10 +327,7 @@ impl IntentClassify for FewShotClassifier {
             return ClassificationResult {
                 category,
                 model: route.primary().model.clone(),
-                endpoint: route.primary().endpoint.clone(),
                 tier: ClassificationTier::FewShot,
-                provider_type: route.primary().provider_type.clone(),
-                api_key_env: route.primary().api_key_env.clone(),
                 providers: route.providers.clone(),
             };
         }
@@ -349,20 +346,14 @@ impl IntentClassify for FewShotClassifier {
                 ClassificationResult {
                     category,
                     model: route.primary().model.clone(),
-                    endpoint: route.primary().endpoint.clone(),
                     tier: ClassificationTier::FewShot,
-                    provider_type: route.primary().provider_type.clone(),
-                    api_key_env: route.primary().api_key_env.clone(),
                     providers: route.providers.clone(),
                 }
             }
             _ => ClassificationResult {
                 category: "unknown".to_string(),
                 model: DEFAULT_MODEL.to_string(),
-                endpoint: String::new(),
                 tier: ClassificationTier::Fallback,
-                provider_type: String::new(),
-                api_key_env: None,
                 providers: vec![],
             },
         }

@@ -230,6 +230,8 @@ Translate cache tokens in responses so clients see accurate usage in both protoc
 
 **Contract**: New `log_classification` params: `usage: Option<UsageBreakdown>` and `session_id: Option<&str>`. For streaming, split into an open call (current behavior) and a finalization update that sets token fields from the parsed terminal usage. Non-streaming paths already parse the body before logging — pass usage directly. This is the highest-risk change; lean on the existing test suite and the lessons.md rule about handler-rewrite regressions.
 
+**Addendum** (2026-06-27, impl-review F2): The plan originally specified modifying `log_classification`'s signature. The implementation instead preserved the original 8-param `log_classification` and added a new 10-param `log_classification_with_usage`. This decomposition was intentional: `log_classification` remains the lightweight "open" call for all non-streaming paths and the streaming path's `tokio::spawn` preamble, while `log_classification_with_usage` carries the optional `UsageBreakdown` and `client_session_id` for "close" finalization. Both share `enqueue_inference_record`. The two-function split avoids threading `Option<UsageBreakdown>` through every non-streaming call site that never carries usage data.
+
 ### Success Criteria:
 
 #### Automated Verification:
@@ -308,7 +310,7 @@ Translate cache tokens in responses so clients see accurate usage in both protoc
 
 #### Manual
 
-- [ ] 1.4 `curl /v1/models` returns entries with `display_name`
+- [x] 1.4 `curl /v1/models` returns entries with `display_name` — manual-test CC1 (bash mock)
 - [ ] 1.5 Claude Code discovery lists friendly model names
 
 ### Phase 2: Header pass-through plumbing
@@ -321,8 +323,8 @@ Translate cache tokens in responses so clients see accurate usage in both protoc
 
 #### Manual
 
-- [ ] 2.4 Claude Code request with `anthropic-beta` reaches the Anthropic upstream
-- [ ] 2.5 OpenAI-upstream routing does not forward `anthropic-beta`
+- [x] 2.4 Claude Code request with `anthropic-beta` reaches the Anthropic upstream — manual-test CC3 (bash mock)
+- [x] 2.5 OpenAI-upstream routing does not forward `anthropic-beta` — Rust integration test `test_completion_handler_does_not_forward_anthropic_headers_to_openai`
 
 ### Phase 3: `cache_control` translation across all four crossings
 
@@ -336,7 +338,7 @@ Translate cache tokens in responses so clients see accurate usage in both protoc
 #### Manual
 
 - [ ] 3.5 Two consecutive Claude Code turns show `cache_read_input_tokens > 0` on turn 2
-- [ ] 3.6 OpenAI-client → Anthropic upstream receives `cache_control`
+- [x] 3.6 OpenAI-client → Anthropic upstream receives `cache_control` — manual-test CC4 (bash mock)
 
 ### Phase 4: Cache-token usage translation + `InferenceRecord` logging
 

@@ -1,8 +1,9 @@
 ---
 id: claude-code-compat
-status: implementing
+status: archived
+archived: 2026-06-27
 created: 2026-06-25
-updated: 2026-06-25
+updated: 2026-06-27
 user: pfrack
 roadmap_id: (new — derived from competitive-landscape-gaps research, Tier-1 #3/#4)
 tags: [claude-code, anthropic, prompt-caching, header-passthrough, protocol-translation, cache-control]

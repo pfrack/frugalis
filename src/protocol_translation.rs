@@ -1457,6 +1457,13 @@ pub struct AnthropicStreamState {
     pub model: String,
     /// Tracks tool call metadata by OpenAI tool_calls array index.
     pub tool_state: std::collections::HashMap<usize, (String, String)>, // index → (id, name)
+    /// Accumulated token usage from the terminal OpenAI usage chunk so that
+    /// stream-close logging can capture per-request token counts into
+    /// InferenceRecord.
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
 }
 
 impl AnthropicStreamState {
@@ -1471,6 +1478,17 @@ impl AnthropicStreamState {
         } else {
             None
         }
+    }
+
+    /// Return the accumulated token counts as a tuple suitable for building
+    /// a `UsageBreakdown`. Mirrors `StreamTranslateState::collected_usage()`.
+    pub fn collected_usage(&self) -> (u64, u64, u64, u64) {
+        (
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_read_tokens,
+            self.cache_creation_tokens,
+        )
     }
 }
 
@@ -1537,16 +1555,32 @@ pub fn openai_to_anthropic_stream_event(
     let choice = match choice {
         Some(c) => c,
         None => {
-            // Usage-only chunk (no choices)
+            // Usage-only chunk (no choices). OpenAI emits a terminal chunk
+            // with usage when stream_options include_usage is set.
             if let Some(usage) = parsed.get("usage") {
-                let output_tokens = usage
+                let completion = usage
                     .get("completion_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
+                let prompt = usage
+                    .get("prompt_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let cached = usage
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                // Preserve the Anthropic semantic split: cache_read maps from
+                // OpenAI cached_tokens; non-cached input = prompt - cached.
+                state.input_tokens = prompt.saturating_sub(cached);
+                state.output_tokens = completion;
+                state.cache_read_tokens = cached;
+                state.cache_creation_tokens = 0;
                 let msg_delta = json!({
                     "type": "message_delta",
                     "delta": {"stop_reason": "end_turn", "stop_sequence": null},
-                    "usage": {"output_tokens": output_tokens}
+                    "usage": {"output_tokens": completion}
                 });
                 if let Some(close) = state.close_open_block() {
                     out.push_str(&close);
@@ -1724,7 +1758,9 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}]
         });
         let result = translate_request(&input).unwrap();
-        let cc = result.get("cache_control").expect("cache_control must be inserted");
+        let cc = result
+            .get("cache_control")
+            .expect("cache_control must be inserted");
         assert_eq!(
             cc.get("type").and_then(|v| v.as_str()),
             Some("ephemeral"),
@@ -1748,9 +1784,11 @@ mod tests {
                 ]
             }]
         });
-        let (translated, had_cc) =
-            anthropic_to_openai_request_with_cache_signal(&input).unwrap();
-        assert!(had_cc, "had_cache_control must be true when a block carries it");
+        let (translated, had_cc) = anthropic_to_openai_request_with_cache_signal(&input).unwrap();
+        assert!(
+            had_cc,
+            "had_cache_control must be true when a block carries it"
+        );
         assert!(
             translated.get("cache_control").is_none(),
             "translated OpenAI body must not carry cache_control, got: {translated}"
@@ -1768,9 +1806,11 @@ mod tests {
             "max_tokens": 100,
             "messages": [{"role": "user", "content": "plain turn"}]
         });
-        let (_translated, had_cc) =
-            anthropic_to_openai_request_with_cache_signal(&input).unwrap();
-        assert!(!had_cc, "had_cache_control must be false when no breakpoint is present");
+        let (_translated, had_cc) = anthropic_to_openai_request_with_cache_signal(&input).unwrap();
+        assert!(
+            !had_cc,
+            "had_cache_control must be false when no breakpoint is present"
+        );
     }
 
     #[test]
@@ -1828,7 +1868,10 @@ mod tests {
         });
         let result = translate_response(&input).unwrap();
         let usage = result.get("usage").expect("usage");
-        assert_eq!(usage.get("prompt_tokens").and_then(|v| v.as_u64()), Some(50));
+        assert_eq!(
+            usage.get("prompt_tokens").and_then(|v| v.as_u64()),
+            Some(50)
+        );
         let cached = usage
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
@@ -1860,7 +1903,10 @@ mod tests {
         });
         let result = openai_to_anthropic_response(&input).unwrap();
         let usage = result.get("usage").expect("usage");
-        let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let input_tokens = usage
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let cache_read = usage
             .get("cache_read_input_tokens")
             .and_then(|v| v.as_u64())
@@ -1869,8 +1915,14 @@ mod tests {
             .get("cache_creation_input_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        assert_eq!(cache_read, 90, "cache_read_input_tokens maps from cached_tokens");
-        assert_eq!(input_tokens, 40, "input_tokens is the non-cached portion (130 - 90)");
+        assert_eq!(
+            cache_read, 90,
+            "cache_read_input_tokens maps from cached_tokens"
+        );
+        assert_eq!(
+            input_tokens, 40,
+            "input_tokens is the non-cached portion (130 - 90)"
+        );
         assert_eq!(cache_creation, 0, "OpenAI has no cache-creation concept");
         assert_eq!(
             cache_read + cache_creation + input_tokens,

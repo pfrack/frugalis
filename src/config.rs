@@ -1259,7 +1259,10 @@ api_key_env = ""
         let routing = result.unwrap();
 
         assert_eq!(routing.len(), 3);
-        assert_eq!(routing.get("SYNTAX_FIX").unwrap().primary().model, "test-sf-model");
+        assert_eq!(
+            routing.get("SYNTAX_FIX").unwrap().primary().model,
+            "test-sf-model"
+        );
         assert_eq!(
             routing.get("SYNTAX_FIX").unwrap().primary().endpoint,
             "https://test.endpoint"
@@ -1369,7 +1372,10 @@ api_key_env = ""
         let (routing, fallback) = load_routing();
 
         assert_eq!(routing.len(), 1);
-        assert_eq!(routing.get("SYNTAX_FIX").unwrap().primary().model, "file-sf-model");
+        assert_eq!(
+            routing.get("SYNTAX_FIX").unwrap().primary().model,
+            "file-sf-model"
+        );
         // fallback should be the file-defined fallback
         assert_eq!(fallback.primary().model, "file-fallback");
 
@@ -1980,7 +1986,10 @@ provider_type = "openai_compatible"
         // DEFAULT preserved from base
         let default = routing.get("DEFAULT").expect("DEFAULT preserved from base");
         assert_eq!(default.primary().model, "base-default");
-        assert_eq!(default.primary().endpoint, "https://base.example/v1/chat/completions");
+        assert_eq!(
+            default.primary().endpoint,
+            "https://base.example/v1/chat/completions"
+        );
         // FILE_READING replaced by overlay
         let file_reading = routing
             .get("FILE_READING")
@@ -2029,8 +2038,14 @@ provider_type = "openai_compatible"
 
         merge_configs(&mut base, overlay);
         let routing = base.routing.expect("routing should be present after merge");
-        assert_eq!(routing.get("DEFAULT").unwrap().primary().model, "new-default");
-        assert_eq!(routing.get("FILE_READING").unwrap().primary().model, "new-fr");
+        assert_eq!(
+            routing.get("DEFAULT").unwrap().primary().model,
+            "new-default"
+        );
+        assert_eq!(
+            routing.get("FILE_READING").unwrap().primary().model,
+            "new-fr"
+        );
     }
 
     #[test]
@@ -2060,7 +2075,10 @@ provider_type = "openai_compatible"
         merge_configs(&mut base, overlay);
         let routing = base.routing.expect("routing initialized from None");
         assert_eq!(routing.len(), 1);
-        assert_eq!(routing.get("SYNTAX_FIX").unwrap().primary().model, "sf-model");
+        assert_eq!(
+            routing.get("SYNTAX_FIX").unwrap().primary().model,
+            "sf-model"
+        );
     }
 
     // ── Phase 3: External Pattern File Tests ──
@@ -2398,8 +2416,14 @@ patterns_file = "nonexistent.patterns"
             let entry = routing
                 .get(key)
                 .unwrap_or_else(|| panic!("missing route key {key} in openrouter example"));
-            assert!(!entry.primary().model.is_empty(), "{key} model should be set");
-            assert!(!entry.primary().endpoint.is_empty(), "{key} endpoint should be set");
+            assert!(
+                !entry.primary().model.is_empty(),
+                "{key} model should be set"
+            );
+            assert!(
+                !entry.primary().endpoint.is_empty(),
+                "{key} endpoint should be set"
+            );
             assert!(
                 !entry.primary().provider_type.is_empty(),
                 "{key} provider_type should be set"

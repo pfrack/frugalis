@@ -1,7 +1,7 @@
 ---
 change_id: readme-bootstrap
 title: Bootstrap README.md for the Cerebrum repository
-status: implementing
+status: impl_reviewed
 created: 2026-06-13
 updated: 2026-06-26
 

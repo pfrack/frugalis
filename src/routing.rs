@@ -144,9 +144,15 @@ mod tests {
         let entry: RouteEntry = toml::from_str(toml_str).expect("legacy flat config should parse");
         assert_eq!(entry.providers.len(), 1);
         assert_eq!(entry.providers[0].model, "gpt-4o-mini");
-        assert_eq!(entry.providers[0].endpoint, "https://api.openai.com/v1/chat/completions");
+        assert_eq!(
+            entry.providers[0].endpoint,
+            "https://api.openai.com/v1/chat/completions"
+        );
         assert_eq!(entry.providers[0].provider_type, "openai_compatible");
-        assert_eq!(entry.providers[0].api_key_env, Some("OPENAI_API_KEY".to_string()));
+        assert_eq!(
+            entry.providers[0].api_key_env,
+            Some("OPENAI_API_KEY".to_string())
+        );
         assert!(entry.providers[0].timeout_ms.is_none());
         assert_eq!(entry.cost_per_1m_input_tokens, Some(0.15));
     }

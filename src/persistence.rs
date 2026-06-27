@@ -118,11 +118,7 @@ impl SqliteBackend {
             let cols: Vec<String> = sqlx::query("PRAGMA table_info(inferences)")
                 .fetch_all(&self.pool)
                 .await
-                .map(|rows| {
-                    rows.iter()
-                        .map(|r| r.get::<String, _>("name"))
-                        .collect()
-                })
+                .map(|rows| rows.iter().map(|r| r.get::<String, _>("name")).collect())
                 .unwrap_or_default();
             for (col, typ) in [
                 ("provider_attempts", "SMALLINT DEFAULT 1"),
@@ -1745,7 +1741,11 @@ mod tests {
         let s = &stored[0];
         assert_eq!(s.input_tokens, Some(100));
         assert_eq!(s.output_tokens, Some(20));
-        assert_eq!(s.cache_read_tokens, Some(80), "cache_read_tokens must round-trip");
+        assert_eq!(
+            s.cache_read_tokens,
+            Some(80),
+            "cache_read_tokens must round-trip"
+        );
         assert_eq!(s.cache_creation_tokens, Some(5));
         assert_eq!(
             s.client_session_id.as_deref(),
@@ -1769,7 +1769,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             final_provider: String::new(),
             provider_attempts: 1,
-        ..Default::default()
+            ..Default::default()
         };
         pc.backend
             .insert_inference(&record)
@@ -1801,7 +1801,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             final_provider: String::new(),
             provider_attempts: 1,
-        ..Default::default()
+            ..Default::default()
         };
         let record_b = InferenceRecord {
             request_id: uuid::Uuid::new_v4(),
@@ -1814,7 +1814,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             final_provider: String::new(),
             provider_attempts: 1,
-        ..Default::default()
+            ..Default::default()
         };
         pc.backend
             .insert_inference(&record_a)
@@ -1856,7 +1856,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 final_provider: String::new(),
                 provider_attempts: 1,
-            ..Default::default()
+                ..Default::default()
             };
             pc.backend.insert_inference(&record).await.expect("insert");
         }
@@ -1912,7 +1912,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             final_provider: String::new(),
             provider_attempts: 1,
-        ..Default::default()
+            ..Default::default()
         };
         pc.backend
             .insert_inference(&record)
@@ -1958,7 +1958,7 @@ mod tests {
                     created_at: now,
                     final_provider: String::new(),
                     provider_attempts: 1,
-                ..Default::default()
+                    ..Default::default()
                 })
                 .await
                 .expect("insert");
@@ -1977,7 +1977,7 @@ mod tests {
                     created_at: now,
                     final_provider: String::new(),
                     provider_attempts: 1,
-                ..Default::default()
+                    ..Default::default()
                 })
                 .await
                 .expect("insert");
@@ -1995,7 +1995,7 @@ mod tests {
                 created_at: now,
                 final_provider: String::new(),
                 provider_attempts: 1,
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .expect("insert");
@@ -2061,7 +2061,7 @@ mod tests {
                     created_at: now,
                     final_provider: String::new(),
                     provider_attempts: 1,
-                ..Default::default()
+                    ..Default::default()
                 })
                 .await
                 .expect("insert");
@@ -2101,7 +2101,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 final_provider: String::new(),
                 provider_attempts: 1,
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .expect("insert should succeed");
@@ -2143,7 +2143,7 @@ mod tests {
                 created_at: now,
                 final_provider: String::new(),
                 provider_attempts: 1,
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .expect("insert 1");
@@ -2159,7 +2159,7 @@ mod tests {
                 created_at: now,
                 final_provider: String::new(),
                 provider_attempts: 1,
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .expect("insert 2");
@@ -2202,7 +2202,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 final_provider: String::new(),
                 provider_attempts: 1,
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .expect("insert should succeed");
@@ -2244,7 +2244,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 final_provider: String::new(),
                 provider_attempts: 1,
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .expect("insert should succeed");
@@ -2280,7 +2280,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 final_provider: String::new(),
                 provider_attempts: 1,
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .expect("insert should succeed");
@@ -2320,7 +2320,7 @@ mod tests {
                 created_at: two_hours_ago,
                 final_provider: String::new(),
                 provider_attempts: 1,
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .expect("insert should succeed");
@@ -2393,7 +2393,7 @@ mod tests {
                     created_at: now,
                     final_provider: String::new(),
                     provider_attempts: 1,
-                ..Default::default()
+                    ..Default::default()
                 })
                 .await
                 .expect("insert");
@@ -2434,7 +2434,7 @@ mod tests {
                     created_at: now,
                     final_provider: String::new(),
                     provider_attempts: 1,
-                ..Default::default()
+                    ..Default::default()
                 })
                 .await
                 .expect("insert");
@@ -2457,7 +2457,7 @@ mod tests {
                         created_at: now,
                         final_provider: String::new(),
                         provider_attempts: 1,
-                    ..Default::default()
+                        ..Default::default()
                     })
                     .await
                     .expect("insert");
@@ -2496,7 +2496,7 @@ mod tests {
                 created_at: now,
                 final_provider: String::new(),
                 provider_attempts: 1,
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .expect("insert");
@@ -2513,7 +2513,7 @@ mod tests {
                 created_at: old,
                 final_provider: String::new(),
                 provider_attempts: 1,
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .expect("insert");
@@ -2592,7 +2592,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             final_provider: String::new(),
             provider_attempts: 1,
-        ..Default::default()
+            ..Default::default()
         };
         pc.backend
             .insert_inference(&record)
@@ -2642,7 +2642,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             final_provider: String::new(),
             provider_attempts: 1,
-        ..Default::default()
+            ..Default::default()
         };
         pc1.backend.insert_inference(&record).await.expect("insert");
 
@@ -2672,7 +2672,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             final_provider: String::new(),
             provider_attempts: 1,
-        ..Default::default()
+            ..Default::default()
         };
 
         let handle = log_inference(pc.backend.clone(), pc.task_semaphore.clone(), record);
