@@ -1178,6 +1178,514 @@ except Exception as e:
         fi
     }
 
+    # ── Claude Code Compat: /v1/models Anthropic Shape ─────────────────────
+    # Phase 1: Validates that GET /v1/models returns the Anthropic contract
+    # with display_name, claude/anthropic-prefixed IDs, and type=model.
+    # Also verifies the endpoint is intentionally unauthenticated so that
+    # Claude Code's pre-auth model-discovery probe succeeds.
+
+    test_cc_models_endpoint_shape() {
+        section "Claude Code Compat - Test CC1: /v1/models returns Anthropic shape with display_name"
+
+        if ! start_server ""; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+
+        local _resp _code
+        _resp=$(curl -s -w "\n%{http_code}" "http://$HOST/v1/models" 2>/dev/null) || _resp="ERROR"
+        _code=$(printf '%s' "$_resp" | tail -1)
+        local _body=$(printf '%s' "$_resp" | sed '$d')
+
+        local all_pass=true
+
+        if [ "$_code" != "200" ]; then
+            log_fail "/v1/models expected 200, got $_code"
+            stop_server
+            return 1
+        fi
+
+        local _check
+        _check=$(echo "$_body" | python3 -c "
+import json,sys
+data = json.load(sys.stdin)
+entries = data.get('data', data) if isinstance(data, dict) else data
+errors = []
+for e in entries:
+    eid = e.get('id','')
+    dn = e.get('display_name','')
+    tp = e.get('type','')
+    if not dn:
+        errors.append(f'MISSING display_name on {eid}')
+    if not (eid.startswith('claude') or eid.startswith('anthropic')):
+        errors.append(f'BAD id prefix: {eid}')
+    if tp != 'model':
+        errors.append(f'BAD type on {eid}: {tp}')
+if errors:
+    print('\n'.join(errors))
+else:
+    print(f'OK {len(entries)} models')
+" 2>/dev/null || echo "PARSE_ERROR")
+
+        if [[ "$_check" == OK\ * ]]; then
+            log_pass "$_check"
+        else
+            log_fail "/v1/models validation: $_check"
+            all_pass=false
+        fi
+
+        stop_server
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
+    test_cc_models_unauthenticated() {
+        section "Claude Code Compat - Test CC2: /v1/models is unauthenticated (Claude Code pre-auth probe)"
+
+        if ! start_server ""; then
+            log_fail "Failed to start server"
+            return 1
+        fi
+
+        local _code
+        _code=$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST/v1/models" 2>/dev/null) || _code="000"
+        stop_server
+
+        if [ "$_code" = "200" ]; then
+            log_pass "/v1/models returns 200 without authentication"
+            return 0
+        else
+            log_fail "/v1/models expected 200 without auth, got $_code"
+            return 1
+        fi
+    }
+
+    # ── Claude Code Compat: Header Forwarding & Cache-Control ──────────────
+    # Phases 2–3: Uses a mock Anthropic upstream server that writes
+    # diagnostics (headers + body structure) to a temp file. Cerebrum
+    # proxies the request to the mock; the test reads the diagnostics file
+    # to verify header pass-through and cache_control translation.
+
+    MOCK_CC_ANTHROPIC_PORT=10043
+    MOCK_CC_DIAG_FILE="/tmp/cerebrum-cc-mock-diag.txt"
+
+    start_mock_cc_anthropic_server() {
+        local mock_script="/tmp/cerebrum-mock-cc-anthropic-$$.py"
+        cat > "$mock_script" << 'PYEOF'
+import http.server
+import json
+import os
+import sys
+
+PORT = int(sys.argv[1])
+DIAG_FILE = os.environ.get("MOCK_CC_DIAG_FILE", "/tmp/cerebrum-cc-mock-diag.txt")
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length > 0 else {}
+
+        details = {}
+
+        # ── Header forwarding ──
+        details["anthropic_beta"] = self.headers.get("anthropic-beta", "<absent>")
+        details["anthropic_version"] = self.headers.get("anthropic-version", "<absent>")
+        details["x_claude_code_session_id"] = self.headers.get("x-claude-code-session-id", "<absent>")
+        details["x_api_key_ok"] = self.headers.get("x-api-key", "").startswith("sk-ant-")
+
+        # ── Body structure ──
+        details["has_system"] = "system" in body
+        details["has_messages"] = "messages" in body
+        details["has_max_tokens"] = "max_tokens" in body
+        details["has_cache_control"] = "cache_control" in body
+
+        # Per-message content-block cache_control (for passthrough)
+        msgs = body.get("messages", [])
+        content_has_cc = False
+        for m in msgs:
+            c = m.get("content", "")
+            if isinstance(c, list):
+                for blk in c:
+                    if isinstance(blk, dict) and blk.get("cache_control") is not None:
+                        content_has_cc = True
+                        break
+        details["content_cache_control"] = content_has_cc
+
+        # System-block cache_control (for passthrough)
+        system_has_cc = False
+        sys_val = body.get("system")
+        if isinstance(sys_val, list):
+            for blk in sys_val:
+                if isinstance(blk, dict) and blk.get("cache_control") is not None:
+                    system_has_cc = True
+                    break
+        details["system_cache_control"] = system_has_cc
+
+        with open(DIAG_FILE, "w") as f:
+            json.dump(details, f)
+
+        # Response with cache tokens in usage (exercises Phase 4 translation)
+        resp = {
+            "id": "msg_mock_cc_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "mock-model",
+            "content": [{"type": "text", "text": "mock claude code compat response"}],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": 45,
+                "output_tokens": 12,
+                "cache_read_input_tokens": 35,
+                "cache_creation_input_tokens": 0
+            }
+        }
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(resp).encode())
+
+server = http.server.HTTPServer(("127.0.0.1", PORT), Handler)
+server.serve_forever()
+PYEOF
+        MOCK_CC_DIAG_FILE="$MOCK_CC_DIAG_FILE" python3 "$mock_script" "$MOCK_CC_ANTHROPIC_PORT" &
+        MOCK_CC_PID=$!
+        sleep 0.5
+    }
+
+    stop_mock_cc_anthropic_server() {
+        if [ -n "${MOCK_CC_PID:-}" ]; then
+            kill "$MOCK_CC_PID" 2>/dev/null || true
+            wait "$MOCK_CC_PID" 2>/dev/null || true
+            MOCK_CC_PID=""
+        fi
+        rm -f /tmp/cerebrum-mock-cc-anthropic-*.py
+        rm -f "$MOCK_CC_DIAG_FILE"
+    }
+
+    _cc_anth_config() {
+        local _mock_url="http://127.0.0.1:${MOCK_CC_ANTHROPIC_PORT}/v1/messages"
+        cat > /tmp/cerebrum-config-test.toml << HEREDOC
+[categories.FILE_READING]
+description = "Reading files"
+threshold = 3
+priority = 1
+
+[categories.SYNTAX_FIX]
+description = "Fixing bugs"
+threshold = 3
+priority = 2
+patterns = [
+  { regex = '(?i)\\\\b(?:fix|correct|repair|patch)\\\\s+(?:this|the|my|a)\\\\s+(?:bug|error|issue)', weight = 3 }
+]
+
+[categories.COMPLEX_REASONING]
+description = "Complex reasoning"
+threshold = 3
+priority = 3
+
+[categories.CASUAL]
+description = "Casual"
+threshold = 1
+priority = 4
+
+[routing.FILE_READING]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.SYNTAX_FIX]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.COMPLEX_REASONING]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.CASUAL]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[routing.DEFAULT]
+model = "mock-model"
+provider_type = "anthropic"
+endpoint = "${_mock_url}"
+api_key_env = "ANTHROPIC_API_KEY"
+HEREDOC
+    }
+
+    test_cc_header_forwarding() {
+        section "Claude Code Compat - Test CC3: Header forwarding (anthropic-beta, x-claude-code-*)"
+        trap stop_mock_cc_anthropic_server EXIT
+
+        start_mock_cc_anthropic_server
+        _cc_anth_config
+
+        export ANTHROPIC_API_KEY="sk-ant-test-key"
+
+        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+            log_fail "Failed to start server"
+            stop_mock_cc_anthropic_server
+            unset ANTHROPIC_API_KEY
+            return 1
+        fi
+
+        local all_pass=true
+
+        rm -f "$MOCK_CC_DIAG_FILE"
+
+        local _resp _code
+        _resp=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "anthropic-beta: custom-feature-2025" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "x-claude-code-session-id: cc-session-test" \
+            -d '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}' \
+            "$MESSAGES_URL" 2>/dev/null) || _resp="ERROR"
+        _code=$(printf '%s' "$_resp" | tail -1)
+
+        if [ "$_code" != "200" ]; then
+            log_fail "Expected 200, got $_code"
+            all_pass=false
+        else
+            if [ -f "$MOCK_CC_DIAG_FILE" ]; then
+                local _beta _version _session _apikey
+                _beta=$(python3 -c "import json; d=json.load(open('$MOCK_CC_DIAG_FILE')); print(d.get('anthropic_beta',''))" 2>/dev/null || echo "")
+                _version=$(python3 -c "import json; d=json.load(open('$MOCK_CC_DIAG_FILE')); print(d.get('anthropic_version',''))" 2>/dev/null || echo "")
+                _session=$(python3 -c "import json; d=json.load(open('$MOCK_CC_DIAG_FILE')); print(d.get('x_claude_code_session_id',''))" 2>/dev/null || echo "")
+                _apikey=$(python3 -c "import json; d=json.load(open('$MOCK_CC_DIAG_FILE')); print(d.get('x_api_key_ok',''))" 2>/dev/null || echo "")
+
+                if [ "$_beta" = "custom-feature-2025" ]; then
+                    log_pass "anthropic-beta forwarded: $_beta"
+                else
+                    log_fail "anthropic-beta NOT forwarded (got: $_beta)"
+                    all_pass=false
+                fi
+
+                if [ "$_version" = "2023-06-01" ]; then
+                    log_pass "anthropic-version forwarded: $_version"
+                else
+                    log_fail "anthropic-version NOT forwarded (got: $_version)"
+                    all_pass=false
+                fi
+
+                if [ "$_session" = "cc-session-test" ]; then
+                    log_pass "x-claude-code-session-id forwarded: $_session"
+                else
+                    log_fail "x-claude-code-session-id NOT forwarded (got: $_session)"
+                    all_pass=false
+                fi
+
+                if [ "$_apikey" = "True" ]; then
+                    log_pass "x-api-key present in upstream request"
+                else
+                    log_fail "x-api-key missing or wrong prefix"
+                    all_pass=false
+                fi
+            else
+                log_fail "Mock diagnostics file not found"
+                all_pass=false
+            fi
+        fi
+
+        # ── Verify cache token translation in response ──
+        if [ "$all_pass" = true ]; then
+            local _body _cached
+            _body=$(printf '%s' "$_resp" | sed '$d')
+            # For Anthropic passthrough (messages response), usage is in Anthropic format
+            _cached=$(echo "$_body" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+usage = d.get('usage', {})
+print(usage.get('cache_read_input_tokens', ''))
+" 2>/dev/null || echo "")
+            if [ "$_cached" = "35" ]; then
+                log_pass "Response includes cache_read_input_tokens=35"
+            else
+                log_fail "Response cache_read_input_tokens expected 35, got: $_cached"
+                all_pass=false
+            fi
+        fi
+
+        stop_server
+        stop_mock_cc_anthropic_server
+        unset ANTHROPIC_API_KEY
+        trap cleanup EXIT
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
+    test_cc_oai_to_anth_cache_control() {
+        section "Claude Code Compat - Test CC4: OpenAI→Anthropic cache_control auto-insertion"
+        trap stop_mock_cc_anthropic_server EXIT
+
+        start_mock_cc_anthropic_server
+        _cc_anth_config
+
+        export ANTHROPIC_API_KEY="sk-ant-test-key"
+
+        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+            log_fail "Failed to start server"
+            stop_mock_cc_anthropic_server
+            unset ANTHROPIC_API_KEY
+            return 1
+        fi
+
+        local all_pass=true
+
+        rm -f "$MOCK_CC_DIAG_FILE"
+
+        # Send OpenAI-format request to /v1/chat/completions (routed to Anthropic upstream)
+        local _resp _code
+        _resp=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"gpt-4","messages":[{"role":"system","content":"You are helpful."},{"role":"user","content":"fix this bug please"}],"max_tokens":100}' \
+            "$COMPLETION_URL" 2>/dev/null) || _resp="ERROR"
+        _code=$(printf '%s' "$_resp" | tail -1)
+
+        if [ "$_code" != "200" ]; then
+            log_fail "Expected 200, got $_code"
+            all_pass=false
+        else
+            if [ -f "$MOCK_CC_DIAG_FILE" ]; then
+                local _has_cc _has_system
+                _has_cc=$(python3 -c "import json; d=json.load(open('$MOCK_CC_DIAG_FILE')); print(d.get('has_cache_control',False))" 2>/dev/null || echo "False")
+                _has_system=$(python3 -c "import json; d=json.load(open('$MOCK_CC_DIAG_FILE')); print(d.get('has_system',False))" 2>/dev/null || echo "False")
+
+                if [ "$_has_cc" = "True" ]; then
+                    log_pass "OAI→Anth: cache_control auto-inserted in translated body"
+                else
+                    log_fail "OAI→Anth: cache_control MISSING in translated body"
+                    all_pass=false
+                fi
+
+                if [ "$_has_system" = "True" ]; then
+                    log_pass "OAI→Anth: system prompt translated correctly"
+                else
+                    log_fail "OAI→Anth: system prompt MISSING"
+                    all_pass=false
+                fi
+            else
+                log_fail "Mock diagnostics file not found"
+                all_pass=false
+            fi
+        fi
+
+        # ── Verify response is in OpenAI format with cached_tokens ──
+        if [ "$all_pass" = true ]; then
+            local _body _obj _cached
+            _body=$(printf '%s' "$_resp" | sed '$d')
+            _obj=$(echo "$_body" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('object',''))" 2>/dev/null || echo "")
+            _cached=$(echo "$_body" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+usage = d.get('usage', {})
+details = usage.get('prompt_tokens_details', {})
+print(details.get('cached_tokens', ''))
+" 2>/dev/null || echo "")
+
+            if [ "$_obj" = "chat.completion" ]; then
+                log_pass "Response is OpenAI format (chat.completion)"
+            else
+                log_fail "Expected chat.completion, got: $_obj"
+                all_pass=false
+            fi
+
+            if [ "$_cached" = "35" ]; then
+                log_pass "Response cached_tokens=35 (translated from cache_read_input_tokens)"
+            else
+                log_fail "Expected cached_tokens=35, got: $_cached"
+                all_pass=false
+            fi
+        fi
+
+        stop_server
+        stop_mock_cc_anthropic_server
+        unset ANTHROPIC_API_KEY
+        trap cleanup EXIT
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
+    test_cc_anth_to_anth_cache_control_passthrough() {
+        section "Claude Code Compat - Test CC5: Anthropic→Anthropic cache_control passthrough"
+        trap stop_mock_cc_anthropic_server EXIT
+
+        start_mock_cc_anthropic_server
+        _cc_anth_config
+
+        export ANTHROPIC_API_KEY="sk-ant-test-key"
+
+        if ! start_server "/tmp/cerebrum-config-test.toml"; then
+            log_fail "Failed to start server"
+            stop_mock_cc_anthropic_server
+            unset ANTHROPIC_API_KEY
+            return 1
+        fi
+
+        local all_pass=true
+
+        rm -f "$MOCK_CC_DIAG_FILE"
+
+        # Send Anthropic-format request with cache_control breakpoints
+        local _resp _code
+        _resp=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{
+  "model": "claude-3.5",
+  "max_tokens": 100,
+  "system": [{"type":"text","text":"You are helpful","cache_control":{"type":"ephemeral"}}],
+  "messages": [{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}]
+}' \
+            "$MESSAGES_URL" 2>/dev/null) || _resp="ERROR"
+        _code=$(printf '%s' "$_resp" | tail -1)
+
+        if [ "$_code" != "200" ]; then
+            log_fail "Expected 200, got $_code"
+            all_pass=false
+        else
+            if [ -f "$MOCK_CC_DIAG_FILE" ]; then
+                local _sys_cc _content_cc
+                _sys_cc=$(python3 -c "import json; d=json.load(open('$MOCK_CC_DIAG_FILE')); print(d.get('system_cache_control',False))" 2>/dev/null || echo "False")
+                _content_cc=$(python3 -c "import json; d=json.load(open('$MOCK_CC_DIAG_FILE')); print(d.get('content_cache_control',False))" 2>/dev/null || echo "False")
+
+                if [ "$_sys_cc" = "True" ]; then
+                    log_pass "Anth→Anth: system block cache_control preserved"
+                else
+                    log_fail "Anth→Anth: system block cache_control DROPPED"
+                    all_pass=false
+                fi
+
+                if [ "$_content_cc" = "True" ]; then
+                    log_pass "Anth→Anth: content block cache_control preserved"
+                else
+                    log_fail "Anth→Anth: content block cache_control DROPPED"
+                    all_pass=false
+                fi
+            else
+                log_fail "Mock diagnostics file not found"
+                all_pass=false
+            fi
+        fi
+
+        stop_server
+        stop_mock_cc_anthropic_server
+        unset ANTHROPIC_API_KEY
+        trap cleanup EXIT
+        return $([ "$all_pass" = true ] && echo 0 || echo 1)
+    }
+
     # ── OpenAI → Anthropic Translation ────────────────────────────────────
     # These tests spin up a lightweight Python HTTP server that mimics an
     # Anthropic upstream. It validates that incoming requests are in
@@ -1811,6 +2319,13 @@ print(d.get('error',{}).get('message',''))
         test_anthropic_rejects_non_json
         test_anthropic_error_envelope_shape
         test_anthropic_openapi_documents_endpoint
+
+        # ── Claude Code Compat (claude-code-compat plan) ──
+        test_cc_models_endpoint_shape
+        test_cc_models_unauthenticated
+        test_cc_header_forwarding
+        test_cc_oai_to_anth_cache_control
+        test_cc_anth_to_anth_cache_control_passthrough
 
         # ── OpenAI → Anthropic Translation (translate-openai-to-anthropic plan) ──
         test_o2a_translation_non_streaming

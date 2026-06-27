@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::panic;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::{Body, Bytes},
@@ -462,12 +462,18 @@ ENVIRONMENT:
         route_keys.sort();
         for key in route_keys {
             let entry = &routing_map[key];
-            info!("Route {} -> {} @ {}", key, entry.model, entry.endpoint);
+            info!(
+                "Route {} -> {} @ {}",
+                key,
+                entry.primary().model,
+                entry.primary().endpoint
+            );
         }
         if !routing_map.contains_key("DEFAULT") {
             info!(
                 "Route DEFAULT -> {} @ {}",
-                fallback_entry.model, fallback_entry.endpoint
+                fallback_entry.primary().model,
+                fallback_entry.primary().endpoint
             );
         }
 
@@ -769,14 +775,19 @@ async fn count_tokens_handler(body: Bytes) -> impl IntoResponse {
 /// Check if the request matches a known trivial probe pattern and return
 /// a canned response, avoiding the full classification + upstream round-trip.
 /// Returns `None` if the request should proceed normally.
-fn try_optimize_request(body: &[u8]) -> Option<Response> {
+fn try_optimize_request(body: &[u8], is_anthropic: bool) -> Option<Response> {
+    // Skip deserialization entirely for large bodies — probe patterns
+    // only match when body <512 bytes, so this avoids wasted parse work.
+    if body.len() >= 512 {
+        return None;
+    }
     let val: serde_json::Value = serde_json::from_slice(body).ok()?;
     let messages = val.get("messages")?.as_array()?;
 
     // Empty messages array → return empty assistant response
     if messages.is_empty() {
         debug!("Request optimization: empty messages array, returning canned response");
-        let resp_body = if val.get("anthropic_version").is_some() {
+        let resp_body = if is_anthropic {
             serde_json::json!({
                 "id": "msg_optimized",
                 "type": "message",
@@ -802,8 +813,8 @@ fn try_optimize_request(body: &[u8]) -> Option<Response> {
     }
 
     // Single-message known probe patterns — only match when the entire
-    // body is small (<512 bytes) to avoid false positives on real requests.
-    if messages.len() == 1 && body.len() < 512 {
+    // Single-message probe patterns. Skip streaming requests — real probes never stream.
+    if messages.len() == 1 && val.get("stream") != Some(&serde_json::Value::Bool(true)) {
         let content = messages[0].get("content")?;
         let text = if let Some(s) = content.as_str() {
             s.trim().to_lowercase()
@@ -822,7 +833,7 @@ fn try_optimize_request(body: &[u8]) -> Option<Response> {
                 "Request optimization: matched probe pattern '{}', returning canned response",
                 text
             );
-            let resp_body = if val.get("anthropic_version").is_some() {
+            let resp_body = if is_anthropic {
                 serde_json::json!({
                     "id": "msg_optimized",
                     "type": "message",
@@ -851,29 +862,156 @@ fn try_optimize_request(body: &[u8]) -> Option<Response> {
     None
 }
 
-/// GET /v1/models — static model list for Claude Code gateway discovery.
-/// Returns a minimal OpenAI-compatible /v1/models response with known
-/// Claude model identifiers. Placed outside the auth layer so Claude Code
-/// can probe before authenticating (matches its expectation for gateway
-/// model discovery with `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`).
+/// GET /v1/models — model list for Claude Code gateway discovery.
+///
+/// Returns Anthropic-shape entries (each carrying `display_name` and
+/// `type: "model"`) so Claude Code's model picker — gated behind
+/// `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` — shows friendly names
+/// instead of raw IDs. Each entry also retains the OpenAI fields
+/// (`object: "model"`, `owned_by`, `created`) so OpenAI clients hitting the
+/// same endpoint are unaffected; a superset avoids content-negotiation
+/// branching. IDs MUST begin with `claude` or `anthropic` to pass Claude
+/// Code's discovery filter. Placed outside the auth layer so Claude Code can
+/// probe before authenticating.
 async fn models_handler() -> impl IntoResponse {
     debug!("GET /v1/models request received");
-    static MODELS_JSON: &str = r#"{"data":[{"id":"claude-sonnet-4-6-20250514","object":"model","created":1700000000,"owned_by":"anthropic"},{"id":"claude-haiku-4-5-20250514","object":"model","created":1700000000,"owned_by":"anthropic"},{"id":"claude-opus-4-20250514","object":"model","created":1700000000,"owned_by":"anthropic"}],"object":"list","has_more":false}"#;
-    let mut resp = Response::new(Body::from(MODELS_JSON));
-    *resp.status_mut() = StatusCode::OK;
-    resp.headers_mut().insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static("application/json"),
-    );
-    resp
+    let body = serde_json::json!({
+        "object": "list",
+        "has_more": false,
+        "data": [
+            {
+                "type": "model",
+                "object": "model",
+                "id": "claude-sonnet-4-6-20250514",
+                "display_name": "Claude Sonnet 4.6",
+                "created_at": "2025-05-14T00:00:00Z",
+                "created": 1700000000,
+                "owned_by": "anthropic"
+            },
+            {
+                "type": "model",
+                "object": "model",
+                "id": "claude-haiku-4-5-20250514",
+                "display_name": "Claude Haiku 4.5",
+                "created_at": "2025-05-14T00:00:00Z",
+                "created": 1700000000,
+                "owned_by": "anthropic"
+            },
+            {
+                "type": "model",
+                "object": "model",
+                "id": "claude-opus-4-20250514",
+                "display_name": "Claude Opus 4",
+                "created_at": "2025-05-14T00:00:00Z",
+                "created": 1700000000,
+                "owned_by": "anthropic"
+            }
+        ]
+    });
+    json_response(StatusCode::OK, body.to_string())
 }
 
+/// Captured token usage from an upstream response, used to populate the token
+/// fields of an InferenceRecord. Fields hold the upstream's raw values; the
+/// extraction helpers normalize OpenAI's `cached_tokens` into the Anthropic
+/// `cache_read` shape so the record is protocol-agnostic.
+#[derive(Clone, Default)]
+struct UsageBreakdown {
+    input_tokens: i32,
+    output_tokens: i32,
+    cache_read_tokens: i32,
+    cache_creation_tokens: i32,
+}
+
+/// Extract a `UsageBreakdown` from an Anthropic-shaped response body's
+/// `usage` object. Returns `None` when the body carries no usage (e.g.
+/// non-success or untranslated error bodies). Cache fields default to 0 when
+/// the upstream omits them (no caching active).
+fn extract_anthropic_usage(body: &serde_json::Value) -> Option<UsageBreakdown> {
+    let usage = body.get("usage")?;
+    Some(UsageBreakdown {
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32,
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32,
+        cache_read_tokens: usage
+            .get("cache_read_input_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32,
+        cache_creation_tokens: usage
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32,
+    })
+}
+
+/// Extract a `UsageBreakdown` from an OpenAI-shaped response body's `usage`
+/// object. OpenAI reports cache hits as
+/// `usage.prompt_tokens_details.cached_tokens` (a subset of `prompt_tokens`);
+/// we map that to `cache_read_tokens` and derive the non-cached `input_tokens`
+/// so the record matches Anthropic semantics. `cache_creation_tokens` is 0
+/// (OpenAI has no creation concept).
+fn extract_openai_usage(body: &serde_json::Value) -> Option<UsageBreakdown> {
+    let usage = body.get("usage")?;
+    let prompt = usage
+        .get("prompt_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let cached = usage
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    Some(UsageBreakdown {
+        input_tokens: (prompt - cached) as i32,
+        output_tokens: usage
+            .get("completion_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32,
+        cache_read_tokens: cached as i32,
+        cache_creation_tokens: 0,
+    })
+}
+
+/// Parse a response body string and extract usage in the protocol the client
+/// sees: `anthropic_shape = true` for `/v1/messages` traffic (Anthropic usage),
+/// `false` for `/v1/chat/completions` traffic (OpenAI usage). Returns `None`
+/// when the body is not valid JSON or carries no usage object — callers log
+/// without usage in that case.
+fn parse_usage_from_body(body: &str, anthropic_shape: bool) -> Option<UsageBreakdown> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    if anthropic_shape {
+        extract_anthropic_usage(&v)
+    } else {
+        extract_openai_usage(&v)
+    }
+}
+
+/// Extract the Claude Code session id (`x-claude-code-session-id`) from the
+/// forwarded-header set collected at the handler entry. Returns `None` when
+/// the client did not send it.
+fn session_id_from_forward(forward_headers: &[(String, String)]) -> Option<&str> {
+    forward_headers
+        .iter()
+        .find(|(n, _)| n == "x-claude-code-session-id")
+        .map(|(_, v)| v.as_str())
+}
 
 /// Shared logging helper. Builds the inference record from the pre-extracted
 /// `prompt` and enqueues a fire-and-forget DB write. Callers must extract the
 /// prompt themselves (via `persistence::extract_last_user_message` for OpenAI
 /// traffic or `persistence::extract_last_user_message_anthropic` for Anthropic
 /// traffic) so the persistence log records the same prompt the classifier saw.
+///
+/// This 8-argument variant records NO token usage and NO session attribution
+/// (the new InferenceRecord fields are left `None`). It is the right call for
+/// error / boundary paths where no upstream usage is available. Success paths
+/// that have parsed the response body should call `log_classification_with_usage`
+/// instead so the token counts and Claude Code session id are captured.
 #[allow(clippy::too_many_arguments)]
 fn log_classification(
     state: &AppState,
@@ -882,6 +1020,67 @@ fn log_classification(
     prompt: &str,
     start: std::time::Instant,
     log_status: &str,
+    provider_attempts: u8,
+    final_provider: &str,
+) {
+    enqueue_inference_record(
+        state,
+        classification,
+        prompt,
+        start,
+        log_status,
+        provider_attempts,
+        final_provider,
+        None,
+        None,
+    );
+}
+
+/// Success-path logging variant that captures token usage and the Claude Code
+/// session id into the InferenceRecord. Use this once the upstream response
+/// body has been parsed (non-streaming) or the stream has closed with a
+/// terminal usage chunk (streaming). `usage` / `session_id` may be `None`
+/// when that datum was not available for this request.
+#[allow(clippy::too_many_arguments)]
+fn log_classification_with_usage(
+    state: &AppState,
+    classification: &intent_classifier::ClassificationResult,
+    _body_str: &str,
+    prompt: &str,
+    start: std::time::Instant,
+    log_status: &str,
+    provider_attempts: u8,
+    final_provider: &str,
+    usage: Option<&UsageBreakdown>,
+    session_id: Option<&str>,
+) {
+    enqueue_inference_record(
+        state,
+        classification,
+        prompt,
+        start,
+        log_status,
+        provider_attempts,
+        final_provider,
+        usage,
+        session_id,
+    );
+}
+
+/// Build the InferenceRecord (with optional token usage + session id) and
+/// enqueue the fire-and-forget DB write. Shared by `log_classification` and
+/// `log_classification_with_usage` so the two public entry points cannot drift.
+#[allow(clippy::too_many_arguments)]
+fn enqueue_inference_record(
+    state: &AppState,
+    classification: &intent_classifier::ClassificationResult,
+    prompt: &str,
+    start: std::time::Instant,
+    log_status: &str,
+    provider_attempts: u8,
+    final_provider: &str,
+    usage: Option<&UsageBreakdown>,
+    session_id: Option<&str>,
 ) {
     if let Some(persistence) = &state.persistence {
         let duration_ms = start.elapsed().as_millis() as i32;
@@ -893,6 +1092,15 @@ fn log_classification(
         } else {
             Some(prompt.chars().count() as i32)
         };
+        let (input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) = match usage {
+            Some(u) => (
+                Some(u.input_tokens),
+                Some(u.output_tokens),
+                Some(u.cache_read_tokens),
+                Some(u.cache_creation_tokens),
+            ),
+            None => (None, None, None, None),
+        };
         let record = persistence::InferenceRecord {
             request_id: uuid::Uuid::new_v4(),
             status: log_status.to_string(),
@@ -902,6 +1110,13 @@ fn log_classification(
             prompt_snippet: snippet,
             prompt_char_count,
             created_at: chrono::Utc::now(),
+            provider_attempts,
+            final_provider: final_provider.to_string(),
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            client_session_id: session_id.map(|s| s.to_string()),
         };
         persistence::log_inference(
             persistence.backend.clone(),
@@ -964,7 +1179,16 @@ async fn classify_and_log(
     })
     .to_string();
     if let Some(log_status) = log_status {
-        log_classification(state, &classification, body_str, &prompt, start, log_status);
+        log_classification(
+            state,
+            &classification,
+            body_str,
+            &prompt,
+            start,
+            log_status,
+            1,
+            "",
+        );
     }
 
     json_response(StatusCode::OK, response_body)
@@ -1017,12 +1241,53 @@ fn classification_only_json(result: &intent_classifier::ClassificationResult) ->
     .to_string()
 }
 
+/// Returns true when a send error or upstream response indicates the request
+/// can be retried on another provider: connection errors, timeouts, 5xx, 429.
+fn is_retryable_error(result: &Result<reqwest::Response, reqwest::Error>) -> bool {
+    match result {
+        Err(e) => e.is_connect() || e.is_timeout(),
+        Ok(response) => {
+            let status = response.status().as_u16();
+            status == 429 || (500..=599).contains(&status)
+        }
+    }
+}
+
+/// Collect inbound headers that must be forwarded to Anthropic upstreams as an
+/// open list: any header whose lower-cased name begins with `anthropic-` or
+/// `x-claude-code-`. This is the single extraction point both proxy handlers
+/// reuse before threading the result into `auth_headers_for` / upstream
+/// construction.
+///
+/// SECURITY INVARIANT: never include `authorization` or `x-api-key`. Those
+/// carry the proxy's own inbound credential (consumed by the auth middleware)
+/// and forwarding them would let a client overwrite the resolved upstream key.
+/// The prefix allowlist already excludes them — keep the prefixes restrictive
+/// (do not broaden to a blind copy of all inbound headers). When the same name
+/// appears multiple times, the first value wins so downstream emission stays
+/// deterministic.
+fn collect_forward_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, value) in headers.iter() {
+        let name_lower = name.as_str();
+        if (name_lower.starts_with("anthropic-") || name_lower.starts_with("x-claude-code-"))
+            && !out.iter().any(|(n, _)| *n == name_lower)
+        {
+            if let Ok(v) = value.to_str() {
+                out.push((name_lower.to_string(), v.to_string()));
+            }
+        }
+    }
+    out
+}
+
 fn build_upstream_request(
     client: &reqwest::Client,
-    classification: &intent_classifier::ClassificationResult,
+    provider: &routing::ProviderEntry,
     body: &Bytes,
     api_key: &str,
     auth_providers: &[config::AuthProviderConfig],
+    forward_headers: &[(String, String)],
 ) -> Result<(bool, reqwest::RequestBuilder), String> {
     let mut req_body: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| format!("invalid JSON body: {e}"))?;
@@ -1035,7 +1300,7 @@ fn build_upstream_request(
     if let serde_json::Value::Object(map) = &mut req_body {
         map.insert(
             "model".to_string(),
-            serde_json::Value::String(classification.model.clone()),
+            serde_json::Value::String(provider.model.clone()),
         );
     } else {
         return Err("request body must be a JSON object".to_string());
@@ -1043,15 +1308,31 @@ fn build_upstream_request(
 
     let modified_body = serde_json::to_vec(&req_body).unwrap_or_else(|_| body.to_vec());
 
-    let auth_headers =
-        intent_classifier::auth_headers_for(auth_providers, &classification.provider_type, api_key);
+    // `auth_headers_for` is the single emission point for the full upstream
+    // header set: it resolves the credential AND, for anthropic providers,
+    // appends the client-forwarded `anthropic-*` / `x-claude-code-*` headers
+    // (with a client `anthropic-version` preferred over the default). Applying
+    // only its return value here — instead of also forwarding client headers
+    // directly — avoids duplicate headers and keeps one decision point keyed
+    // on provider_type. The auth credential is always applied, and
+    // `collect_forward_headers` excludes `authorization` / `x-api-key`, so a
+    // client can never overwrite the resolved upstream key.
+    let auth_headers = intent_classifier::auth_headers_for(
+        auth_providers,
+        &provider.provider_type,
+        api_key,
+        forward_headers,
+    );
 
     let mut req = client
-        .post(&classification.endpoint)
+        .post(&provider.endpoint)
         .header(header::CONTENT_TYPE, "application/json")
         .body(modified_body);
     for (name, value) in &auth_headers {
         req = req.header(name.as_str(), value.as_str());
+    }
+    if let Some(ms) = provider.timeout_ms {
+        req = req.timeout(Duration::from_millis(ms));
     }
 
     Ok((client_wants_stream, req))
@@ -1141,6 +1422,7 @@ async fn handle_buffered_response(
 /// `prompt` is the pre-extracted user prompt for the persistence log (passed
 /// explicitly so callers can use protocol-specific extractors — OpenAI vs.
 /// Anthropic — without re-parsing the body).
+#[allow(clippy::too_many_arguments)]
 fn handle_streaming_response(
     state: Arc<AppState>,
     classification: intent_classifier::ClassificationResult,
@@ -1149,6 +1431,9 @@ fn handle_streaming_response(
     start: Instant,
     byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
     keepalive_interval_secs: u64,
+    provider_attempts: u8,
+    final_provider: String,
+    session_id: Option<String>,
 ) -> Response {
     let channel_capacity = state.streaming_channel_capacity;
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(channel_capacity);
@@ -1160,6 +1445,8 @@ fn handle_streaming_response(
         &prompt,
         start,
         "streaming",
+        provider_attempts,
+        &final_provider,
     );
 
     tokio::spawn(async move {
@@ -1199,13 +1486,17 @@ fn handle_streaming_response(
                 }
             }
         }
-        log_classification(
+        log_classification_with_usage(
             &state,
             &classification,
             &body_str,
             &prompt,
             start,
             stream_status,
+            provider_attempts,
+            &final_provider,
+            None::<&UsageBreakdown>,
+            session_id.as_deref(),
         );
     });
 
@@ -1356,6 +1647,7 @@ async fn handle_streaming_error_with_transform(
 /// Handle a streaming response from an Anthropic upstream by translating
 /// each Anthropic SSE event into one or more OpenAI SSE chunks before
 /// forwarding to the client.
+#[allow(clippy::too_many_arguments)]
 fn handle_anthropic_streaming_response(
     state: Arc<AppState>,
     classification: intent_classifier::ClassificationResult,
@@ -1364,6 +1656,9 @@ fn handle_anthropic_streaming_response(
     start: Instant,
     byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
     keepalive_interval_secs: u64,
+    provider_attempts: u8,
+    final_provider: String,
+    session_id: Option<String>,
 ) -> Response {
     let channel_capacity = state.streaming_channel_capacity;
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(channel_capacity);
@@ -1375,6 +1670,8 @@ fn handle_anthropic_streaming_response(
         &prompt,
         start,
         "streaming",
+        provider_attempts,
+        &final_provider,
     );
 
     tokio::spawn(async move {
@@ -1455,13 +1752,34 @@ fn handle_anthropic_streaming_response(
                 }
             }
         }
-        log_classification(
+        // Finalize the inference record at stream close with the usage
+        // accumulated across message_start/message_delta (Anthropic splits
+        // usage across both events). Only emit token fields when a
+        // message_start was actually seen — otherwise the stream errored
+        // before the upstream produced any usage and a zero-usage row would be
+        // misleading (None is the correct "unknown" signal).
+        let usage = if translate_state.started {
+            let (inp, out, cr, cc) = translate_state.collected_usage();
+            Some(UsageBreakdown {
+                input_tokens: inp as i32,
+                output_tokens: out as i32,
+                cache_read_tokens: cr as i32,
+                cache_creation_tokens: cc as i32,
+            })
+        } else {
+            None
+        };
+        log_classification_with_usage(
             &state,
             &classification,
             &body_str,
             &prompt,
             start,
             stream_status,
+            provider_attempts,
+            &final_provider,
+            usage.as_ref(),
+            session_id.as_deref(),
         );
     });
 
@@ -1600,14 +1918,21 @@ async fn translate_openai_buffered_to_anthropic(
                 let body_str = serde_json::to_string(&translated).unwrap_or(upstream_body);
                 (StatusCode::OK, body_str)
             }
-            Err(_) => (StatusCode::OK, upstream_body),
+            Err(e) => {
+                warn!("OAI→Anthropic response translation failed: {e}");
+                (StatusCode::OK, upstream_body)
+            }
         },
-        Err(_) => (StatusCode::OK, upstream_body),
+        Err(e) => {
+            warn!("OAI→Anthropic response JSON parse failed: {e}");
+            (StatusCode::OK, upstream_body)
+        }
     }
 }
 
 /// Stream handler that translates OpenAI SSE chunks to Anthropic SSE events.
 /// Used by messages_handler when the upstream speaks OpenAI protocol and the client requested streaming.
+#[allow(clippy::too_many_arguments)]
 fn handle_translating_anthropic_stream(
     state: Arc<AppState>,
     classification: intent_classifier::ClassificationResult,
@@ -1616,6 +1941,9 @@ fn handle_translating_anthropic_stream(
     start: Instant,
     byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
     keepalive_interval_secs: u64,
+    provider_attempts: u8,
+    final_provider: String,
+    session_id: Option<String>,
 ) -> Response {
     let channel_capacity = state.streaming_channel_capacity;
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(channel_capacity);
@@ -1627,6 +1955,8 @@ fn handle_translating_anthropic_stream(
         &prompt,
         start,
         "streaming",
+        provider_attempts,
+        &final_provider,
     );
 
     tokio::spawn(async move {
@@ -1705,13 +2035,32 @@ fn handle_translating_anthropic_stream(
                 }
             }
         }
-        log_classification(
+        // Finalize the inference record at stream close with the usage
+        // accumulated from the terminal OpenAI usage chunk. Only emit token
+        // fields when the stream actually started — otherwise it errored
+        // before the upstream produced any usage.
+        let usage = if translate_state.message_started {
+            let (inp, out, cr, cc) = translate_state.collected_usage();
+            Some(UsageBreakdown {
+                input_tokens: inp as i32,
+                output_tokens: out as i32,
+                cache_read_tokens: cr as i32,
+                cache_creation_tokens: cc as i32,
+            })
+        } else {
+            None
+        };
+        log_classification_with_usage(
             &state,
             &classification,
             &body_str,
             &prompt,
             start,
             stream_status,
+            provider_attempts,
+            &final_provider,
+            usage.as_ref(),
+            session_id.as_deref(),
         );
     });
 
@@ -1771,10 +2120,19 @@ async fn completion_handler(
         }
     };
 
-    // Request optimization: short-circuit known trivial probes before
-    // classification and upstream routing.
-    if let Some(response) = try_optimize_request(&body) {
-        return response;
+    // Capture Claude Code / Anthropic client headers once; threaded into every
+    // upstream attempt so beta-gated features and session attribution reach the
+    // upstream. See `collect_forward_headers` for the security invariant.
+    let forward_headers = collect_forward_headers(&headers);
+    // Claude Code session id for per-request attribution in the inference log.
+    let session_id = session_id_from_forward(&forward_headers);
+
+    // Request optimization: skip if explicit routing headers are present —
+    // explicit directives should take precedence over probe optimization.
+    if headers.get("x-cerebrum-category").is_none() && headers.get("x-cerebrum-model").is_none() {
+        if let Some(response) = try_optimize_request(&body, false) {
+            return response;
+        }
     }
 
     let x_category = headers
@@ -1802,10 +2160,8 @@ async fn completion_handler(
             Some(entry) => intent_classifier::ClassificationResult {
                 category: category.clone(),
                 model: model.clone(),
-                endpoint: entry.endpoint.clone(),
                 tier: intent_classifier::ClassificationTier::Fallback,
-                provider_type: entry.provider_type.clone(),
-                api_key_env: entry.api_key_env.clone(),
+                providers: entry.providers.clone(),
             },
             None => {
                 warn!("X-Cerebrum-Category '{category}' not found in routing configuration; degrading to classification JSON");
@@ -1814,7 +2170,7 @@ async fn completion_handler(
                     None => intent_classifier::ClassificationResult::fallback(),
                 };
                 let response_body = classification_only_json(&fallback);
-                log_classification(&state, &fallback, &body_str, "", start, "ok");
+                log_classification(&state, &fallback, &body_str, "", start, "ok", 1, "");
                 return json_response(StatusCode::OK, response_body);
             }
         }
@@ -1840,127 +2196,91 @@ async fn completion_handler(
         Some(c) => c,
         None => {
             let response_body = classification_only_json(&classification);
-            log_classification(&state, &classification, &body_str, &prompt, start, "ok");
+            log_classification(
+                &state,
+                &classification,
+                &body_str,
+                &prompt,
+                start,
+                "ok",
+                1,
+                "",
+            );
             return json_response(StatusCode::OK, response_body);
         }
     };
 
-    let api_key = match &classification.api_key_env {
-        Some(env_name) => match std::env::var(env_name) {
-            Ok(key) if !key.is_empty() => key,
-            _ => {
-                warn!("upstream API key env var '{env_name}' is missing or empty; degrading to classification-only response");
-                log_classification(&state, &classification, &body_str, &prompt, start, "ok");
-                return json_response(StatusCode::OK, classification_only_json(&classification));
-            }
-        },
-        None => {
-            warn!("no api_key_env configured for category '{}'; degrading to classification-only response", classification.category);
-            let response_body = classification_only_json(&classification);
-            log_classification(&state, &classification, &body_str, &prompt, start, "ok");
-            return json_response(StatusCode::OK, response_body);
-        }
-    };
+    let mut last_error_response: Option<Response> = None;
+    let total_providers = classification.providers.len();
 
-    if classification.endpoint.is_empty() {
-        log_classification(
-            &state,
-            &classification,
-            &body_str,
-            &prompt,
-            start,
-            "upstream_error",
-        );
-        #[cfg(feature = "otel")]
-        rm.set_status(StatusCode::BAD_GATEWAY);
-        return json_response(
-            StatusCode::BAD_GATEWAY,
-            upstream_error_json(502, "no endpoint configured"),
-        );
-    }
+    let providers_clone = classification.providers.clone();
+    for (idx, provider) in providers_clone.iter().enumerate() {
+        let is_last = idx + 1 >= total_providers;
 
-    // ── Anthropic upstream: translate OpenAI → Anthropic ──────────────
-    // When the routed upstream speaks Anthropic protocol, translate the
-    // OpenAI request body to Anthropic Messages format before forwarding,
-    // and translate the response (including SSE streaming) back to OpenAI
-    // format before returning to the client.
-    if classification.provider_type == "anthropic" {
-        let parsed_body: serde_json::Value = match serde_json::from_slice(&body) {
-            Ok(v) => v,
-            Err(e) => {
-                log_classification(
-                    &state,
-                    &classification,
-                    &body_str,
-                    &prompt,
-                    start,
-                    "bad_request",
+        // Resolve API key for this provider
+        let api_key = match &provider.api_key_env {
+            Some(env_name) => match std::env::var(env_name) {
+                Ok(key) if !key.is_empty() => key,
+                _ => {
+                    warn!(
+                        "API key env var '{:?}' is missing or empty for provider {}; cascading",
+                        provider.api_key_env, provider.model
+                    );
+                    if is_last {
+                        log_classification(
+                            &state,
+                            &classification,
+                            &body_str,
+                            &prompt,
+                            start,
+                            "ok",
+                            idx as u8 + 1,
+                            &provider.model,
+                        );
+                        return json_response(
+                            StatusCode::OK,
+                            classification_only_json(&classification),
+                        );
+                    }
+                    last_error_response = Some(json_response(
+                        StatusCode::OK,
+                        classification_only_json(&classification),
+                    ));
+                    continue;
+                }
+            },
+            None => {
+                warn!(
+                    "no api_key_env configured for provider {}; cascading",
+                    provider.model
                 );
-                #[cfg(feature = "otel")]
-                rm.set_status(StatusCode::BAD_REQUEST);
-                return json_response(
-                    StatusCode::BAD_REQUEST,
-                    upstream_error_json(400, &format!("invalid JSON body: {e}")),
-                );
-            }
-        };
-
-        let anthropic_body = match protocol_translation::translate_request(&parsed_body) {
-            Ok(b) => b,
-            Err(e) => {
-                log_classification(
-                    &state,
-                    &classification,
-                    &body_str,
-                    &prompt,
-                    start,
-                    "bad_request",
-                );
-                #[cfg(feature = "otel")]
-                rm.set_status(StatusCode::BAD_REQUEST);
-                return json_response(StatusCode::BAD_REQUEST, upstream_error_json(400, &e));
-            }
-        };
-
-        let client_wants_stream = parsed_body
-            .get("stream")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let anthropic_bytes = Bytes::from(serde_json::to_vec(&anthropic_body).unwrap_or_default());
-
-        // Build upstream request without model override — the translated
-        // body already carries the correct model from the routing config.
-        let auth_headers = intent_classifier::auth_headers_for(
-            &state.auth_providers,
-            &classification.provider_type,
-            &api_key,
-        );
-        let upstream_req = client
-            .post(&classification.endpoint)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(anthropic_bytes);
-        let upstream_req = auth_headers
-            .iter()
-            .fold(upstream_req, |req, (name, value)| {
-                req.header(name.as_str(), value.as_str())
-            });
-
-        #[cfg_attr(not(feature = "otel"), allow(unused_variables))]
-        let upstream_start = std::time::Instant::now();
-        let upstream_response = match upstream_req.send().await {
-            Ok(resp) => resp,
-            Err(e) => {
-                #[cfg(feature = "otel")]
-                if let Some(ref metrics) = state.metrics {
-                    metrics.upstream_duration_seconds.record(
-                        upstream_start.elapsed().as_secs_f64(),
-                        &[
-                            KeyValue::new("provider", classification.provider_type.clone()),
-                            KeyValue::new("status", "502"),
-                        ],
+                if is_last {
+                    log_classification(
+                        &state,
+                        &classification,
+                        &body_str,
+                        &prompt,
+                        start,
+                        "ok",
+                        idx as u8 + 1,
+                        &provider.model,
+                    );
+                    return json_response(
+                        StatusCode::OK,
+                        classification_only_json(&classification),
                     );
                 }
+                last_error_response = Some(json_response(
+                    StatusCode::OK,
+                    classification_only_json(&classification),
+                ));
+                continue;
+            }
+        };
+
+        if provider.endpoint.is_empty() {
+            warn!("empty endpoint for provider {}; cascading", provider.model);
+            if is_last {
                 log_classification(
                     &state,
                     &classification,
@@ -1968,209 +2288,517 @@ async fn completion_handler(
                     &prompt,
                     start,
                     "upstream_error",
+                    idx as u8 + 1,
+                    &provider.model,
                 );
                 #[cfg(feature = "otel")]
                 rm.set_status(StatusCode::BAD_GATEWAY);
                 return json_response(
                     StatusCode::BAD_GATEWAY,
-                    upstream_error_json(502, &e.to_string()),
+                    upstream_error_json(502, "no endpoint configured"),
                 );
             }
-        };
-
-        #[cfg(feature = "otel")]
-        if let Some(ref metrics) = state.metrics {
-            metrics.upstream_duration_seconds.record(
-                upstream_start.elapsed().as_secs_f64(),
-                &[
-                    KeyValue::new("provider", classification.provider_type.clone()),
-                    KeyValue::new("status", upstream_response.status().as_u16().to_string()),
-                ],
-            );
-        }
-
-        if client_wants_stream {
-            if !upstream_response.status().is_success() {
-                let resp = handle_anthropic_streaming_error(upstream_response).await;
-                log_classification(
-                    &state,
-                    &classification,
-                    &body_str,
-                    &prompt,
-                    start,
-                    "upstream_error",
-                );
-                #[cfg(feature = "otel")]
-                rm.set_status(resp.status());
-                return resp;
-            }
-
-            let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
-
-            return handle_anthropic_streaming_response(
-                state,
-                classification,
-                body_str,
-                prompt,
-                start,
-                upstream_response.bytes_stream(),
-                keepalive_interval_secs,
-            );
-        }
-
-        let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
-        let (status, response_body) =
-            translate_anthropic_buffered_response(upstream_response, max_upstream_body_bytes).await;
-        let log_status = if status == StatusCode::OK {
-            "ok"
-        } else {
-            "upstream_error"
-        };
-        log_classification(
-            &state,
-            &classification,
-            &body_str,
-            &prompt,
-            start,
-            log_status,
-        );
-
-        #[cfg(feature = "otel")]
-        rm.set_status(status);
-
-        return json_response(status, response_body);
-    }
-
-    // ── OpenAI-compatible upstream: pass through ──────────────────────
-    // NIM sanitization: strip fields that NVIDIA NIM rejects
-    let body = if classification.provider_type == "nvidia_nim" {
-        match serde_json::from_slice::<serde_json::Value>(&body) {
-            Ok(mut v) => {
-                sanitize_for_nim(&mut v);
-                Bytes::from(serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec()))
-            }
-            Err(_) => body,
-        }
-    } else {
-        body
-    };
-
-    let (client_wants_stream, upstream_req) = match build_upstream_request(
-        client,
-        &classification,
-        &body,
-        &api_key,
-        &state.auth_providers,
-    ) {
-        Err(msg) => {
-            log_classification(
-                &state,
-                &classification,
-                &body_str,
-                &prompt,
-                start,
-                "bad_request",
-            );
-            #[cfg(feature = "otel")]
-            rm.set_status(StatusCode::BAD_REQUEST);
-            return json_response(StatusCode::BAD_REQUEST, upstream_error_json(400, &msg));
-        }
-        Ok(r) => r,
-    };
-
-    #[cfg_attr(not(feature = "otel"), allow(unused_variables))]
-    let upstream_start = std::time::Instant::now();
-    let upstream_response = match upstream_req.send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            #[cfg(feature = "otel")]
-            if let Some(ref metrics) = state.metrics {
-                metrics.upstream_duration_seconds.record(
-                    upstream_start.elapsed().as_secs_f64(),
-                    &[
-                        KeyValue::new("provider", classification.provider_type.clone()),
-                        KeyValue::new("status", "502"),
-                    ],
-                );
-            }
-            log_classification(
-                &state,
-                &classification,
-                &body_str,
-                &prompt,
-                start,
-                "upstream_error",
-            );
-            #[cfg(feature = "otel")]
-            rm.set_status(StatusCode::BAD_GATEWAY);
-            return json_response(
+            last_error_response = Some(json_response(
                 StatusCode::BAD_GATEWAY,
-                upstream_error_json(502, &e.to_string()),
-            );
-        }
-    };
-
-    #[cfg(feature = "otel")]
-    if let Some(ref metrics) = state.metrics {
-        metrics.upstream_duration_seconds.record(
-            upstream_start.elapsed().as_secs_f64(),
-            &[
-                KeyValue::new("provider", classification.provider_type.clone()),
-                KeyValue::new("status", upstream_response.status().as_u16().to_string()),
-            ],
-        );
-    }
-
-    if client_wants_stream {
-        if !upstream_response.status().is_success() {
-            let resp = handle_streaming_error(upstream_response).await;
-            log_classification(
-                &state,
-                &classification,
-                &body_str,
-                &prompt,
-                start,
-                "upstream_error",
-            );
-            #[cfg(feature = "otel")]
-            rm.set_status(resp.status());
-            return resp;
+                upstream_error_json(502, "no endpoint configured"),
+            ));
+            continue;
         }
 
-        let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
+        // ── Anthropic upstream: translate OpenAI → Anthropic ──────────
+        if provider.provider_type == "anthropic" {
+            let parsed_body: serde_json::Value = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(e) => {
+                    log_classification(
+                        &state,
+                        &classification,
+                        &body_str,
+                        &prompt,
+                        start,
+                        "bad_request",
+                        idx as u8 + 1,
+                        &provider.model,
+                    );
+                    #[cfg(feature = "otel")]
+                    rm.set_status(StatusCode::BAD_REQUEST);
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        upstream_error_json(400, &format!("invalid JSON body: {e}")),
+                    );
+                }
+            };
 
-        return handle_streaming_response(
-            state,
-            classification,
-            body_str,
-            prompt,
-            start,
-            upstream_response.bytes_stream(),
-            keepalive_interval_secs,
-        );
+            let anthropic_body = match protocol_translation::translate_request(&parsed_body) {
+                Ok(b) => b,
+                Err(e) => {
+                    log_classification(
+                        &state,
+                        &classification,
+                        &body_str,
+                        &prompt,
+                        start,
+                        "bad_request",
+                        idx as u8 + 1,
+                        &provider.model,
+                    );
+                    #[cfg(feature = "otel")]
+                    rm.set_status(StatusCode::BAD_REQUEST);
+                    return json_response(StatusCode::BAD_REQUEST, upstream_error_json(400, &e));
+                }
+            };
+
+            let client_wants_stream = parsed_body
+                .get("stream")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let anthropic_bytes =
+                Bytes::from(serde_json::to_vec(&anthropic_body).unwrap_or_default());
+
+            let auth_headers = intent_classifier::auth_headers_for(
+                &state.auth_providers,
+                &provider.provider_type,
+                &api_key,
+                &forward_headers,
+            );
+            let mut upstream_req = client
+                .post(&provider.endpoint)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(anthropic_bytes);
+            for (name, value) in &auth_headers {
+                upstream_req = upstream_req.header(name.as_str(), value.as_str());
+            }
+            if let Some(ms) = provider.timeout_ms {
+                upstream_req = upstream_req.timeout(Duration::from_millis(ms));
+            }
+
+            #[cfg_attr(not(feature = "otel"), allow(unused_variables))]
+            let upstream_start = std::time::Instant::now();
+            let upstream_result = upstream_req.send().await;
+
+            if is_last || !is_retryable_error(&upstream_result) {
+                // Last provider or non-retryable — handle or error
+                match upstream_result {
+                    Ok(upstream_response) => {
+                        #[cfg(feature = "otel")]
+                        if let Some(ref metrics) = state.metrics {
+                            metrics.upstream_duration_seconds.record(
+                                upstream_start.elapsed().as_secs_f64(),
+                                &[
+                                    KeyValue::new("provider", provider.provider_type.clone()),
+                                    KeyValue::new(
+                                        "status",
+                                        upstream_response.status().as_u16().to_string(),
+                                    ),
+                                ],
+                            );
+                        }
+                        if !upstream_response.status().is_success() {
+                            if client_wants_stream {
+                                let resp =
+                                    handle_anthropic_streaming_error(upstream_response).await;
+                                log_classification(
+                                    &state,
+                                    &classification,
+                                    &body_str,
+                                    &prompt,
+                                    start,
+                                    "upstream_error",
+                                    idx as u8 + 1,
+                                    &provider.model,
+                                );
+                                #[cfg(feature = "otel")]
+                                rm.set_status(resp.status());
+                                return resp;
+                            } else {
+                                let max_upstream_body_bytes =
+                                    *state.max_upstream_body_bytes.read().await;
+                                let (status, response_body) =
+                                    translate_anthropic_buffered_response(
+                                        upstream_response,
+                                        max_upstream_body_bytes,
+                                    )
+                                    .await;
+                                let log_status = if status == StatusCode::OK {
+                                    "ok"
+                                } else {
+                                    "upstream_error"
+                                };
+                                let usage = if status == StatusCode::OK {
+                                    parse_usage_from_body(&response_body, false)
+                                } else {
+                                    None
+                                };
+                                log_classification_with_usage(
+                                    &state,
+                                    &classification,
+                                    &body_str,
+                                    &prompt,
+                                    start,
+                                    log_status,
+                                    idx as u8 + 1,
+                                    &provider.model,
+                                    usage.as_ref(),
+                                    session_id,
+                                );
+                                #[cfg(feature = "otel")]
+                                rm.set_status(status);
+                                return json_response(status, response_body);
+                            }
+                        }
+                        if client_wants_stream {
+                            let keepalive_interval_secs =
+                                *state.keepalive_interval_secs.read().await;
+                            return handle_anthropic_streaming_response(
+                                state,
+                                classification,
+                                body_str,
+                                prompt,
+                                start,
+                                upstream_response.bytes_stream(),
+                                keepalive_interval_secs,
+                                idx as u8 + 1,
+                                provider.model.clone(),
+                                session_id.map(|s| s.to_string()),
+                            );
+                        }
+                        let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
+                        let (status, response_body) = translate_anthropic_buffered_response(
+                            upstream_response,
+                            max_upstream_body_bytes,
+                        )
+                        .await;
+                        let log_status = if status == StatusCode::OK {
+                            "ok"
+                        } else {
+                            "upstream_error"
+                        };
+                        let usage = if status == StatusCode::OK {
+                            parse_usage_from_body(&response_body, false)
+                        } else {
+                            None
+                        };
+                        log_classification_with_usage(
+                            &state,
+                            &classification,
+                            &body_str,
+                            &prompt,
+                            start,
+                            log_status,
+                            idx as u8 + 1,
+                            &provider.model,
+                            usage.as_ref(),
+                            session_id,
+                        );
+                        #[cfg(feature = "otel")]
+                        rm.set_status(status);
+                        return json_response(status, response_body);
+                    }
+                    Err(e) => {
+                        #[cfg(feature = "otel")]
+                        if let Some(ref metrics) = state.metrics {
+                            metrics.upstream_duration_seconds.record(
+                                upstream_start.elapsed().as_secs_f64(),
+                                &[
+                                    KeyValue::new("provider", provider.provider_type.clone()),
+                                    KeyValue::new("status", "502"),
+                                ],
+                            );
+                        }
+                        log_classification(
+                            &state,
+                            &classification,
+                            &body_str,
+                            &prompt,
+                            start,
+                            "upstream_error",
+                            idx as u8 + 1,
+                            &provider.model,
+                        );
+                        #[cfg(feature = "otel")]
+                        rm.set_status(StatusCode::BAD_GATEWAY);
+                        return json_response(
+                            StatusCode::BAD_GATEWAY,
+                            upstream_error_json(502, &e.to_string()),
+                        );
+                    }
+                }
+            } else {
+                match &upstream_result {
+                    Ok(upstream_response) => {
+                        warn!(
+                            "Provider {} returned {}; cascading to next",
+                            provider.model,
+                            upstream_response.status()
+                        );
+                        last_error_response = Some(json_response(
+                            upstream_response.status(),
+                            upstream_error_json(
+                                upstream_response.status().as_u16(),
+                                "upstream error",
+                            ),
+                        ));
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Provider {} connection failed: {}; cascading to next",
+                            provider.model, e
+                        );
+                        last_error_response = Some(json_response(
+                            StatusCode::BAD_GATEWAY,
+                            upstream_error_json(502, &e.to_string()),
+                        ));
+                    }
+                }
+                continue;
+            }
+        }
+
+        // ── OpenAI-compatible upstream: pass through ──────────────────
+        let provider_body = if provider.provider_type == "nvidia_nim" {
+            match serde_json::from_slice::<serde_json::Value>(&body) {
+                Ok(mut v) => {
+                    sanitize_for_nim(&mut v);
+                    Bytes::from(serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec()))
+                }
+                Err(_) => body.clone(),
+            }
+        } else {
+            body.clone()
+        };
+
+        let (client_wants_stream, upstream_req) = match build_upstream_request(
+            client,
+            provider,
+            &provider_body,
+            &api_key,
+            &state.auth_providers,
+            &forward_headers,
+        ) {
+            Err(msg) => {
+                if is_last {
+                    log_classification(
+                        &state,
+                        &classification,
+                        &body_str,
+                        &prompt,
+                        start,
+                        "bad_request",
+                        idx as u8 + 1,
+                        &provider.model,
+                    );
+                    #[cfg(feature = "otel")]
+                    rm.set_status(StatusCode::BAD_REQUEST);
+                    return json_response(StatusCode::BAD_REQUEST, upstream_error_json(400, &msg));
+                }
+                last_error_response = Some(json_response(
+                    StatusCode::BAD_REQUEST,
+                    upstream_error_json(400, &msg),
+                ));
+                continue;
+            }
+            Ok(r) => r,
+        };
+
+        #[cfg_attr(not(feature = "otel"), allow(unused_variables))]
+        let upstream_start = std::time::Instant::now();
+        let upstream_result = upstream_req.send().await;
+
+        if is_last || !is_retryable_error(&upstream_result) {
+            match upstream_result {
+                Ok(upstream_response) => {
+                    #[cfg(feature = "otel")]
+                    if let Some(ref metrics) = state.metrics {
+                        metrics.upstream_duration_seconds.record(
+                            upstream_start.elapsed().as_secs_f64(),
+                            &[
+                                KeyValue::new("provider", provider.provider_type.clone()),
+                                KeyValue::new(
+                                    "status",
+                                    upstream_response.status().as_u16().to_string(),
+                                ),
+                            ],
+                        );
+                    }
+                    if !upstream_response.status().is_success() {
+                        if client_wants_stream {
+                            let resp = handle_streaming_error(upstream_response).await;
+                            log_classification(
+                                &state,
+                                &classification,
+                                &body_str,
+                                &prompt,
+                                start,
+                                "upstream_error",
+                                idx as u8 + 1,
+                                &provider.model,
+                            );
+                            #[cfg(feature = "otel")]
+                            rm.set_status(resp.status());
+                            return resp;
+                        }
+                        let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
+                        let (status, resp_body) = handle_buffered_response(
+                            upstream_response,
+                            max_upstream_body_bytes,
+                            false,
+                        )
+                        .await;
+                        let log_status = if status == StatusCode::OK {
+                            "ok"
+                        } else {
+                            "upstream_error"
+                        };
+                        let usage = if status == StatusCode::OK {
+                            parse_usage_from_body(&resp_body, false)
+                        } else {
+                            None
+                        };
+                        log_classification_with_usage(
+                            &state,
+                            &classification,
+                            &body_str,
+                            &prompt,
+                            start,
+                            log_status,
+                            idx as u8 + 1,
+                            &provider.model,
+                            usage.as_ref(),
+                            session_id,
+                        );
+                        #[cfg(feature = "otel")]
+                        rm.set_status(status);
+                        return json_response(status, resp_body);
+                    }
+                    if client_wants_stream {
+                        let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
+                        return handle_streaming_response(
+                            state,
+                            classification,
+                            body_str,
+                            prompt,
+                            start,
+                            upstream_response.bytes_stream(),
+                            keepalive_interval_secs,
+                            idx as u8 + 1,
+                            provider.model.clone(),
+                            session_id.map(|s| s.to_string()),
+                        );
+                    }
+                    let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
+                    let (status, resp_body) =
+                        handle_buffered_response(upstream_response, max_upstream_body_bytes, false)
+                            .await;
+                    let log_status = if status == StatusCode::OK {
+                        "ok"
+                    } else {
+                        "upstream_error"
+                    };
+                    let usage = if status == StatusCode::OK {
+                        parse_usage_from_body(&resp_body, false)
+                    } else {
+                        None
+                    };
+                    log_classification_with_usage(
+                        &state,
+                        &classification,
+                        &body_str,
+                        &prompt,
+                        start,
+                        log_status,
+                        idx as u8 + 1,
+                        &provider.model,
+                        usage.as_ref(),
+                        session_id,
+                    );
+                    #[cfg(feature = "otel")]
+                    rm.set_status(status);
+                    return json_response(status, resp_body);
+                }
+                Err(e) => {
+                    #[cfg(feature = "otel")]
+                    if let Some(ref metrics) = state.metrics {
+                        metrics.upstream_duration_seconds.record(
+                            upstream_start.elapsed().as_secs_f64(),
+                            &[
+                                KeyValue::new("provider", provider.provider_type.clone()),
+                                KeyValue::new("status", "502"),
+                            ],
+                        );
+                    }
+                    log_classification(
+                        &state,
+                        &classification,
+                        &body_str,
+                        &prompt,
+                        start,
+                        "upstream_error",
+                        idx as u8 + 1,
+                        &provider.model,
+                    );
+                    #[cfg(feature = "otel")]
+                    rm.set_status(StatusCode::BAD_GATEWAY);
+                    return json_response(
+                        StatusCode::BAD_GATEWAY,
+                        upstream_error_json(502, &e.to_string()),
+                    );
+                }
+            }
+        } else {
+            match &upstream_result {
+                Ok(upstream_response) => {
+                    warn!(
+                        "Provider {} returned {}; cascading to next",
+                        provider.model,
+                        upstream_response.status()
+                    );
+                    last_error_response = Some(json_response(
+                        upstream_response.status(),
+                        upstream_error_json(upstream_response.status().as_u16(), "upstream error"),
+                    ));
+                }
+                Err(e) => {
+                    warn!(
+                        "Provider {} connection failed: {}; cascading to next",
+                        provider.model, e
+                    );
+                    last_error_response = Some(json_response(
+                        StatusCode::BAD_GATEWAY,
+                        upstream_error_json(502, &e.to_string()),
+                    ));
+                }
+            }
+            continue;
+        }
     }
 
-    let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
-    let (status, body) =
-        handle_buffered_response(upstream_response, max_upstream_body_bytes, false).await;
-    let log_status = if status == StatusCode::OK {
-        "ok"
-    } else {
-        "upstream_error"
-    };
+    // All providers exhausted
+    if let Some(resp) = last_error_response {
+        return resp;
+    }
+
+    let final_provider = classification
+        .providers
+        .last()
+        .map(|p| p.model.clone())
+        .unwrap_or_default();
     log_classification(
         &state,
         &classification,
         &body_str,
         &prompt,
         start,
-        log_status,
+        "upstream_error",
+        total_providers as u8,
+        &final_provider,
     );
-
     #[cfg(feature = "otel")]
-    rm.set_status(status);
-
-    json_response(status, body)
+    rm.set_status(StatusCode::BAD_GATEWAY);
+    json_response(
+        StatusCode::BAD_GATEWAY,
+        upstream_error_json(502, "all providers failed"),
+    )
 }
 
 /// Anthropic Messages API pass-through handler.
@@ -2221,10 +2849,19 @@ async fn messages_handler(
         }
     };
 
-    // Request optimization: short-circuit known trivial probes before
-    // classification and upstream routing.
-    if let Some(response) = try_optimize_request(&body) {
-        return response;
+    // Capture Claude Code / Anthropic client headers once; threaded into every
+    // upstream attempt so beta-gated features and session attribution reach the
+    // upstream. See `collect_forward_headers` for the security invariant.
+    let forward_headers = collect_forward_headers(&headers);
+    // Claude Code session id for per-request attribution in the inference log.
+    let session_id = session_id_from_forward(&forward_headers);
+
+    // Request optimization: skip if explicit routing headers are present —
+    // explicit directives should take precedence over probe optimization.
+    if headers.get("x-cerebrum-category").is_none() && headers.get("x-cerebrum-model").is_none() {
+        if let Some(response) = try_optimize_request(&body, true) {
+            return response;
+        }
     }
 
     let x_category = headers
@@ -2251,10 +2888,8 @@ async fn messages_handler(
             Some(entry) => intent_classifier::ClassificationResult {
                 category: category.clone(),
                 model: model.clone(),
-                endpoint: entry.endpoint.clone(),
                 tier: intent_classifier::ClassificationTier::Fallback,
-                provider_type: entry.provider_type.clone(),
-                api_key_env: entry.api_key_env.clone(),
+                providers: entry.providers.clone(),
             },
             None => {
                 warn!("X-Cerebrum-Category '{category}' not found in routing configuration; degrading to classification JSON");
@@ -2263,7 +2898,7 @@ async fn messages_handler(
                     None => intent_classifier::ClassificationResult::fallback(),
                 };
                 let response_body = classification_only_json(&fallback);
-                log_classification(&state, &fallback, &body_str, "", start, "ok");
+                log_classification(&state, &fallback, &body_str, "", start, "ok", 1, "");
                 return json_response(StatusCode::OK, response_body);
             }
         }
@@ -2289,251 +2924,489 @@ async fn messages_handler(
         Some(c) => c,
         None => {
             let response_body = classification_only_json(&classification);
-            log_classification(&state, &classification, &body_str, &prompt, start, "ok");
+            log_classification(
+                &state,
+                &classification,
+                &body_str,
+                &prompt,
+                start,
+                "ok",
+                1,
+                "",
+            );
             return json_response(StatusCode::OK, response_body);
         }
     };
 
-    let api_key = match &classification.api_key_env {
-        Some(env_name) => match std::env::var(env_name) {
-            Ok(key) if !key.is_empty() => key,
-            _ => {
-                warn!("upstream API key env var '{env_name}' is missing or empty; degrading to classification-only response");
-                log_classification(&state, &classification, &body_str, &prompt, start, "ok");
-                return json_response(StatusCode::OK, classification_only_json(&classification));
-            }
-        },
-        None => {
-            warn!("no api_key_env configured for category '{}'; degrading to classification-only response", classification.category);
-            let response_body = classification_only_json(&classification);
-            log_classification(&state, &classification, &body_str, &prompt, start, "ok");
-            return json_response(StatusCode::OK, response_body);
-        }
-    };
+    let mut last_error_response: Option<Response> = None;
+    let total_providers = classification.providers.len();
 
-    if classification.endpoint.is_empty() {
-        log_classification(
-            &state,
-            &classification,
-            &body_str,
-            &prompt,
-            start,
-            "upstream_error",
-        );
-        #[cfg(feature = "otel")]
-        rm.set_status(StatusCode::BAD_GATEWAY);
-        return json_response(
-            StatusCode::BAD_GATEWAY,
-            anthropic_error_json("api_error", "no endpoint configured"),
-        );
-    }
+    let providers_clone = classification.providers.clone();
+    for (idx, provider) in providers_clone.iter().enumerate() {
+        let is_last = idx + 1 >= total_providers;
 
-    // When the upstream speaks OpenAI protocol, translate the Anthropic
-    // request body to OpenAI Chat Completions format before forwarding.
-    let needs_translation = classification.provider_type != "anthropic";
-    let request_bytes: Bytes = if needs_translation {
-        let parsed: serde_json::Value = match serde_json::from_slice(&body) {
-            Ok(v) => v,
-            Err(e) => {
-                log_classification(
-                    &state,
-                    &classification,
-                    &body_str,
-                    &prompt,
-                    start,
-                    "bad_request",
+        let api_key = match &provider.api_key_env {
+            Some(env_name) => match std::env::var(env_name) {
+                Ok(key) if !key.is_empty() => key,
+                _ => {
+                    warn!(
+                        "API key env var '{:?}' is missing or empty for provider {}; cascading",
+                        provider.api_key_env, provider.model
+                    );
+                    if is_last {
+                        log_classification(
+                            &state,
+                            &classification,
+                            &body_str,
+                            &prompt,
+                            start,
+                            "ok",
+                            idx as u8 + 1,
+                            &provider.model,
+                        );
+                        return json_response(
+                            StatusCode::OK,
+                            classification_only_json(&classification),
+                        );
+                    }
+                    last_error_response = Some(json_response(
+                        StatusCode::OK,
+                        classification_only_json(&classification),
+                    ));
+                    continue;
+                }
+            },
+            None => {
+                warn!(
+                    "no api_key_env configured for provider {}; cascading",
+                    provider.model
                 );
-                #[cfg(feature = "otel")]
-                rm.set_status(StatusCode::BAD_REQUEST);
-                return json_response(
-                    StatusCode::BAD_REQUEST,
-                    anthropic_error_json("invalid_request_error", &format!("invalid JSON: {e}")),
-                );
+                if is_last {
+                    log_classification(
+                        &state,
+                        &classification,
+                        &body_str,
+                        &prompt,
+                        start,
+                        "ok",
+                        idx as u8 + 1,
+                        &provider.model,
+                    );
+                    return json_response(
+                        StatusCode::OK,
+                        classification_only_json(&classification),
+                    );
+                }
+                last_error_response = Some(json_response(
+                    StatusCode::OK,
+                    classification_only_json(&classification),
+                ));
+                continue;
             }
         };
-        match protocol_translation::anthropic_to_openai_request(&parsed) {
-            Ok(translated) => {
-                Bytes::from(serde_json::to_vec(&translated).unwrap_or_else(|_| body.to_vec()))
-            }
-            Err(e) => {
+
+        if provider.endpoint.is_empty() {
+            warn!("empty endpoint for provider {}; cascading", provider.model);
+            if is_last {
                 log_classification(
                     &state,
                     &classification,
                     &body_str,
                     &prompt,
                     start,
-                    "bad_request",
+                    "upstream_error",
+                    idx as u8 + 1,
+                    &provider.model,
                 );
                 #[cfg(feature = "otel")]
-                rm.set_status(StatusCode::BAD_REQUEST);
+                rm.set_status(StatusCode::BAD_GATEWAY);
                 return json_response(
-                    StatusCode::BAD_REQUEST,
-                    anthropic_error_json("invalid_request_error", &e),
+                    StatusCode::BAD_GATEWAY,
+                    anthropic_error_json("api_error", "no endpoint configured"),
                 );
             }
-        }
-    } else {
-        body.clone()
-    };
-
-    // NIM sanitization: strip fields that NVIDIA NIM rejects
-    let request_bytes = if classification.provider_type == "nvidia_nim" {
-        match serde_json::from_slice::<serde_json::Value>(&request_bytes) {
-            Ok(mut v) => {
-                sanitize_for_nim(&mut v);
-                Bytes::from(serde_json::to_vec(&v).unwrap_or_else(|_| request_bytes.to_vec()))
-            }
-            Err(_) => request_bytes,
-        }
-    } else {
-        request_bytes
-    };
-
-    let (client_wants_stream, upstream_req) = match build_upstream_request(
-        client,
-        &classification,
-        &request_bytes,
-        &api_key,
-        &state.auth_providers,
-    ) {
-        Err(msg) => {
-            log_classification(
-                &state,
-                &classification,
-                &body_str,
-                &prompt,
-                start,
-                "bad_request",
-            );
-            #[cfg(feature = "otel")]
-            rm.set_status(StatusCode::BAD_REQUEST);
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                anthropic_error_json("invalid_request_error", &msg),
-            );
-        }
-        Ok(r) => r,
-    };
-
-    #[cfg_attr(not(feature = "otel"), allow(unused_variables))]
-    let upstream_start = std::time::Instant::now();
-    let upstream_response = match upstream_req.send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            #[cfg(feature = "otel")]
-            if let Some(ref metrics) = state.metrics {
-                metrics.upstream_duration_seconds.record(
-                    upstream_start.elapsed().as_secs_f64(),
-                    &[
-                        KeyValue::new("provider", classification.provider_type.clone()),
-                        KeyValue::new("status", "502"),
-                    ],
-                );
-            }
-            log_classification(
-                &state,
-                &classification,
-                &body_str,
-                &prompt,
-                start,
-                "upstream_error",
-            );
-            #[cfg(feature = "otel")]
-            rm.set_status(StatusCode::BAD_GATEWAY);
-            return json_response(
+            last_error_response = Some(json_response(
                 StatusCode::BAD_GATEWAY,
-                anthropic_error_json("api_error", &e.to_string()),
-            );
+                anthropic_error_json("api_error", "no endpoint configured"),
+            ));
+            continue;
         }
-    };
 
-    #[cfg(feature = "otel")]
-    if let Some(ref metrics) = state.metrics {
-        metrics.upstream_duration_seconds.record(
-            upstream_start.elapsed().as_secs_f64(),
-            &[
-                KeyValue::new("provider", classification.provider_type.clone()),
-                KeyValue::new("status", upstream_response.status().as_u16().to_string()),
-            ],
-        );
-    }
-
-    if client_wants_stream {
-        if !upstream_response.status().is_success() {
-            let resp = if needs_translation {
-                handle_streaming_error_with_transform(upstream_response, |body, status| {
-                    protocol_translation::openai_to_anthropic_error(&body, status)
-                })
-                .await
-            } else {
-                handle_streaming_error(upstream_response).await
+        let needs_translation = provider.provider_type != "anthropic";
+        let request_bytes: Bytes = if needs_translation {
+            let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(e) => {
+                    log_classification(
+                        &state,
+                        &classification,
+                        &body_str,
+                        &prompt,
+                        start,
+                        "bad_request",
+                        idx as u8 + 1,
+                        &provider.model,
+                    );
+                    #[cfg(feature = "otel")]
+                    rm.set_status(StatusCode::BAD_REQUEST);
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        anthropic_error_json(
+                            "invalid_request_error",
+                            &format!("invalid JSON: {e}"),
+                        ),
+                    );
+                }
             };
-            log_classification(
-                &state,
-                &classification,
-                &body_str,
-                &prompt,
-                start,
-                "upstream_error",
-            );
-            #[cfg(feature = "otel")]
-            rm.set_status(resp.status());
-            return resp;
+            match protocol_translation::anthropic_to_openai_request_with_cache_signal(&parsed) {
+                Ok((translated, had_cache_control)) => {
+                    if had_cache_control {
+                        debug!(
+                            "anth→oai translation: stripped client cache_control \
+                             breakpoints for provider {}",
+                            provider.model
+                        );
+                    }
+                    Bytes::from(serde_json::to_vec(&translated).unwrap_or_else(|_| body.to_vec()))
+                }
+                Err(e) => {
+                    log_classification(
+                        &state,
+                        &classification,
+                        &body_str,
+                        &prompt,
+                        start,
+                        "bad_request",
+                        idx as u8 + 1,
+                        &provider.model,
+                    );
+                    #[cfg(feature = "otel")]
+                    rm.set_status(StatusCode::BAD_REQUEST);
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        anthropic_error_json("invalid_request_error", &e),
+                    );
+                }
+            }
+        } else {
+            // Same-protocol Anthropic→Anthropic passthrough. We deliberately
+            // forward the raw body bytes (`body.clone()`) rather than
+            // parse-normalize-reemit: the translator's explicit field
+            // allowlist would drop unknown Anthropic fields (including
+            // cache_control breakpoints, thinking config, context_management,
+            // etc.), so byte passthrough is what actually preserves them. A
+            // debug log surfaces cache_control presence for operators without
+            // the cost of a full parse.
+            if serde_json::from_slice::<serde_json::Value>(&body)
+                .map(|v| v.get("cache_control").is_some())
+                .unwrap_or(false)
+            {
+                debug!(
+                    "anthropic passthrough: forwarding client cache_control \
+                     breakpoints to upstream unchanged for provider {}",
+                    provider.model
+                );
+            }
+            body.clone()
+        };
+
+        let request_bytes = if provider.provider_type == "nvidia_nim" {
+            match serde_json::from_slice::<serde_json::Value>(&request_bytes) {
+                Ok(mut v) => {
+                    sanitize_for_nim(&mut v);
+                    Bytes::from(serde_json::to_vec(&v).unwrap_or_else(|_| request_bytes.to_vec()))
+                }
+                Err(_) => request_bytes,
+            }
+        } else {
+            request_bytes
+        };
+
+        let (client_wants_stream, upstream_req) = match build_upstream_request(
+            client,
+            provider,
+            &request_bytes,
+            &api_key,
+            &state.auth_providers,
+            &forward_headers,
+        ) {
+            Err(msg) => {
+                if is_last {
+                    log_classification(
+                        &state,
+                        &classification,
+                        &body_str,
+                        &prompt,
+                        start,
+                        "bad_request",
+                        idx as u8 + 1,
+                        &provider.model,
+                    );
+                    #[cfg(feature = "otel")]
+                    rm.set_status(StatusCode::BAD_REQUEST);
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        anthropic_error_json("invalid_request_error", &msg),
+                    );
+                }
+                last_error_response = Some(json_response(
+                    StatusCode::BAD_REQUEST,
+                    anthropic_error_json("invalid_request_error", &msg),
+                ));
+                continue;
+            }
+            Ok(r) => r,
+        };
+
+        #[cfg_attr(not(feature = "otel"), allow(unused_variables))]
+        let upstream_start = std::time::Instant::now();
+        let upstream_result = upstream_req.send().await;
+
+        if is_last || !is_retryable_error(&upstream_result) {
+            match upstream_result {
+                Ok(upstream_response) => {
+                    #[cfg(feature = "otel")]
+                    if let Some(ref metrics) = state.metrics {
+                        metrics.upstream_duration_seconds.record(
+                            upstream_start.elapsed().as_secs_f64(),
+                            &[
+                                KeyValue::new("provider", provider.provider_type.clone()),
+                                KeyValue::new(
+                                    "status",
+                                    upstream_response.status().as_u16().to_string(),
+                                ),
+                            ],
+                        );
+                    }
+                    if !upstream_response.status().is_success() {
+                        if client_wants_stream {
+                            let resp = if needs_translation {
+                                handle_streaming_error_with_transform(
+                                    upstream_response,
+                                    |body, status| {
+                                        protocol_translation::openai_to_anthropic_error(
+                                            &body, status,
+                                        )
+                                    },
+                                )
+                                .await
+                            } else {
+                                handle_streaming_error(upstream_response).await
+                            };
+                            log_classification(
+                                &state,
+                                &classification,
+                                &body_str,
+                                &prompt,
+                                start,
+                                "upstream_error",
+                                idx as u8 + 1,
+                                &provider.model,
+                            );
+                            #[cfg(feature = "otel")]
+                            rm.set_status(resp.status());
+                            return resp;
+                        }
+                        let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
+                        let (status, resp_body) = if needs_translation {
+                            translate_openai_buffered_to_anthropic(
+                                upstream_response,
+                                max_upstream_body_bytes,
+                            )
+                            .await
+                        } else {
+                            handle_buffered_response(
+                                upstream_response,
+                                max_upstream_body_bytes,
+                                true,
+                            )
+                            .await
+                        };
+                        let log_status = if status == StatusCode::OK {
+                            "ok"
+                        } else {
+                            warn!(
+                                upstream_status = status.as_u16(),
+                                "upstream returned non-2xx"
+                            );
+                            "upstream_error"
+                        };
+                        let usage = if status == StatusCode::OK {
+                            parse_usage_from_body(&resp_body, true)
+                        } else {
+                            None
+                        };
+                        log_classification_with_usage(
+                            &state,
+                            &classification,
+                            &body_str,
+                            &prompt,
+                            start,
+                            log_status,
+                            idx as u8 + 1,
+                            &provider.model,
+                            usage.as_ref(),
+                            session_id,
+                        );
+                        #[cfg(feature = "otel")]
+                        rm.set_status(status);
+                        return json_response(status, resp_body);
+                    }
+                    if client_wants_stream {
+                        let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
+                        if needs_translation {
+                            return handle_translating_anthropic_stream(
+                                state,
+                                classification,
+                                body_str,
+                                prompt,
+                                start,
+                                upstream_response.bytes_stream(),
+                                keepalive_interval_secs,
+                                idx as u8 + 1,
+                                provider.model.clone(),
+                                session_id.map(|s| s.to_string()),
+                            );
+                        }
+                        return handle_streaming_response(
+                            state,
+                            classification,
+                            body_str,
+                            prompt,
+                            start,
+                            upstream_response.bytes_stream(),
+                            keepalive_interval_secs,
+                            idx as u8 + 1,
+                            provider.model.clone(),
+                            session_id.map(|s| s.to_string()),
+                        );
+                    }
+                    let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
+                    let (status, resp_body) = if needs_translation {
+                        translate_openai_buffered_to_anthropic(
+                            upstream_response,
+                            max_upstream_body_bytes,
+                        )
+                        .await
+                    } else {
+                        handle_buffered_response(upstream_response, max_upstream_body_bytes, true)
+                            .await
+                    };
+                    let log_status = if status == StatusCode::OK {
+                        "ok"
+                    } else {
+                        warn!(
+                            upstream_status = status.as_u16(),
+                            "upstream returned non-2xx"
+                        );
+                        "upstream_error"
+                    };
+                    let usage = if status == StatusCode::OK {
+                        parse_usage_from_body(&resp_body, true)
+                    } else {
+                        None
+                    };
+                    log_classification_with_usage(
+                        &state,
+                        &classification,
+                        &body_str,
+                        &prompt,
+                        start,
+                        log_status,
+                        idx as u8 + 1,
+                        &provider.model,
+                        usage.as_ref(),
+                        session_id,
+                    );
+                    #[cfg(feature = "otel")]
+                    rm.set_status(status);
+                    return json_response(status, resp_body);
+                }
+                Err(e) => {
+                    #[cfg(feature = "otel")]
+                    if let Some(ref metrics) = state.metrics {
+                        metrics.upstream_duration_seconds.record(
+                            upstream_start.elapsed().as_secs_f64(),
+                            &[
+                                KeyValue::new("provider", provider.provider_type.clone()),
+                                KeyValue::new("status", "502"),
+                            ],
+                        );
+                    }
+                    log_classification(
+                        &state,
+                        &classification,
+                        &body_str,
+                        &prompt,
+                        start,
+                        "upstream_error",
+                        idx as u8 + 1,
+                        &provider.model,
+                    );
+                    #[cfg(feature = "otel")]
+                    rm.set_status(StatusCode::BAD_GATEWAY);
+                    return json_response(
+                        StatusCode::BAD_GATEWAY,
+                        anthropic_error_json("api_error", &e.to_string()),
+                    );
+                }
+            }
+        } else {
+            match &upstream_result {
+                Ok(upstream_response) => {
+                    warn!(
+                        "Provider {} returned {}; cascading to next",
+                        provider.model,
+                        upstream_response.status()
+                    );
+                    last_error_response = Some(json_response(
+                        upstream_response.status(),
+                        anthropic_error_json(
+                            "api_error",
+                            &format!("{}", upstream_response.status()),
+                        ),
+                    ));
+                }
+                Err(e) => {
+                    warn!(
+                        "Provider {} connection failed: {}; cascading to next",
+                        provider.model, e
+                    );
+                    last_error_response = Some(json_response(
+                        StatusCode::BAD_GATEWAY,
+                        anthropic_error_json("api_error", &e.to_string()),
+                    ));
+                }
+            }
+            continue;
         }
-
-        let keepalive_interval_secs = *state.keepalive_interval_secs.read().await;
-
-        if needs_translation {
-            return handle_translating_anthropic_stream(
-                state,
-                classification,
-                body_str,
-                prompt,
-                start,
-                upstream_response.bytes_stream(),
-                keepalive_interval_secs,
-            );
-        }
-
-        return handle_streaming_response(
-            state,
-            classification,
-            body_str,
-            prompt,
-            start,
-            upstream_response.bytes_stream(),
-            keepalive_interval_secs,
-        );
     }
 
-    let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
-    let (status, resp_body) = if needs_translation {
-        translate_openai_buffered_to_anthropic(upstream_response, max_upstream_body_bytes).await
-    } else {
-        handle_buffered_response(upstream_response, max_upstream_body_bytes, true).await
-    };
-    let log_status = if status == StatusCode::OK {
-        "ok"
-    } else {
-        warn!(
-            upstream_status = status.as_u16(),
-            "upstream returned non-2xx"
-        );
-        "upstream_error"
-    };
+    if let Some(resp) = last_error_response {
+        return resp;
+    }
+
+    let final_provider = classification
+        .providers
+        .last()
+        .map(|p| p.model.clone())
+        .unwrap_or_default();
     log_classification(
         &state,
         &classification,
         &body_str,
         &prompt,
         start,
-        log_status,
+        "upstream_error",
+        total_providers as u8,
+        &final_provider,
     );
-
     #[cfg(feature = "otel")]
-    rm.set_status(status);
-
-    json_response(status, resp_body)
+    rm.set_status(StatusCode::BAD_GATEWAY);
+    json_response(
+        StatusCode::BAD_GATEWAY,
+        anthropic_error_json("api_error", "all providers failed"),
+    )
 }
 
 /// Classify handler: extracts prompt, classifies intent, optionally logs a
@@ -2625,8 +3498,7 @@ async fn feedback_handler(
 fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
     // Unauthenticated v1 routes — model discovery must be accessible
     // without auth (Claude Code probes /v1/models before authenticating).
-    let unauth_v1_routes = Router::new()
-        .route("/models", get(models_handler));
+    let unauth_v1_routes = Router::new().route("/models", get(models_handler));
 
     let proxy_routes = Router::new()
         .route("/chat/completions", post(completion_handler))
@@ -2854,29 +3726,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -2942,29 +3823,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -2993,11 +3883,14 @@ mod tests {
             fewshot_config,
             HashMap::new(),
             intent_classifier::RouteEntry {
-                model: "fallback-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "fallback-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
 
@@ -3055,29 +3948,38 @@ mod tests {
         routing.insert(
             "SYNTAX_FIX".to_string(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             "CASUAL".to_string(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -3241,7 +4143,7 @@ mod tests {
                     .header(header::AUTHORIZATION, "Bearer proxy-token")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
                     ))
                     .expect("request should be valid"),
             )
@@ -3278,29 +4180,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: "https://test.endpoint".to_string(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: "https://test.endpoint".to_string(),
+                    provider_type: provider_type_val.to_string(),
+                    api_key_env: api_key_env_val.map(|s| s.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: provider_type_val.to_string(),
-                api_key_env: api_key_env_val.map(|s| s.to_string()),
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -3492,6 +4403,54 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_models_endpoint_entries_have_display_name_and_prefixed_id() {
+        // Claude Code's gateway discovery requires `display_name` for friendly
+        // names and filters entries whose IDs do not begin with `claude` or
+        // `anthropic`. This locks both invariants independently of the
+        // broader shape test above.
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("models request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        let data = json
+            .get("data")
+            .and_then(|v| v.as_array())
+            .expect("data should be an array");
+        assert!(!data.is_empty(), "data should not be empty");
+        for model in data {
+            let id = model
+                .get("id")
+                .and_then(|v| v.as_str())
+                .expect("each entry must have an id");
+            assert!(
+                id.starts_with("claude") || id.starts_with("anthropic"),
+                "id must be claude/anthropic-prefixed for Claude Code discovery, got {id}"
+            );
+            let display_name = model
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .expect("each entry must have a display_name");
+            assert!(
+                !display_name.is_empty(),
+                "display_name must be non-empty for id {id}"
+            );
+            assert_eq!(
+                model.get("type").and_then(|v| v.as_str()),
+                Some("model"),
+                "each Anthropic-shape entry should have type=model for id {id}"
+            );
+        }
+    }
+
     #[test]
     fn test_sanitize_for_nim_strips_unsupported_fields() {
         let mut body = serde_json::json!({
@@ -3504,10 +4463,19 @@ mod tests {
         });
         sanitize_for_nim(&mut body);
         assert!(body.get("top_k").is_none(), "top_k should be stripped");
-        assert!(body.get("metadata").is_none(), "metadata should be stripped");
-        assert!(body.get("thinking").is_none(), "thinking should be stripped");
+        assert!(
+            body.get("metadata").is_none(),
+            "metadata should be stripped"
+        );
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking should be stripped"
+        );
         assert!(body.get("model").is_some(), "model should be preserved");
-        assert!(body.get("messages").is_some(), "messages should be preserved");
+        assert!(
+            body.get("messages").is_some(),
+            "messages should be preserved"
+        );
         assert!(body.get("stream").is_some(), "stream should be preserved");
     }
 
@@ -3601,7 +4569,7 @@ mod tests {
     #[test]
     fn test_optimize_empty_messages_returns_canned_response() {
         let body = serde_json::json!({"messages": []}).to_string().into_bytes();
-        let resp = try_optimize_request(&body);
+        let resp = try_optimize_request(&body, false);
         assert!(resp.is_some(), "empty messages should be optimized");
         let resp = resp.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3615,7 +4583,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let resp = try_optimize_request(&body);
+        let resp = try_optimize_request(&body, false);
         assert!(resp.is_some(), "'hello' probe should be optimized");
     }
 
@@ -3628,8 +4596,11 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let resp = try_optimize_request(&body);
-        assert!(resp.is_some(), "anthropic 'hello' probe should be optimized");
+        let resp = try_optimize_request(&body, false);
+        assert!(
+            resp.is_some(),
+            "anthropic 'hello' probe should be optimized"
+        );
     }
 
     #[test]
@@ -3640,7 +4611,7 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let resp = try_optimize_request(&body);
+        let resp = try_optimize_request(&body, false);
         assert!(resp.is_none(), "normal request should not be optimized");
     }
 
@@ -3655,15 +4626,56 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let resp = try_optimize_request(&body);
-        assert!(resp.is_some(), "array content 'hi' probe should be optimized");
+        let resp = try_optimize_request(&body, false);
+        assert!(
+            resp.is_some(),
+            "array content 'hi' probe should be optimized"
+        );
     }
 
     #[test]
     fn test_optimize_missing_messages_not_matched() {
-        let body = serde_json::json!({"model": "test"}).to_string().into_bytes();
-        let resp = try_optimize_request(&body);
+        let body = serde_json::json!({"model": "test"})
+            .to_string()
+            .into_bytes();
+        let resp = try_optimize_request(&body, false);
         assert!(resp.is_none(), "missing messages should not be optimized");
+    }
+
+    #[test]
+    fn test_optimize_stream_true_not_matched() {
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true
+        })
+        .to_string()
+        .into_bytes();
+        let resp = try_optimize_request(&body, false);
+        assert!(resp.is_none(), "streaming requests should not be optimized");
+    }
+
+    #[test]
+    fn test_optimize_probe_returns_anthropic_format() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-6-20250514",
+            "messages": [{"role": "user", "content": "hello"}]
+        })
+        .to_string()
+        .into_bytes();
+        let resp = try_optimize_request(&body, true).expect("should match probe pattern");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_optimize_empty_messages_returns_anthropic_format() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-6-20250514",
+            "messages": []
+        })
+        .to_string()
+        .into_bytes();
+        let resp = try_optimize_request(&body, true).expect("should match empty messages");
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -3782,13 +4794,21 @@ mod tests {
             prompt_snippet: "integration test snippet".to_string(),
             prompt_char_count: Some(25),
             created_at: chrono::Utc::now(),
+            provider_attempts: 1,
+            final_provider: "test-model".to_string(),
+            // Phase 4 token usage + Claude Code attribution fields.
+            input_tokens: Some(100),
+            output_tokens: Some(20),
+            cache_read_tokens: Some(80),
+            cache_creation_tokens: Some(5),
+            client_session_id: Some("sess-integration".to_string()),
         };
         let handle = persistence::log_inference(db_backend, semaphore, record);
         handle.await.expect("logging task should complete");
 
         // Read back using non-macro query (no offline cache required).
         let row =
-            sqlx::query("SELECT status, prompt_snippet, prompt_char_count FROM inferences WHERE request_id = $1")
+            sqlx::query("SELECT status, prompt_snippet, prompt_char_count, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, client_session_id FROM inferences WHERE request_id = $1")
                 .bind(request_id)
                 .fetch_optional(pool.as_ref())
                 .await
@@ -3807,6 +4827,32 @@ mod tests {
             row.try_get::<Option<i32>, _>("prompt_char_count").unwrap(),
             Some(25),
             "prompt_char_count should be stored and retrievable"
+        );
+        // Phase 4 token/attribution columns round-trip through Postgres.
+        assert_eq!(
+            row.try_get::<Option<i32>, _>("input_tokens").unwrap(),
+            Some(100)
+        );
+        assert_eq!(
+            row.try_get::<Option<i32>, _>("output_tokens").unwrap(),
+            Some(20)
+        );
+        assert_eq!(
+            row.try_get::<Option<i32>, _>("cache_read_tokens").unwrap(),
+            Some(80),
+            "cache_read_tokens must round-trip"
+        );
+        assert_eq!(
+            row.try_get::<Option<i32>, _>("cache_creation_tokens")
+                .unwrap(),
+            Some(5)
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("client_session_id")
+                .unwrap()
+                .as_deref(),
+            Some("sess-integration"),
+            "client_session_id must round-trip"
         );
     }
 
@@ -4357,29 +5403,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: endpoint.clone(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: endpoint.clone(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint,
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint,
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -4426,29 +5481,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: endpoint.clone(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: endpoint.clone(),
+                    provider_type: "anthropic".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "anthropic".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint,
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint,
+                    provider_type: "anthropic".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "anthropic".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -4535,6 +5599,122 @@ mod tests {
         assert!(
             body_str.contains("msg_1"),
             "expected upstream id in response, got: {body_str}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_forwards_anthropic_client_headers() {
+        // Claude Code pairs each anthropic-beta capability with an
+        // anthropic-version + x-claude-code-* attribution header. Routed to an
+        // Anthropic upstream, Cerebrum must forward them unchanged, prefer the
+        // client's anthropic-version over the 2023-06-01 default, and still
+        // apply the resolved x-api-key credential. The mock matches only if
+        // every forwarded header is present with the expected value.
+        let env = "TEST_ANTHROPIC_FWD";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .header("x-api-key", "sk-ant-test")
+                .header("anthropic-version", "2024-10-22")
+                .header("anthropic-beta", "context-management-2025-09")
+                .header("x-claude-code-session-id", "sess-123");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+                );
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("anthropic-version", "2024-10-22")
+                    .header("anthropic-beta", "context-management-2025-09")
+                    .header("x-claude-code-session-id", "sess-123")
+                    .body(Body::from(
+                        r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_does_not_forward_anthropic_headers_to_openai() {
+        // anthropic-* headers are meaningless to an OpenAI-compatible upstream
+        // and must be dropped on cross-protocol routing. httpmock 0.7 has no
+        // header-absence matcher and exposes no request inspection, so we use
+        // FIFO "canary" mocks registered BEFORE the serving mock: a canary
+        // matches ONLY if its header_exists criterion is satisfied, so it gets
+        // hit iff that header leaked to the upstream. In the correct case the
+        // canaries never match and the serving mock (Authorization only) wins.
+        let env = "TEST_OPENAI_NO_FWD";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let beta_canary = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header_exists("anthropic-beta");
+            then.status(200).body("canary-beta");
+        });
+        let version_canary = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header_exists("anthropic-version");
+            then.status(200).body("canary-version");
+        });
+        let positive = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header("Authorization", "Bearer sk-test");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body("ok");
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("anthropic-version", "2024-10-22")
+                    .header("anthropic-beta", "context-management-2025-09")
+                    .header("x-claude-code-session-id", "sess-123")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            beta_canary.hits(),
+            0,
+            "anthropic-beta must NOT be forwarded to an OpenAI-compatible upstream"
+        );
+        assert_eq!(
+            version_canary.hits(),
+            0,
+            "anthropic-version must NOT be forwarded to an OpenAI-compatible upstream"
+        );
+        assert_eq!(
+            positive.hits(),
+            1,
+            "request must still reach the upstream with the resolved Authorization credential"
         );
     }
 
@@ -4724,29 +5904,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: endpoint.clone(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: endpoint.clone(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some("MOCK_API_KEY".to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some("MOCK_API_KEY".to_string()),
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint,
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint,
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some("MOCK_API_KEY".to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some("MOCK_API_KEY".to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -4828,29 +6017,38 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         routing.insert(
             cats[3].name.clone(),
             intent_classifier::RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -5605,19 +6803,25 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: url,
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: url,
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -5720,7 +6924,7 @@ mod tests {
                     .header(header::AUTHORIZATION, "Bearer proxy-token")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":false}"#,
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":false}"#,
                     ))
                     .expect("request should be valid"),
             )
@@ -5761,7 +6965,7 @@ mod tests {
                     .header(header::AUTHORIZATION, "Bearer proxy-token")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
                     ))
                     .expect("request should be valid"),
             )
@@ -5996,10 +7200,8 @@ mod tests {
         let result = intent_classifier::ClassificationResult {
             category: "SYNTAX_FIX".to_string(),
             model: "sf-model".to_string(),
-            endpoint: "https://test.endpoint".to_string(),
             tier: intent_classifier::ClassificationTier::Regex,
-            provider_type: "test_provider".to_string(),
-            api_key_env: Some("TEST_API_KEY".to_string()),
+            providers: vec![],
         };
         let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result))
             .expect("classification_only_json output should be valid JSON");
@@ -6082,10 +7284,8 @@ mod tests {
             let result = intent_classifier::ClassificationResult {
                 category: "SYNTAX_FIX".to_string(),
                 model: "sf-model".to_string(),
-                endpoint: "https://test.endpoint".to_string(),
                 tier,
-                provider_type: "test_provider".to_string(),
-                api_key_env: Some("TEST_API_KEY".to_string()),
+                providers: vec![],
             };
             let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result))
                 .expect("classification_only_json output should be valid JSON");
@@ -6275,6 +7475,201 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn test_completion_handler_anthropic_translation_inserts_cache_control() {
+        // OAI→Anthropic: an OpenAI client request routed to an Anthropic
+        // upstream must arrive with a top-level cache_control so Anthropic
+        // automatic prompt caching activates. The mock matches only if the
+        // translated upstream body contains "cache_control".
+        let env = "TEST_TRANSLATE_O2A_CACHE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .header("x-api-key", "sk-ant-test")
+                .body_contains("\"cache_control\"");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+                );
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"max_tokens":100}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_translates_cache_tokens_in_usage() {
+        // OAI client → Anthropic upstream: the upstream reports
+        // cache_read_input_tokens / cache_creation_input_tokens in Anthropic
+        // shape; the OpenAI client must receive them as
+        // usage.prompt_tokens_details.cached_tokens, with prompt_tokens being
+        // the full prompt (non-cached + cached). End-to-end companion to the
+        // protocol_translation unit tests.
+        let env = "TEST_USAGE_O2A_CACHE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages").header("x-api-key", "sk-ant-test");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"id":"msg_u","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":80,"cache_creation_input_tokens":5}}"#,
+                );
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"max_tokens":100}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        let usage = json.get("usage").expect("usage in client response");
+        assert_eq!(
+            usage.get("prompt_tokens").and_then(|v| v.as_u64()),
+            Some(100 + 80 + 5),
+            "prompt_tokens must be the full prompt (non-cached + cache_read + cache_creation)"
+        );
+        assert_eq!(
+            usage.get("completion_tokens").and_then(|v| v.as_u64()),
+            Some(20)
+        );
+        let cached = usage
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|v| v.as_u64());
+        assert_eq!(
+            cached,
+            Some(80),
+            "cached_tokens must map from Anthropic cache_read_input_tokens end-to-end, got: {usage}"
+        );
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_openai_translation_strips_cache_control() {
+        // Anth→OAI: an Anthropic body carrying a cache_control breakpoint,
+        // routed to an OpenAI upstream, must arrive WITHOUT cache_control
+        // (OpenAI has no native equivalent). A FIFO canary mock registered
+        // before the serving mock matches only if "cache_control" leaked into
+        // the upstream body; in the correct case it is never hit.
+        let env = "TEST_A2O_NO_CACHE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-openai-test");
+        let (app, server) = test_app_with_openai_translation(env);
+        let canary = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .body_contains("cache_control");
+            then.status(200).body("canary");
+        });
+        let positive = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header("authorization", "Bearer sk-openai-test");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-cerebrum-category", "SYNTAX_FIX")
+                    .header("x-cerebrum-model", "gpt-4o")
+                    .body(Body::from(
+                        r#"{"model":"claude-3.5","max_tokens":1024,"messages":[{"role":"user","content":[{"type":"text","text":"fix this bug","cache_control":{"type":"ephemeral"}}]}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            canary.hits(),
+            0,
+            "cache_control must NOT survive Anth→OpenAI translation"
+        );
+        assert_eq!(
+            positive.hits(),
+            1,
+            "translated request must still reach the OpenAI upstream"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_anthropic_passthrough_preserves_cache_control() {
+        // Anth→Anthropic same-protocol passthrough: a client cache_control
+        // breakpoint must reach the upstream unchanged (byte passthrough, not
+        // translator allowlist). The mock matches only if the upstream body
+        // contains "cache_control".
+        let env = "TEST_ANT_PASSTHROUGH_CACHE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .header("x-api-key", "sk-ant-test")
+                .header("anthropic-version", "2023-06-01")
+                .body_contains("\"cache_control\"");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+                );
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":[{"type":"text","text":"fix this bug","cache_control":{"type":"ephemeral"}}]}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn test_completion_handler_anthropic_streaming() {
         let env = "TEST_TRANSLATE_O2A_STREAM";
         let _guard = EnvGuard(env);
@@ -6407,19 +7802,25 @@ mod tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "gpt-4o".to_string(),
-                endpoint: endpoint.clone(),
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "gpt-4o".to_string(),
+                    endpoint: endpoint.clone(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,
@@ -6681,19 +8082,25 @@ mod slow_tests {
         routing.insert(
             cats[1].name.clone(),
             intent_classifier::RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: url,
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: url,
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var.to_string()),
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: "openai_compatible".to_string(),
-                api_key_env: Some(env_var.to_string()),
             },
         );
         let fallback = intent_classifier::RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let regex_classifier = intent_classifier::RegexClassifier::from_values(
             routing,

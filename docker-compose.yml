@@ -1,14 +1,16 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: test
       POSTGRES_PASSWORD: test
       POSTGRES_DB: test
     volumes:
       - cerebrum-postgres-data:/var/lib/postgresql/data
+    mem_limit: 256m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U test -d test"]
       interval: 5s
@@ -17,14 +19,15 @@ services:
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.116.1
+    restart: unless-stopped
     profiles:
       - otel
     ports:
       - "4317:4317"
       - "4318:4318"
-      - "13133:13133"
     volumes:
       - ./deploy/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    mem_limit: 256m
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:13133 || exit 1"]
       interval: 5s
@@ -33,12 +36,20 @@ services:
 
   cerebrum:
     build: .
+    restart: unless-stopped
     profiles:
       - app
     ports:
       - "10000:10000"
     env_file:
       - .env
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:10000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     depends_on:
       postgres:
         condition: service_healthy

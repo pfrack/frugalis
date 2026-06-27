@@ -1,656 +1,399 @@
 # Cerebrum
 
-> Intent-aware request routing for autonomous agent workflows.
+[![CI](https://github.com/pfrack/cerebrum/actions/workflows/deploy.yml/badge.svg)](https://github.com/pfrack/cerebrum/actions/workflows/deploy.yml)
+![Rust Edition](https://img.shields.io/badge/edition-2021-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-Cerebrum is a single-binary Rust/Axum gateway that sits in front of one or
-more LLM providers, classifies each incoming chat-completion prompt, and
-routes it to the cheapest acceptable upstream model for the inferred
-intent. It exposes an OpenAI-compatible proxy API, a basic-auth operator
-dashboard, asynchronous inference metadata logging, and an OpenTelemetry
-exporter for observability.
-
-It is built for a solo operator running an autonomous agent workflow who
-wants lower inference cost and direct visibility into how requests are
-being routed, without operating a multi-service mesh.
-
----
-
-## Table of contents
-
-- [Features](#features)
-- [Quick start](#quick-start)
-- [Configuration](#configuration)
-- [API surface](#api-surface)
-- [Architecture](#architecture)
-- [Dashboard](#dashboard)
-- [Deployment](#deployment)
-- [Project layout](#project-layout)
-- [Development](#development)
-- [Security](#security)
-- [License](#license)
-
----
+**Intent-aware LLM request routing gateway.** Cerebrum is a single Rust binary that sits between your agents and upstream model providers. It classifies each incoming prompt into an intent category, selects the cheapest acceptable model for that category, and proxies the request with full SSE streaming support.
 
 ## Features
 
-- **Intent-aware proxy** — every chat-completion request is classified
-  into a category (`FILE_READING`, `SYNTAX_FIX`, `COMPLEX_REASONING`,
-  `CASUAL`, …) and routed to the matching upstream model.
-- **Pluggable classifier chain** — `regex` → `fewshot` → `llm`; the
-  first backend that returns a non-`Fallback` result wins. All three
-  backends are opt-in via `config.toml`.
-- **OpenAI-compatible chat completions** with optional **server-sent
-  event streaming** and a 15-second `: keepalive` comment to keep
-  long-running completions readable.
-- **Async inference metadata logging** with privacy-safe 200-character
-  prompt snippets (full prompts are never persisted).
-- **Three persistence backends**: PostgreSQL (production), SQLite
-  (single-file), in-memory (default; ephemeral).
-- **Operator dashboard** (basic auth) with four pages: overview,
-  inference log, per-intent latency (avg + p99), and estimated cost
-  savings.
-- **OpenTelemetry** integration (feature-gated) exporting traces,
-  metrics, and logs over OTLP/HTTP.
-- **Single static binary**, deployed automatically on merge to `main`
-  via GitHub Actions → Render.
-- **OpenAPI 3.0.3** spec at `openapi/completions.yaml`.
+Cerebrum is designed for solo developers and operators running autonomous agent workflows who need lower inference cost and direct visibility into routing behavior. Its key capabilities:
 
-## Quick start
+- **Intent-aware routing** — classifies prompts by category and dispatches to the cheapest suitable upstream model
+- **Pluggable classifier chain** — configurable backends: regex (built‑in), few‑shot (TF‑IDF cosine similarity), and LLM (opt‑in); first non‑fallback wins
+- **OpenAI‑compatible API** — drop-in `POST /v1/chat/completions`, `POST /v1/classify`, and `POST /v1/feedback` endpoints
+- **SSE streaming with keepalive** — real‑time streaming proxy with configurable keepalive interval and a 2 KB upstream‑error body cap
+- **Three persistence backends** — PostgreSQL (production), SQLite (file‑backed), or in‑memory (zero config); selected automatically from environment and config
+- **Operator dashboard** — four basic‑auth pages (Overview, Inference Logs, Latency, Savings) with auto‑generated sidebar navigation
+- **Privacy by construction** — stores a 200‑character prompt snippet, never the full prompt; records character count separately for cost math
+- **Bearer + Basic authentication** — bearer token for proxy routes, basic auth for dashboard routes; constant‑time credential comparison
+- **Config‑driven routing** — every category, model mapping, and provider is defined in `config.toml`; adding a category is a config change, not a code change
+- **CI/CD to Render** — GitHub Actions runs auth, route, and persistence tests on push to `main`, then deploys via Render webhook
+- **Opt‑in OpenTelemetry** — experimental OTel support behind the `otel` Cargo feature and `OTEL_ENABLED=true` env var
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Persistence Backends](#persistence-backends)
+- [Architecture](#architecture)
+- [Intent Classification](#intent-classification)
+- [Request Flow](#request-flow)
+- [Privacy & Security](#privacy--security)
+- [API Reference](#api-reference)
+- [Dashboard](#dashboard)
+- [Deployment](#deployment)
+- [CI/CD](#cicd)
+- [Testing](#testing)
+- [Development](#development)
+- [OpenTelemetry (Experimental)](#opentelemetry-experimental)
+- [FAQ](#faq)
+- [License](#license)
+
+## Quick Start
 
 ### Prerequisites
 
-- Rust **stable** toolchain (the deploy workflow pins
-  `dtolnay/rust-toolchain@stable`).
-- A POSIX shell, `curl`, and (for the manual test harness) `bash`.
-- Optional: a PostgreSQL or SQLite instance if you want inference data
-  to survive a restart.
+- **Rust toolchain** (stable) — install via [rustup](https://rustup.rs/) if needed
+- No other runtime dependencies (database, Docker, or external services are optional)
 
-### Build
+### Run the Gateway
 
 ```bash
-cargo build --release
-```
+# Clone and enter the repo
+git clone https://github.com/pfrack/cerebrum.git
+cd cerebrum
 
-The binary is `./target/release/cerebrum`.
-
-### Run with the embedded defaults
-
-The binary compiles `config.toml` into itself, so a fresh checkout runs
-with no config file:
-
-```bash
-export PROXY_API_BEARER_TOKEN="replace-me"
+# Set the three required environment variables
+export PROXY_API_BEARER_TOKEN="your-secret-token"
 export DASHBOARD_BASIC_USER="admin"
-export DASHBOARD_BASIC_PASSWORD="change-me"
-./target/release/cerebrum
+export DASHBOARD_BASIC_PASSWORD="your-dashboard-password"
+
+# Build and run (this downloads dependencies on first run)
+cargo run
 ```
 
-The server listens on `0.0.0.0:10000` (configurable via `[server].port`
-in `config.toml` or the `PORT`-style keys).
-
-Smoke test:
+The server starts on the port configured in `config.toml` (default: `10000`):
 
 ```bash
-curl -i http://127.0.0.1:10000/health
-# 200 ok
+# Verify the gateway is running
+curl http://localhost:10000/health
+# → "ok"
 ```
 
-### Run with a config overlay
+To set a custom port without editing `config.toml`, override the embedded defaults via `CONFIG_PATH`:
 
 ```bash
-export CONFIG_PATH=/etc/cerebrum/config.toml
-./target/release/cerebrum
+echo '[server]
+port = 8080' > my-config.toml
+CONFIG_PATH=my-config.toml cargo run
 ```
 
-The overlay file is merged on top of the embedded defaults — see
-[Configuration](#configuration).
-
-### Validate config without starting the server
+Run the config validator to catch errors before starting the server:
 
 ```bash
-./target/release/cerebrum --validate
-# "Configuration valid" on success; per-line errors on failure
+CONFIG_PATH=my-config.toml cargo run -- --validate
 ```
 
-### Run the test suite
-
-```bash
-cargo test                  # fast unit + integration tests
-cargo test slow_tests       # tests that depend on real timing
-```
-
-The CI pipeline runs a tighter subset:
-
-```bash
-cargo test auth
-cargo test routes_auth
-cargo test persistence       # DB integration only if DATABASE_URL is set
-```
-
-See [Development → Testing](#testing) for details.
+The gateway runs with an in-memory persistence backend by default — no database required. See [Persistence Backends](#persistence-backends) to configure PostgreSQL or SQLite.
 
 ## Configuration
 
-Cerebrum has two configuration surfaces:
+Cerebrum uses a **layered configuration model**:
 
-| Surface         | Where                                        | What goes here                            |
-| --------------- | -------------------------------------------- | ----------------------------------------- |
-| **`config.toml`** (or `.yaml`) | `config.toml` at repo root, or `CONFIG_PATH` overlay | Server, HTTP, CORS, persistence, classifiers, categories, routing, model costs, dashboard, auth providers, patterns dir, baseline model. |
-| **Environment** | Shell / Render dashboard / GitHub secrets    | Secrets only: `PROXY_API_BEARER_TOKEN`, `DASHBOARD_BASIC_USER`, `DASHBOARD_BASIC_PASSWORD`, `DATABASE_URL`, `NVIDIA_API_KEY`, `OPENAI_API_KEY`, `OTEL_*`. |
+1. **Embedded defaults** — every compiled binary contains a complete `config.toml` with sensible defaults, so a freshly built binary runs with no config file.
+2. **Config overlay** — set `CONFIG_PATH=/path/to/your/config.toml` to override specific sections. Overlay sections (`[classifiers]`, `[categories]`, `[routing]`, etc.) are fully replaced; other sections are merged field-by-field. YAML files are also accepted (auto-detected by extension).
+3. **Environment variables** — secrets (API keys, auth tokens, database URLs) are always read from the environment, never stored in config files.
 
-The three runtime env vars marked required below are enforced at
-startup — `AuthConfig::from_env` panics on a missing or empty value.
+To validate your configuration without starting the server:
 
-### Required environment variables
+```bash
+CONFIG_PATH=/path/to/config.toml cargo run -- --validate
+```
 
-| Variable                     | Purpose                                                       |
-| ---------------------------- | ------------------------------------------------------------- |
-| `PROXY_API_BEARER_TOKEN`     | Bearer token required by the `/v1/*` proxy routes.            |
-| `DASHBOARD_BASIC_USER`       | Username for HTTP basic auth on `/dashboard/*`.               |
-| `DASHBOARD_BASIC_PASSWORD`   | Password for HTTP basic auth on `/dashboard/*`.               |
+Run `cerebrum --init` to generate a commented starter configuration file.
 
-### Optional environment variables
-
-| Variable             | Purpose                                                                                       |
-| -------------------- | --------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`       | Postgres connection string. If set, Cerebrum uses Postgres; otherwise it falls back to `[persistence].backend`. |
-| `NVIDIA_API_KEY`     | Default upstream key used by the embedded routing entries (NVIDIA NIM).                       |
-| `OPENAI_API_KEY`     | Used by the optional LLM classifier backend.                                                   |
-| `OTEL_ENABLED`       | `true`/`1` enables OTLP export (also requires the `otel` Cargo feature at build time).        |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME` | Standard OTel env vars, auto-detected by the exporter. |
-| `CONFIG_PATH`        | Path to an overlay `config.toml` or `config.yaml` (merged on top of the embedded defaults).   |
-| `RUST_LOG`           | Standard `tracing` log filter, e.g. `info,cerebrum=debug`.                                    |
-| `CLASSIFY_DB_LOG`    | `true` to log records on `POST /v1/classify` in addition to `/v1/chat/completions`.           |
-
-### `config.toml` sections (with defaults)
-
-The full embedded default file is `config.toml` at the repo root — it is
-the single source of truth for every non-secret knob. Key sections:
+A minimal overlay config that changes the port and enables SQLite persistence:
 
 ```toml
 [server]
-port = 10000
-log_level = "info"        # trace | debug | info | warn | error
-log_format = "compact"    # compact | full | json | pretty
-
-[http]
-max_upstream_body_bytes = 10485760   # 10 MB cap for upstream responses
-keepalive_interval_secs = 15         # SSE keepalive cadence
-request_body_limit_bytes = 10485760
-client_timeout_secs = 120
-client_connect_timeout_secs = 30
-streaming_channel_capacity = 32
-
-[cors]
-allowed_origins = []      # empty = no CORS headers (secure default)
+port = 3000
 
 [persistence]
-backend = "memory"        # memory | sqlite | postgres
-# sqlite_path = "./cerebrum.db"
-
-[database]                # pool / retry / semaphore for SQL backends
-connection_retries = 3
-retry_base_ms = 1000
-max_connections = 10
-acquire_timeout_secs = 30
-idle_timeout_secs = 1800
-log_concurrency_limit = 100
-
-[classifiers]
-enabled = true
-order = ["regex", "fewshot", "llm"]   # first non-Fallback wins
-
-[regex_classifier]
-enabled = true
-short_prompt_len = 30     # below this char count, unmatched → CASUAL
-
-# [fewshot_classifier] — uncomment to enable; pulls bootstrap from
-# data/fewshot_bootstrap.yaml and persists learned data to data_path.
-# [llm_classifier] — uncomment to enable an LLM fallback tier.
-
-[categories.FILE_READING]        # name, description, threshold, priority,
-[categories.SYNTAX_FIX]          # patterns: [{ regex, weight }]
-[categories.COMPLEX_REASONING]
-[categories.CASUAL]
-
-[[negative_patterns]]            # subtract from a category's score
-regex = "..."
-suppressed = "CATEGORY"
-penalty = 2
-
-[routing.FILE_READING]           # name → { model, endpoint,
-[routing.SYNTAX_FIX]             # provider_type, api_key_env,
-[routing.COMPLEX_REASONING]      # cost_per_1m_input_tokens? }
-[routing.CASUAL]
-[routing.DEFAULT]
-
-baseline_model = "meta/llama-3.3-70b-instruct"
-classify_db_log = false
-
-[model_costs]                    # used by the savings estimate
-"claude-3.5-sonnet" = 3.00
-"gpt-4o" = 2.50
-"gpt-4o-mini" = 0.15
-"deepseek-chat" = 0.14
-
-[dashboard]
-default_hours = 24
-hours_min = 1
-hours_max = 720
-page_limit = 20
-page_limit_max = 100
-recent_count = 5
-
-[[auth_provider]]                # maps provider_type → HTTP auth header
-type = "openai_compatible"
-header = "authorization"
-value_template = "Bearer {api_key}"
-# anthropic, ollama, local, nvidia_nim are also supported.
+backend = "sqlite"
+sqlite_path = "./data/cerebrum.db"
 ```
 
-### Patterns directory
+### Environment Variables
 
-Categories can reference a `patterns_file` (path is relative to
-`patterns_dir`, which defaults to `./patterns` and is sandboxed to
-prevent path-escape). Each line is `<weight> | <regex>`:
+| Variable | Required | Description | Default |
+|---|---|---|---|
+| `PROXY_API_BEARER_TOKEN` | Yes | Bearer token for API proxy routes | — |
+| `DASHBOARD_BASIC_USER` | Yes | Basic auth username for the dashboard | — |
+| `DASHBOARD_BASIC_PASSWORD` | Yes | Basic auth password for the dashboard | — |
+| `DATABASE_URL` | No | PostgreSQL connection URL | Falls through to SQLite or memory |
+| `CONFIG_PATH` | No | Path to config overlay file | Uses embedded defaults |
+| `OTEL_ENABLED` | No | Enable OpenTelemetry export (`true`/`false`) | `false` (requires `otel` feature) |
 
-```text
-3 | (?i)\b(?:read|show|display)\s+(?:the\s+)?file\b
-2 | (?i)\b(?:line|lines)\s+\d+
-```
+### Configuration File Reference
 
-## API surface
+The full configuration schema is documented in `config.toml` at the repo root. Key sections:
 
-The full machine-readable contract is in `openapi/completions.yaml`.
+- `[server]` — port, log level, log format
+- `[http]` — timeouts, body limits, keepalive, streaming channel capacity
+- `[classifiers]` — enabled classifiers and their evaluation order
+- `[categories]` — intent category definitions with regex patterns and thresholds
+- `[routing]` — model, endpoint, provider, and API key env var per category
+- `[persistence]` — backend selection and SQLite path
+- `[dashboard]` — time window defaults, pagination limits
+- `[model_costs]` — cost per 1M input tokens per model (used for savings estimates)
+- `[[negative_patterns]]` — suppression rules that subtract from category scores
+- `[[auth_provider]]` — upstream authentication provider definitions
 
-| Method | Path                     | Auth        | Purpose                                                     |
-| ------ | ------------------------ | ----------- | ----------------------------------------------------------- |
-| GET    | `/health`                | public      | Liveness check — returns `200 "ok"`.                        |
-| POST   | `/v1/chat/completions`   | Bearer      | Classify → route → upstream. JSON or SSE (when `stream:true`). |
-| POST   | `/v1/classify`           | Bearer      | Classify-only JSON response (no upstream call).             |
-| POST   | `/v1/feedback`           | Bearer      | Submit feedback for few-shot retraining.                    |
-| GET    | `/dashboard/`            | Basic auth  | Overview (status, quick stats, recent inferences).          |
-| GET    | `/dashboard/inferences`  | Basic auth  | Paginated, filterable inference log.                        |
-| GET    | `/dashboard/latency`     | Basic auth  | Per-category avg + p99 over a time window.                  |
-| GET    | `/dashboard/savings`     | Basic auth  | Estimated cost savings vs `baseline_model`.                 |
-| GET    | `/dashboard/static/*`    | Basic auth  | `static/dashboard.css` and other static assets.             |
+## Persistence Backends
 
-### Proxy example
+Cerebrum supports three persistence backends, resolved in priority order:
 
-```bash
-curl -X POST http://127.0.0.1:10000/v1/chat/completions \
-  -H "Authorization: Bearer $PROXY_API_BEARER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages":[{"role":"user","content":"fix this bug"}]
-  }'
-```
+| Priority | Condition | Backend | Notes |
+|---|---|---|---|
+| 1 | `DATABASE_URL` is set | **PostgreSQL** | Production-grade. Requires a running Postgres instance. Migrations are applied automatically on startup. |
+| 2 | `[persistence].backend = "sqlite"` | **SQLite** | File-backed (default: `./cerebrum.db`). No external process required. Falls back to in-memory on connection failure. |
+| 3 | Default (no `DATABASE_URL`, no explicit backend) | **In-memory** | Ephemeral — data is lost on restart. Capped at 10,000 records. Zero configuration. |
 
-Successful response (routed upstream, JSON):
-
-```json
-{ "id": "…", "choices": […] }
-```
-
-When no upstream is configured for the matched category, the response
-is a classification-only envelope:
-
-```json
-{ "status": "classified", "category": "SYNTAX_FIX",
-  "model": "meta/llama-3.1-8b-instruct", "tier": "Regex" }
-```
-
-### Streaming example
-
-```bash
-curl -N -X POST http://127.0.0.1:10000/v1/chat/completions \
-  -H "Authorization: Bearer $PROXY_API_BEARER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages":[{"role":"user","content":"explain a hash map"}],
-    "stream": true
-  }'
-```
-
-- Successful responses stream raw SSE bytes from the upstream.
-- A `: keepalive\n\n` comment is injected every `keepalive_interval_secs`
-  of silence.
-- Non-2xx upstream responses emit a single
-  `event: error\ndata: {"error":"<msg>"}\n\n` frame, with the upstream
-  status code preserved and a 2 KB error-body cap.
-
-### Skip classification (advanced)
-
-Send `X-Cerebrum-Category` and `X-Cerebrum-Model` headers to skip the
-classifier and use the matching routing entry directly. Useful for
-debugging and integration tests.
-
-### Feedback example
-
-```bash
-curl -X POST http://127.0.0.1:10000/v1/feedback \
-  -H "Authorization: Bearer $PROXY_API_BEARER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "show me the contents of config.toml",
-    "predicted_category": "FILE_READING",
-    "actual_category": "FILE_READING",
-    "satisfaction": 0.9
-  }'
-```
-
-A `satisfaction < 0.99` is treated as a feedback signal; once
-`retraining_threshold` feedbacks have been collected, the few-shot
-classifier retrains in the background. The actual response is
-`200 {"status":"accepted"}`.
+The persistence layer is fire-and-forget: inference records are written to a background task bounded by a semaphore, so database latency never blocks the response path.
 
 ## Architecture
 
-### Request flow
+Cerebrum is a **single-binary Axum gateway** running on a single Tokio async runtime. The persistence layer is the only side effect — all other processing is in-memory and synchronous from the request handler's perspective.
 
-```text
-client ─POST /v1/chat/completions─▶  Axum router
-                                          │
-                  ┌───────────────────────┼────────────────────────┐
-                  │                       │                        │
-        AuthConfig::validate       extract_last_user_message       │
-        (constant-time bearer)            │                        │
-                  │                       ▼                        │
-                  │       ┌──── ClassifierChain (in order) ───┐  │
-                  │       │  regex  →  fewshot  →  llm        │  │
-                  │       │  first non-Fallback wins           │  │
-                  │       └───────────────────────────────────┘  │
-                  │                       │                        │
-                  │                       ▼                        │
-                  │       resolve api_key_env from routing       │
-                  │                       │                        │
-                  │                       ▼                        │
-                  │       build upstream request (auth headers,  │
-                  │       override "model" field, JSON body)     │
-                  │                       │                        │
-                  │                       ▼                        │
-                  │              reqwest POST upstream           │
-                  │                       │                        │
-                  │       ┌───────────────┴──────────────┐        │
-                  │       ▼                              ▼        │
-                  │   stream:true?                  stream:false  │
-                  │   SSE proxy + keepalive         buffered JSON │
-                  │       │                              │        │
-                  │       └──────────────┬───────────────┘        │
-                  │                      ▼                        │
-                  │   return response                            │
-                  │                      │                        │
-                  │                      ▼                        │
-                  │   fire-and-forget log_inference               │
-                  │   (semaphore-bounded, 200-char snippet)       │
-                  └──────────────────────────────────────────────┘
+At startup the binary:
+1. Reads configuration from embedded defaults, merges any overlay from `CONFIG_PATH`, and overrides secrets from environment variables
+2. Parses categories, patterns, routing entries, model costs, negative patterns, and auth provider definitions from the merged config
+3. Initializes the classifier chain — builds the configured backend classifiers (regex is always available; fewshot and LLM are loaded if enabled)
+4. Resolves the persistence backend (Postgres if `DATABASE_URL` is set, SQLite if configured, otherwise in-memory)
+5. Builds the Axum router — mounts `/health`, `/v1/*` proxy routes, and `/dashboard/*` with their respective auth middleware layers
+6. Binds to the configured port and starts accepting requests
+
+### Intent Classification
+
+Classification is performed by a **pluggable chain** of backends implementing the `IntentClassify` trait. The chain iterates backends in configured order (default: `regex → fewshot → llm`) and returns the first result whose tier is not `Fallback`. If all backends return `Fallback`, the last fallback result is used.
+
+| Backend | Default | Mechanism |
+|---|---|---|
+| **Regex** | Enabled | Built-in pattern matching with weighted regex rules per category. Supports dual-threshold suppression and negative patterns that subtract from competing categories. |
+| **FewShot** | Opt-in | TF-IDF bag-of-words cosine similarity with bootstrap examples from `data/fewshot_bootstrap.yaml`. Learns from feedback submitted via `POST /v1/feedback`. Controlled by `confidence_threshold` and `cold_start_threshold`. |
+| **LLM** | Opt-in | Delegates classification to an external LLM (e.g., `gpt-4o-mini`). Configured via the `[llm_classifier]` section in `config.toml`. |
+
+Routing is **data-driven**: each category in `config.toml` has a corresponding `[routing.<CATEGORY>]` entry specifying the model, endpoint, provider type, and API key environment variable. Adding a new category is a configuration change — no code modification required.
+
+### Request Flow
+
+```
+Request → Bearer auth → Classify → Select route → Proxy upstream → Log inference → Response
 ```
 
-### Module map
+1. **Receive** — the gateway accepts HTTP requests on the configured port
+2. **Authenticate** — proxy routes require a valid bearer token (`PROXY_API_BEARER_TOKEN`); dashboard routes require HTTP basic auth (`DASHBOARD_BASIC_USER` / `DASHBOARD_BASIC_PASSWORD`)
+3. **Classify** — the classifier chain evaluates the last user message against all configured backends (regex → fewshot → llm)
+4. **Select route** — the winning category maps to a `[routing.*]` entry with model, endpoint, and provider configuration
+5. **Proxy upstream** — the request is forwarded to the upstream provider. If `stream: true` in the request body, the response is streamed as Server-Sent Events (SSE); otherwise it is buffered and returned as JSON. OpenAI-compatible and Anthropic Messages API formats are both supported
+6. **Log inference** — a fire-and-forget background task persists the inference metadata (snippet, category, duration, model, token usage) bounded by a semaphore
+7. **Respond** — the upstream response (or classification-only result when no upstream is configured) is returned to the client
 
-| Module                   | Responsibility                                                       |
-| ------------------------ | -------------------------------------------------------------------- |
-| `src/main.rs`            | Router assembly, request handlers, SSE keepalive, CLI entrypoint.    |
-| `src/auth.rs`            | `AuthConfig`, constant-time bearer/basic checks, Axum auth layers.  |
-| `src/config.rs`          | `ConfigRoot` schema, loaders, `--validate`, overlay merge.           |
-| `src/intent_classifier.rs` | `IntentClassify` trait, `RegexClassifier`, `LLMClassifier`, `ClassifierChain`. |
-| `src/fewshot_classifier.rs` | Bag-of-words cosine-similarity classifier with feedback retraining. |
-| `src/persistence.rs`     | `PersistenceBackend` trait + `Memory` / `Sqlite` / `Postgres` impls. |
-| `src/dashboard.rs`       | Page registry, Askama templates, dashboard sub-router.               |
-| `src/routing.rs`         | `RouteEntry`, `ModelCosts`, default model constants.                 |
-| `src/telemetry.rs`       | OTel providers + pre-allocated metrics (feature-gated).             |
+### SSE Streaming
 
-### Persistence backend selection
+When a request includes `"stream": true`, the gateway proxies the upstream response as Server-Sent Events:
 
-```text
-DATABASE_URL set?
-  ├─ yes → Postgres (sqlx pool, retries, sqlx::migrate! on boot)
-  └─ no  → [persistence].backend
-              ├─ "sqlite" → SqliteBackend("./cerebrum.db" or :memory:)
-              ├─ "postgres" → warn + fall back to memory
-              └─ <other/empty> → MemoryBackend (capped at 10 000 records)
-```
+- Upstream data chunks are forwarded directly as SSE `data:` events
+- A `: keepalive` comment is injected after every `keepalive_interval_secs` (default: 15s) of silence on the stream — this prevents proxy-level or client-level timeouts during long generations
+- Upstream error responses emit an `event: error` SSE event with a JSON-escaped body capped at **2 KB** (prevents large error payloads from consuming memory on the proxy path)
+- The streaming channel capacity is configurable (default: 32 messages) — controls backpressure between the upstream reader and the SSE response writer
+- Both OpenAI-compatible and Anthropic-compatible streaming are supported; the gateway detects the upstream format and forwards appropriately
 
-### Classifier chain
+### Privacy & Security
 
-`IntentClassify` is a trait with one async method:
-`async fn classify(&self, prompt: &str) -> ClassificationResult`.
+- **Prompt snippet** — only the first 200 characters of the last user message are stored (`extract_snippet`). The full prompt is never persisted
+- **Character count** — `prompt_char_count` records the true message length for cost estimation without exposing content
+- **Constant-time comparison** — all credential comparisons (bearer token, basic auth user/password) use HMAC-SHA256 via the `subtle` crate to prevent timing attacks
+- **Auth separation** — bearer token authentication for proxy routes (`/v1/*`), HTTP basic authentication for dashboard routes (`/dashboard/*`), each with its own middleware layer
 
-`ClassifierChain` iterates backends in `classifiers.order` and returns
-the first result whose `tier` is not `Fallback`. If all backends return
-`Fallback`, the last fallback is returned. The default order is
-`["regex", "fewshot", "llm"]`; you can disable or reorder them in
-`config.toml`.
+## API Reference
 
-The `tier` enum is currently `Regex | FewShot | Fallback` — successful
-LLM matches report as `Regex` (an architectural detail; see
-`src/main.rs:1649-1653`).
+Cerebrum exposes an OpenAI-compatible API surface for chat completions, plus dedicated classify and feedback endpoints. All proxy routes are mounted under `/v1/` and require the bearer token set via `PROXY_API_BEARER_TOKEN`. The dashboard routes are mounted under `/dashboard/` with basic authentication.
 
-### Privacy
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/health` | Public | Liveness check; returns `200 "ok"` |
+| POST | `/v1/chat/completions` | Bearer | Classify intent and proxy to upstream model. Supports SSE streaming when `stream: true` |
+| POST | `/v1/messages` | Bearer | Anthropic Messages API pass-through. Same classification + routing, Anthropic-format body |
+| POST | `/v1/classify` | Bearer | Classify-only endpoint; returns the category, model, and tier without proxying |
+| POST | `/v1/feedback` | Bearer | Submit classification feedback for few-shot retraining |
+| GET | `/dashboard/` | Basic auth | Dashboard overview — status, quick stats, recent inferences |
+| GET | `/dashboard/inferences` | Basic auth | Paginated, filterable inference log |
+| GET | `/dashboard/latency` | Basic auth | Per-category average and p99 latency over a time window |
+| GET | `/dashboard/savings` | Basic auth | Estimated cost savings vs. baseline model |
+| GET | `/dashboard/static/*` | Basic auth | Static assets (dashboard CSS) |
 
-Persisted `prompt_snippet` is **capped at 200 characters** by
-`extract_snippet` (`src/persistence.rs:1118-1121`). The true message
-length is recorded separately as `prompt_char_count` so cost math
-remains accurate without retaining the full prompt body. Messages
-arrays over 1 000 entries are silently dropped to bound work.
+See `openapi/completions.yaml` for full request/response schemas.
 
 ## Dashboard
 
-The four pages are registered in `PAGES` (`src/dashboard.rs:44-65`).
-The sidebar is rendered from that single source of truth via
-`templates/base.html`.
+The operator dashboard is served under `/dashboard/` with HTTP basic authentication (credentials from `DASHBOARD_BASIC_USER` and `DASHBOARD_BASIC_PASSWORD`). Sidebar navigation is auto-generated from a single `PAGES` registry at `src/dashboard.rs:44-65` — adding a new dashboard page requires registering a `NavPage` entry, creating a template, writing a handler, and adding a route. It has four pages:
 
-| Page                  | Path                       | What you see                                              |
-| --------------------- | -------------------------- | --------------------------------------------------------- |
-| **Dashboard**         | `/dashboard/`              | Status (gateway/DB), quick stats, recent inferences, est. savings. |
-| **Inference Logs**    | `/dashboard/inferences`    | Paginated, filterable by category and model, with snippet, category, model, duration. |
-| **Latency**           | `/dashboard/latency`       | Per-category request count, avg duration, p99 over a time window. |
-| **Savings**           | `/dashboard/savings`       | Estimated $ saved vs the configured `baseline_model`.     |
-
-The dashboard uses Askama templates compiled at build time
-(`askama = "0.16"`, `askama_web`). All dashboard templates extend
-`templates/base.html` and override only `{% block content %}`. To add
-a new page: add a `NavPage` entry to `PAGES`, define a struct with the
-`dashboard_page!` macro, write a handler, and add one `.route()` line in
-`src/dashboard.rs:349-357`.
+- **Dashboard** (`/dashboard/`) — overview page with server status indicator, quick stats (total inferences, classified count), and recent inference records
+- **Inference Logs** (`/dashboard/inferences`) — paginated table of inference records with search/filter by category, model, and date range. Each row shows the prompt snippet, category, model, duration, and timestamp
+- **Latency** (`/dashboard/latency`) — per-category latency breakdown showing average and p99 response times over a configurable time window (default: 24 hours)
+- **Savings** (`/dashboard/savings`) — estimated cost savings compared to the configured `baseline_model`, based on actual model costs and per-category routing decisions
 
 ## Deployment
 
-### Render (current production target)
-
-`render.yaml` declares a `web` service:
-
-- `buildCommand`: `cargo build --release`
-- `startCommand`: `./target/release/cerebrum`
-- `healthCheckPath`: `/health`
-- Env vars (`PROXY_API_BEARER_TOKEN`, `DASHBOARD_BASIC_USER`,
-  `DASHBOARD_BASIC_PASSWORD`, `DATABASE_URL`) are `sync: false` — set
-  them in the Render dashboard, never commit them.
-
-### GitHub Actions (`.github/workflows/deploy.yml`)
-
-Triggered on push to `main`. Sequence:
-
-1. Checkout + install stable Rust.
-2. `cargo test auth` and `cargo test routes_auth` (auth gates the rest).
-3. `cargo test persistence` (with `SQLX_OFFLINE=true`); DB integration
-   tests run only if the runner has `DATABASE_URL` set.
-4. `cargo build --release`.
-5. POST the commit SHA to the `RENDER_DEPLOY_HOOK` secret. A missing
-   webhook secret fails the job loudly.
-
-The workflow uses `concurrency: render-production` with
-`cancel-in-progress: true` so superseded pushes don't fight for the
-deploy slot.
-
-### Manual / on-prem
+### Building
 
 ```bash
 cargo build --release
-export PROXY_API_BEARER_TOKEN=... DASHBOARD_BASIC_USER=... DASHBOARD_BASIC_PASSWORD=...
-export DATABASE_URL=postgres://user:pass@host:5432/cerebrum      # optional
-./target/release/cerebrum
 ```
 
-Run the process under a supervisor (systemd, runit, Docker, etc.) and
-make sure it receives `SIGTERM` for a clean shutdown — the
-`shutdown_signal` handler in `src/main.rs:460-473` flushes in-flight
-SSE streams and OTel providers.
+The compiled binary is at `target/release/cerebrum`. It has no runtime dependencies beyond the system libraries required by the Rust standard library — no interpreter, JVM, or container runtime is required.
 
-## Project layout
+### Render
 
-```text
-cerebrum/
-├── AGENTS.md                     # contributor guide (conventions, layout, testing)
-├── Cargo.toml                    # Rust manifest (axum, tokio, sqlx, askama, …)
-├── config.toml                   # embedded default config (single source of truth)
-├── render.yaml                   # Render service definition
-├── openapi/
-│   └── completions.yaml          # OpenAPI 3.0.3 spec for the proxy API
-├── src/
-│   ├── main.rs                   # router, handlers, SSE, telemetry init, tests
-│   ├── auth.rs                   # AuthConfig + Axum auth layers
-│   ├── config.rs                 # ConfigRoot, loaders, --validate, merge_configs
-│   ├── intent_classifier.rs      # RegexClassifier, LLMClassifier, ClassifierChain
-│   ├── fewshot_classifier.rs     # bag-of-words classifier + feedback learning
-│   ├── persistence.rs            # MemoryBackend / SqliteBackend / PostgresBackend
-│   ├── dashboard.rs              # PAGES registry, Askama templates, dashboard routes
-│   ├── routing.rs                # RouteEntry, ModelCosts, default models
-│   └── telemetry.rs              # OTel providers + metrics (feature-gated)
-├── templates/
-│   ├── base.html                 # sidebar layout (auto-nav)
-│   └── dashboard/
-│       ├── index.html            # overview
-│       ├── inferences.html       # log table + filters
-│       ├── latency.html          # per-category latency
-│       └── savings.html          # cost-savings estimate
-├── static/
-│   └── dashboard.css             # dashboard styles
-├── migrations/                   # sqlx migrations for the inferences table
-│   ├── 001_create_inferences.sql
-│   ├── 002_inferences_request_id_unique.sql
-│   └── 003_add_prompt_char_count.sql
-├── data/
-│   └── fewshot_bootstrap.yaml    # initial few-shot training examples
-├── routing_examples/             # sample routing TOML files
-├── manual-test/                  # interactive manual test harness
-├── scripts/
-│   └── manual_tests.sh           # --auto / --basic smoke + integration entrypoints
-├── context/                      # foundation/ + changes/ + archive/ (10x workflow)
-│   ├── foundation/               # PRD, tech stack, lessons, roadmap, test plan
-│   ├── changes/                  # active change folders with plan/research/change.md
-│   └── archive/                  # completed changes (date-prefixed)
-└── .github/workflows/
-    └── deploy.yml                # CI: test → build → Render deploy webhook
-```
+The repository includes a `render.yaml` that defines a web service with the following configuration:
+
+- **Build command**: `cargo build --release`
+- **Start command**: `./target/release/cerebrum`
+- **Health check path**: `/health`
+- **Environment variables** (set in the Render dashboard, not committed):
+  - `PROXY_API_BEARER_TOKEN` — required
+  - `DASHBOARD_BASIC_USER` — required
+  - `DASHBOARD_BASIC_PASSWORD` — required
+  - `DATABASE_URL` — optional, for PostgreSQL
+
+All secret environment variables are marked `sync: false` in `render.yaml`, meaning they must be set manually in the Render dashboard.
+
+### Production Checklist
+
+- Set `PROXY_API_BEARER_TOKEN`, `DASHBOARD_BASIC_USER`, and `DASHBOARD_BASIC_PASSWORD` to strong, unique values
+- Configure a PostgreSQL database via `DATABASE_URL` for persistent inference logs
+- Review `[http]` timeouts (`client_timeout_secs`, `client_connect_timeout_secs`) and body limits (`max_upstream_body_bytes`, `request_body_limit_bytes`) for your workload
+- Run behind a TLS-terminating reverse proxy (Render handles this automatically; for self-hosted deployments, use nginx, Caddy, or a similar proxy)
+- Monitor logs — the gateway uses structured logging with `RUST_LOG` for filtering
+- Test authentication and routing with `scripts/manual_tests.sh --basic`
+
+## CI/CD
+
+On every push to `main`, the GitHub Actions workflow (`.github/workflows/deploy.yml`):
+
+1. Checks out the code and installs the stable Rust toolchain
+2. Runs auth verification tests (`cargo test auth`, `cargo test routes_auth`)
+3. Runs persistence contract tests (`cargo test persistence::tests`; PostgreSQL integration tests run only when `DATABASE_URL` is set)
+4. Builds the release binary (`cargo build --release`)
+5. Triggers a Render deployment via `RENDER_DEPLOY_HOOK` webhook (fails loudly if missing)
+
+## Testing
+
+The test suite is organized into two groups within `src/main.rs`:
+
+- **Fast tests** (`mod tests`) — unit and integration tests that run with `cargo test`. Includes classifier tests, route handlers, auth middleware, and persistence contract tests
+- **Slow tests** (`mod slow_tests`) — tests with real delays (e.g., keepalive interval), run with `cargo test slow_tests`
+
+Targeted test commands:
+
+| Command | Scope |
+|---|---|
+| `cargo test` | All fast unit/integration tests |
+| `cargo test auth` | Auth middleware tests |
+| `cargo test routes_auth` | Route authorization tests |
+| `cargo test persistence` | Persistence backend contract tests |
+| `cargo test slow_tests` | Tests with timing delays |
+| `cargo test persistence_integration` | PostgreSQL integration (requires `DATABASE_URL`) |
+
+A manual test harness is available at `scripts/manual_tests.sh` with three modes:
+- `--auto` — full automated scenario suite
+- `--basic` — quick smoke tests (health, auth, classification, graceful shutdown)
+- Default — interactive mode
+
+### Test Infrastructure
+
+- **httpmock 0.7** — mock upstream server for proxy route tests (verifies correct request forwarding, streaming, retry behavior, and error handling)
+- **serial_test 3** — serializes tests that modify environment variables (prevents cross-test contamination of `DATABASE_URL`, `CONFIG_PATH`, and other env-dependent state)
+- **testcontainers 0.27** — disposable PostgreSQL container for integration tests (falls back to `DATABASE_URL` when Docker is unavailable)
+- **`#[tokio::test]`** — all async tests use Tokio's test runtime; test apps are constructed via `test_app()` and tested with `Request::builder()` against the full router
+
+### Writing Tests
+
+Tests live inline with the code they test (follow the patterns in `src/main.rs`). Test names follow the convention `test_<component>_<case>`. The `mod tests` block in each file contains fast unit tests; `mod slow_tests` contains tests with real timing delays.
 
 ## Development
 
-### Conventions (enforced by `AGENTS.md`)
+### Source Layout
 
-- **Constant-time comparison** for all security-sensitive string
-  matching (via `subtle` + HMAC-SHA256 in `src/auth.rs:169-185`).
-- **`Arc<AuthConfig>` via Axum state** for middleware; never hardcode
-  secrets.
-- **Middleware signature** —
-  `State(config): State<Arc<AuthConfig>>`, `headers: HeaderMap`,
-  `request: Request<Body>`, `next: Next`.
-- **No comments in code** unless explicitly requested.
-- **Tests are inline** with the code they test (see
-  `src/main.rs:1196+` and the `#[cfg(test)]` modules in every file).
-- **Dashboard pages** are added via the `dashboard_page!` macro and the
-  `PAGES` registry — never by editing `base.html` directly.
+| Path | Role |
+|---|---|
+| `src/main.rs` | Axum router, route handlers, SSE keepalive, `AppState`, test harness |
+| `src/auth.rs` | `AuthConfig`, constant-time bearer/basic auth middleware |
+| `src/config.rs` | `ConfigRoot` (mirrors `config.toml`), loaders, `--validate` mode, overlay merge |
+| `src/intent_classifier.rs` | `IntentClassify` trait, `RegexClassifier`, `LLMClassifier`, `ClassifierChain` |
+| `src/fewshot_classifier.rs` | Few-shot TF-IDF classifier with feedback learning |
+| `src/persistence.rs` | `PersistenceBackend` trait, three backends (Memory, SQLite, Postgres), `InferenceRecord`, `log_inference` |
+| `src/dashboard.rs` | `PAGES` registry, `dashboard_page!` macro, Askama template handlers, sidebar nav |
+| `src/routing.rs` | `RouteEntry`, `ModelCosts`, default model constants |
+| `src/telemetry.rs` | OTel providers (behind `otel` feature) |
+| `src/protocol_translation.rs` | Anthropic ↔ OpenAI request/response translation |
+| `src/quickstart.rs` | Quickstart config generation (`--init` mode) |
 
-A small set of **recurring rules** is captured in
-`context/foundation/lessons.md` (e.g. delete dead code rather than
-suppress warnings, log before falling back, prefer dynamic SQL
-`WHERE` building over duplicated branches, etc.). Re-read this file
-before touching the classifier or proxy code paths.
+### Conventions
 
-### Testing
+- **Constant-time comparison** for all security-sensitive string matching (HMAC-SHA256 via the `subtle` crate)
+- **Dashboard page recipe** — register a `NavPage` in the `PAGES` static array, define a template struct with the `dashboard_page!` macro, write the handler, and add a route line
+- **Config as data** — routing, categories, and provider definitions are all data-driven from `config.toml`. Adding a new category or route requires no code changes
+- **Fire-and-forget logging** — `log_inference` spawns a detached background task; the response path is never blocked on database I/O
+- **Privacy-first design** — `extract_snippet` caps stored prompt text at 200 characters; full prompts exist only in transient memory during classification and upstream proxying
+- **Single source of truth for nav** — the `PAGES` registry in `src/dashboard.rs` drives the entire sidebar; adding a page is a 5-step recipe (template, registry entry, macro, handler, route)
 
-| Test type        | Command                                      | When                                         |
-| ---------------- | -------------------------------------------- | -------------------------------------------- |
-| Fast unit + integration | `cargo test`                          | Local + CI on every push.                    |
-| Auth gate        | `cargo test auth`                            | First gate in CI; blocks deploy on failure.  |
-| Route auth gate  | `cargo test routes_auth`                     | First gate in CI.                            |
-| Persistence contract | `cargo test persistence`                 | CI; DB integration tests run if `DATABASE_URL` is set. |
-| Slow / timing    | `cargo test slow_tests`                      | Manual or on-demand.                         |
-| Manual harness   | `bash scripts/manual_tests.sh --auto`        | Pre-release smoke.                           |
-| Basic smoke      | `bash scripts/manual_tests.sh --basic`       | Quick local check.                           |
-| Interactive      | `bash manual-test/run.sh`                    | Manual exploration.                          |
+## OpenTelemetry (Experimental)
 
-Test-only dependencies: `httpmock 0.7` (mock upstreams),
-`serial_test 3` (env-var serialization), `testcontainers 0.27`
-(real Postgres for persistence integration tests).
+OpenTelemetry support is opt-in and requires two things:
 
-### Telemetry (OpenTelemetry)
+1. **Cargo feature**: build with `--features otel` (adds dependencies on `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `tracing-opentelemetry`)
+2. **Environment variable**: set `OTEL_ENABLED=true`
 
-The OTel integration is **feature-gated** and **opt-in**:
+When enabled, the gateway exports traces, metrics, and logs via OTLP. Metrics include request count, request duration, and classification outcomes per category/tier.
 
-```bash
-cargo build --release --features otel
-OTEL_ENABLED=true \
-OTEL_EXPORTER_OTLP_ENDPOINT=https://collector.example.com \
-OTEL_SERVICE_NAME=cerebrum \
-./target/release/cerebrum
-```
+**Status**: experimental. The OTel integration is feature-gated and not enabled by default.
 
-Pre-allocated instruments (`src/telemetry.rs:28-33`):
+## FAQ
 
-- `cerebrum.requests.total` — counter of incoming requests.
-- `cerebrum.request.duration_seconds` — end-to-end latency histogram.
-- `cerebrum.classification.total` — counter of classifications.
-- `cerebrum.upstream.duration_seconds` — upstream-only latency histogram.
+**Q: Why am I getting 401 responses?**
 
-The OTel providers are shut down in the recommended order (traces →
-logs → metrics) on `SIGTERM`/`SIGINT`.
+All proxy routes (`/v1/*`) require a valid bearer token set via the `PROXY_API_BEARER_TOKEN` environment variable. Dashboard routes (`/dashboard/*`) require HTTP basic auth with credentials from `DASHBOARD_BASIC_USER` and `DASHBOARD_BASIC_PASSWORD`. Ensure all three variables are set before starting the server.
 
-### OpenAPI
+**Q: Can I use a YAML configuration file?**
 
-`openapi/completions.yaml` is the machine-readable spec for the three
-proxy endpoints (`/v1/chat/completions`, `/v1/classify`, `/v1/feedback`).
-When you add or change an endpoint, update this file in the same
-change. The category enum on the response (`COMPLEX_REASONING`,
-`FILE_READING`, `SYNTAX_FIX`, `CASUAL`) is a public contract — see
-`src/intent_classifier.rs:53-63`.
+Yes. The config overlay path (set via `CONFIG_PATH`) accepts both `.toml` and `.yaml` files. The format is auto-detected from the file extension.
 
-### Change workflow
+**Q: Do I need a database to run Cerebrum?**
 
-All non-trivial work goes through a `context/changes/<change-id>/`
-folder containing a `change.md`, `plan.md` (when planned), and
-`research.md` (after research). The `10x-` skill family
-(`/10x-shape`, `/10x-prd`, `/10x-plan`, `/10x-implement`,
-`/10x-research`, …) drives this. `AGENTS.md` documents the layout
-and naming.
+No. The gateway runs with an in-memory persistence backend out of the box — no database required. For production use, configure PostgreSQL or SQLite.
 
-## Security
+**Q: How do I reset the in-memory database?**
 
-- Bearer and basic-auth credentials are compared in **constant time**
-  via HMAC-SHA256 + `subtle` (`src/auth.rs:169-185`).
-- Dashboard auth responds with a `WWW-Authenticate: Basic` challenge
-  on unauthorized requests (`src/auth.rs:211-220`).
-- CORS headers are **off by default** — the `[cors].allowed_origins`
-  list is empty in the embedded defaults. Add origins only for
-  trusted frontends.
-- Prompt bodies are **never** persisted. Only a 200-character snippet
-  and the true character count are stored.
-- The `request_body_limit_bytes` and `max_upstream_body_bytes` knobs
-  default to 10 MB to bound memory pressure.
-- Upstream error bodies are **capped at 2 KB** in both the streaming
-  and non-streaming paths, with a 512-character display truncation
-  (`src/main.rs:651-661, 825-836`).
-- SSE error events go through `format_sse_error_event`
-  (`src/main.rs:790-796`) which JSON-escapes `\`, `"`, `\n`, `\r` to
-  prevent a malicious upstream from injecting SSE frames.
-- Secrets are loaded **only** from environment variables
-  (`AuthConfig::from_env` panics on missing/empty values to fail
-  closed). `config.toml` has no `secret`-shaped fields.
+The in-memory backend is ephemeral — simply restart the server. For SQLite, delete the `cerebrum.db` file (or the path configured in `config.toml`).
 
-If you find a security issue, please report it privately rather than
-opening a public issue.
+**Q: How do I add a new intent category?**
+
+Add a `[categories.NEW_CATEGORY]` section and a matching `[routing.NEW_CATEGORY]` section in `config.toml`, then restart. No code changes needed. Run `cargo run -- --validate` to check your configuration.
+
+**Q: How do I enable streaming?**
+
+Set `"stream": true` in the `POST /v1/chat/completions` request body. The gateway will proxy the upstream response as Server-Sent Events.
+
+**Q: Does Cerebrum store my prompts?**
+
+Only a 200-character snippet of the last user message is persisted. The full prompt is never stored. The character count of the full message is recorded separately for cost estimation.
+
+**Q: Can I run Cerebrum in a Docker container?**
+
+Yes. Build the binary with `cargo build --release` and copy `target/release/cerebrum` into a minimal runtime image (e.g., `debian:stable-slim`). No runtime dependencies beyond the system's C library are required.
+
+**Q: How do I update the few-shot classifier's training data?**
+
+Submit feedback via `POST /v1/feedback` with the original prompt text and the correct category. The few-shot classifier incorporates this feedback for future classifications. Bootstrap data is stored in `data/fewshot_bootstrap.yaml`.
+
+**Q: What happens if the upstream API is unreachable?**
+
+The gateway returns a `502` response with an `upstream_error` JSON body that includes the upstream's status code and message. For streaming requests, the error is emitted as an SSE `event: error` event before the stream closes.
 
 ## License
 
-Add a `LICENSE` file at the repo root before publishing. Until one is
-committed, all rights are reserved by the project authors.
+Cerebrum is distributed under the terms of the MIT license.

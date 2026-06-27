@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use regex::Regex;
 use regex::RegexSet;
 
-pub use crate::routing::{ModelCosts, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX};
+pub use crate::routing::{
+    ModelCosts, ProviderEntry, RouteEntry, DEFAULT_MODEL, DEFAULT_MODEL_COMPLEX,
+};
 
 /// A single regex pattern entry with its weight for intent classification.
 #[derive(Clone, Debug, Deserialize)]
@@ -88,10 +90,8 @@ fn default_priority() -> u8 {
 pub struct ClassificationResult {
     pub category: String,
     pub model: String,
-    pub endpoint: String,
     pub tier: ClassificationTier,
-    pub provider_type: String,
-    pub api_key_env: Option<String>,
+    pub providers: Vec<ProviderEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,7 +299,10 @@ impl LLMClassifier {
             .header("Content-Type", "application/json");
 
         let request = if !api_key.is_empty() {
-            let headers = auth_headers_for(&self.auth_providers, &self.provider_type, &api_key);
+            // The classifier's own LLM probe originates from Cerebrum, not a
+            // proxied client request, so there are no client headers to forward.
+            let headers =
+                auth_headers_for(&self.auth_providers, &self.provider_type, &api_key, &[]);
             let mut req = request;
             for (key, value) in headers {
                 req = req.header(&key, &value);
@@ -350,10 +353,8 @@ impl LLMClassifier {
                         return ClassificationResult {
                             category: cat.name.clone(),
                             model: self.model.clone(),
-                            endpoint: self.endpoint.clone(),
                             tier: ClassificationTier::Regex,
-                            provider_type: self.provider_type.clone(),
-                            api_key_env: Some(self.api_key_env.clone()),
+                            providers: vec![],
                         };
                     }
                 }
@@ -423,25 +424,46 @@ pub(crate) struct FewShotExample {
 
 /// Maps a provider_type string and resolved API key to HTTP auth header tuples
 /// using the configured auth provider list. Falls back to Bearer Authorization
-/// for unknown or unconfigured provider types. For `provider_type == "anthropic"`
-/// always appends the protocol-required `anthropic-version` header alongside
-/// whichever auth header was resolved (configured or hard-coded fallback) — the
-/// version is a protocol constant, not a user preference, so we centralize it.
+/// for unknown or unconfigured provider types.
+///
+/// This function is the SINGLE emission point for the full upstream header
+/// set, including client-forwarded headers. For `provider_type == "anthropic"`
+/// it appends the `anthropic-*` / `x-claude-code-*` entries from
+/// `forward_headers` (so beta-gated Claude Code features reach the upstream),
+/// prefers a client-supplied `anthropic-version` over the hard-coded
+/// `2023-06-01` protocol constant, and de-dupes so every name is emitted at
+/// most once. For non-anthropic providers the forward set is dropped entirely —
+/// those headers are meaningless to OpenAI / Ollama upstreams and forwarding
+/// them would only add noise (the plan's contract: drop `anthropic-*` for
+/// non-anthropic).
+///
+/// `forward_headers` is the output of `collect_forward_headers` (see main.rs),
+/// which already excludes `authorization` / `x-api-key`; combined with callers
+/// applying only the set returned here, a client can never overwrite the
+/// resolved upstream credential.
 pub fn auth_headers_for(
     providers: &[AuthProviderConfig],
     provider_type: &str,
     api_key: &str,
+    forward_headers: &[(String, String)],
 ) -> Vec<(String, String)> {
     let pt = if provider_type.is_empty() {
         "openai_compatible"
     } else {
         provider_type
     };
+    // Prefer a client-supplied anthropic-version over the protocol constant so
+    // Claude Code can pin a newer API version without a Cerebrum change. We
+    // resolve it once here and skip the raw entry when appending the forward
+    // set, so the version header is emitted exactly once.
+    let client_version = forward_headers
+        .iter()
+        .find(|(n, _)| n == "anthropic-version")
+        .map(|(_, v)| v.as_str());
     // Anthropic protocol constant: every Anthropic request must carry the
     // version header. Append it to whatever auth header the user configured
     // (or the hard-coded fallback below) so callers don't need to manage two
     // parallel config entries.
-    let anthropic_version = ("anthropic-version".to_string(), "2023-06-01".to_string());
     for provider in providers {
         if provider.type_ == pt {
             let mut headers = match (&provider.header, &provider.value_template) {
@@ -452,7 +474,11 @@ pub fn auth_headers_for(
                 _ => vec![],
             };
             if pt == "anthropic" {
-                headers.push(anthropic_version);
+                headers.push((
+                    "anthropic-version".to_string(),
+                    client_version.unwrap_or("2023-06-01").to_string(),
+                ));
+                append_forward_headers(&mut headers, forward_headers);
             }
             return headers;
         }
@@ -460,12 +486,34 @@ pub fn auth_headers_for(
     // No matching provider config — hard-coded fallback for "anthropic",
     // generic Bearer for everything else.
     if pt == "anthropic" {
-        return vec![
+        let mut headers = vec![
             ("x-api-key".to_string(), api_key.to_string()),
-            anthropic_version,
+            (
+                "anthropic-version".to_string(),
+                client_version.unwrap_or("2023-06-01").to_string(),
+            ),
         ];
+        append_forward_headers(&mut headers, forward_headers);
+        return headers;
     }
     vec![("authorization".into(), format!("Bearer {api_key}"))]
+}
+
+/// Append client-forwarded `anthropic-*` / `x-claude-code-*` headers to `out`,
+/// skipping `anthropic-version` (the caller already emitted it with the
+/// resolved value) and any name already present. De-duplication guarantees a
+/// client value can never duplicate a header the proxy set and keeps emission
+/// deterministic when a name appears more than once in the inbound request.
+fn append_forward_headers(out: &mut Vec<(String, String)>, forward_headers: &[(String, String)]) {
+    for (name, value) in forward_headers {
+        if name == "anthropic-version" {
+            continue;
+        }
+        if out.iter().any(|(n, _)| n == name.as_str()) {
+            continue;
+        }
+        out.push((name.clone(), value.clone()));
+    }
 }
 
 // ── Code-block regex (lazily compiled once) ──
@@ -535,10 +583,8 @@ impl ClassificationResult {
         ClassificationResult {
             category: "unknown".to_string(),
             model: DEFAULT_MODEL.to_string(),
-            endpoint: String::new(),
             tier: ClassificationTier::Fallback,
-            provider_type: String::new(),
-            api_key_env: None,
+            providers: vec![],
         }
     }
 }
@@ -673,22 +719,18 @@ impl RegexClassifier {
         let route = self.routing.get(category).unwrap_or(&self.fallback_entry);
         ClassificationResult {
             category: category.to_string(),
-            model: route.model.clone(),
-            endpoint: route.endpoint.clone(),
+            model: route.primary().model.clone(),
             tier: ClassificationTier::Regex,
-            provider_type: route.provider_type.clone(),
-            api_key_env: route.api_key_env.clone(),
+            providers: route.providers.clone(),
         }
     }
 
     fn route_fallback(&self, category: &str) -> ClassificationResult {
         ClassificationResult {
             category: category.to_string(),
-            model: self.fallback_entry.model.clone(),
-            endpoint: self.fallback_entry.endpoint.clone(),
+            model: self.fallback_entry.primary().model.clone(),
             tier: ClassificationTier::Fallback,
-            provider_type: self.fallback_entry.provider_type.clone(),
-            api_key_env: self.fallback_entry.api_key_env.clone(),
+            providers: self.fallback_entry.providers.clone(),
         }
     }
 }
@@ -811,49 +853,64 @@ mod tests {
         routing.insert(
             cats[0].name.clone(),
             RouteEntry {
-                model: "fr-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "fr-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             cats[1].name.clone(),
             RouteEntry {
-                model: "sf-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             cats[2].name.clone(),
             RouteEntry {
-                model: "cr-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "cr-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             cats[3].name.clone(),
             RouteEntry {
-                model: "ca-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = RouteEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         RegexClassifier::from_values(routing, fallback, 30, cats, &neg)
     }
@@ -946,20 +1003,16 @@ mod tests {
             result: ClassificationResult {
                 category: "CAT1".to_string(),
                 model: "model1".to_string(),
-                endpoint: "ep1".to_string(),
                 tier: ClassificationTier::Regex,
-                provider_type: "prov1".to_string(),
-                api_key_env: None,
+                providers: vec![],
             },
         };
         let stub2 = StubClassifier {
             result: ClassificationResult {
                 category: "CAT2".to_string(),
                 model: "model2".to_string(),
-                endpoint: "ep2".to_string(),
                 tier: ClassificationTier::Regex,
-                provider_type: "prov2".to_string(),
-                api_key_env: None,
+                providers: vec![],
             },
         };
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
@@ -974,20 +1027,16 @@ mod tests {
             result: ClassificationResult {
                 category: "CASUAL".to_string(),
                 model: "fallback1".to_string(),
-                endpoint: String::new(),
                 tier: ClassificationTier::Fallback,
-                provider_type: String::new(),
-                api_key_env: None,
+                providers: vec![],
             },
         };
         let stub2 = StubClassifier {
             result: ClassificationResult {
                 category: "COMPLEX_REASONING".to_string(),
                 model: "model2".to_string(),
-                endpoint: "ep2".to_string(),
                 tier: ClassificationTier::Regex,
-                provider_type: "prov2".to_string(),
-                api_key_env: None,
+                providers: vec![],
             },
         };
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
@@ -1005,10 +1054,8 @@ mod tests {
             result: ClassificationResult {
                 category: "CASUAL".to_string(),
                 model: "last".to_string(),
-                endpoint: String::new(),
                 tier: ClassificationTier::Fallback,
-                provider_type: String::new(),
-                api_key_env: None,
+                providers: vec![],
             },
         };
         let chain = ClassifierChain::new(vec![Arc::new(stub1), Arc::new(stub2)]);
@@ -1034,10 +1081,8 @@ mod tests {
                 ClassificationResult {
                     category: "STUB".to_string(),
                     model: "stub-model".to_string(),
-                    endpoint: "stub-endpoint".to_string(),
                     tier: ClassificationTier::Regex,
-                    provider_type: "stub".to_string(),
-                    api_key_env: None,
+                    providers: vec![],
                 }
             }
         }
@@ -1068,10 +1113,8 @@ mod tests {
             result: ClassificationResult {
                 category: "FIRST".to_string(),
                 model: "first-model".to_string(),
-                endpoint: String::new(),
                 tier: ClassificationTier::Regex,
-                provider_type: String::new(),
-                api_key_env: None,
+                providers: vec![],
             },
         };
         let stub2 = CountingClassifier {
@@ -1123,10 +1166,8 @@ mod tests {
             result: ClassificationResult {
                 category: "MIDDLE".to_string(),
                 model: "middle-model".to_string(),
-                endpoint: String::new(),
                 tier: ClassificationTier::FewShot,
-                provider_type: String::new(),
-                api_key_env: None,
+                providers: vec![],
             },
         };
         let stub3 = CountingClassifier {
@@ -1134,10 +1175,8 @@ mod tests {
             result: ClassificationResult {
                 category: "LAST".to_string(),
                 model: "last-model".to_string(),
-                endpoint: String::new(),
                 tier: ClassificationTier::Regex,
-                provider_type: String::new(),
-                api_key_env: None,
+                providers: vec![],
             },
         };
 
@@ -1185,10 +1224,8 @@ mod tests {
             result: ClassificationResult {
                 category: "LAST_FALLBACK".to_string(),
                 model: "last-fb-model".to_string(),
-                endpoint: String::new(),
                 tier: ClassificationTier::Fallback,
-                provider_type: String::new(),
-                api_key_env: None,
+                providers: vec![],
             },
         };
 
@@ -1239,7 +1276,7 @@ mod tests {
     #[test]
     fn auth_headers_for_openai_compatible() {
         let providers = default_auth_providers();
-        let headers = auth_headers_for(&providers, "openai_compatible", "sk-123");
+        let headers = auth_headers_for(&providers, "openai_compatible", "sk-123", &[]);
         assert_eq!(
             headers,
             vec![("authorization".to_string(), "Bearer sk-123".to_string())]
@@ -1249,7 +1286,7 @@ mod tests {
     #[test]
     fn auth_headers_for_empty_defaults_to_openai_compatible() {
         let providers = default_auth_providers();
-        let headers = auth_headers_for(&providers, "", "sk-123");
+        let headers = auth_headers_for(&providers, "", "sk-123", &[]);
         assert_eq!(
             headers,
             vec![("authorization".to_string(), "Bearer sk-123".to_string())]
@@ -1259,7 +1296,7 @@ mod tests {
     #[test]
     fn auth_headers_for_anthropic() {
         let providers = default_auth_providers();
-        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-123");
+        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-123", &[]);
         assert_eq!(
             headers,
             vec![
@@ -1275,7 +1312,7 @@ mod tests {
         // Anthropic provider_type must still emit x-api-key + the protocol
         // version header so the upstream accepts the request.
         let providers: Vec<AuthProviderConfig> = vec![];
-        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-fb");
+        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-fb", &[]);
         assert_eq!(
             headers,
             vec![
@@ -1288,24 +1325,127 @@ mod tests {
     #[test]
     fn auth_headers_for_ollama() {
         let providers = default_auth_providers();
-        let headers = auth_headers_for(&providers, "ollama", "dummy");
+        let headers = auth_headers_for(&providers, "ollama", "dummy", &[]);
         assert!(headers.is_empty());
     }
 
     #[test]
     fn auth_headers_for_local() {
         let providers = default_auth_providers();
-        let headers = auth_headers_for(&providers, "local", "dummy");
+        let headers = auth_headers_for(&providers, "local", "dummy", &[]);
         assert!(headers.is_empty());
     }
 
     #[test]
     fn auth_headers_for_unknown() {
         let providers = default_auth_providers();
-        let headers = auth_headers_for(&providers, "unknown_provider", "key");
+        let headers = auth_headers_for(&providers, "unknown_provider", "key", &[]);
         assert_eq!(
             headers,
             vec![("authorization".to_string(), "Bearer key".to_string())]
+        );
+    }
+
+    #[test]
+    fn auth_headers_for_anthropic_forwards_client_headers_and_prefers_version() {
+        let providers = default_auth_providers();
+        // Client pinned a newer anthropic-version and sent an anthropic-beta
+        // capability plus a Claude Code session id. The proxy must forward the
+        // beta + session id verbatim, prefer the client's version over the
+        // 2023-06-01 default, and emit the version exactly once.
+        let forward = vec![
+            ("anthropic-version".to_string(), "2024-10-22".to_string()),
+            (
+                "anthropic-beta".to_string(),
+                "context-management-2025-09".to_string(),
+            ),
+            (
+                "x-claude-code-session-id".to_string(),
+                "sess-abc".to_string(),
+            ),
+        ];
+        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-123", &forward);
+        assert!(
+            headers.contains(&("anthropic-version".to_string(), "2024-10-22".to_string())),
+            "client-supplied anthropic-version must be preferred, got {headers:?}"
+        );
+        assert!(
+            !headers.contains(&("anthropic-version".to_string(), "2023-06-01".to_string())),
+            "default version must not also be emitted, got {headers:?}"
+        );
+        assert!(
+            headers.contains(&(
+                "anthropic-beta".to_string(),
+                "context-management-2025-09".to_string()
+            )),
+            "anthropic-beta must be forwarded to an Anthropic upstream, got {headers:?}"
+        );
+        assert!(
+            headers.contains(&(
+                "x-claude-code-session-id".to_string(),
+                "sess-abc".to_string()
+            )),
+            "x-claude-code-session-id must be forwarded, got {headers:?}"
+        );
+        assert!(
+            headers.contains(&("x-api-key".to_string(), "sk-ant-123".to_string())),
+            "resolved auth header must still be present, got {headers:?}"
+        );
+        let version_count = headers
+            .iter()
+            .filter(|(n, _)| n == "anthropic-version")
+            .count();
+        assert_eq!(
+            version_count, 1,
+            "anthropic-version must be emitted exactly once"
+        );
+    }
+
+    #[test]
+    fn auth_headers_for_anthropic_falls_back_to_default_version() {
+        let providers = default_auth_providers();
+        // No client version on the wire -> default 2023-06-01; beta still
+        // forwarded so GA features keep working even when the client omits the
+        // version header.
+        let forward = vec![(
+            "anthropic-beta".to_string(),
+            "prompt-caching-2024-07-31".to_string(),
+        )];
+        let headers = auth_headers_for(&providers, "anthropic", "sk-ant-123", &forward);
+        assert!(
+            headers.contains(&("anthropic-version".to_string(), "2023-06-01".to_string())),
+            "default version must be used when the client sent none, got {headers:?}"
+        );
+        assert!(
+            headers.contains(&(
+                "anthropic-beta".to_string(),
+                "prompt-caching-2024-07-31".to_string()
+            )),
+            "anthropic-beta must still be forwarded without a client version, got {headers:?}"
+        );
+    }
+
+    #[test]
+    fn auth_headers_for_non_anthropic_drops_forward_headers() {
+        let providers = default_auth_providers();
+        // anthropic-* is meaningless to an OpenAI-compatible upstream and must
+        // be dropped entirely so we never forward Anthropic-only noise.
+        let forward = vec![
+            (
+                "anthropic-beta".to_string(),
+                "should-not-forward".to_string(),
+            ),
+            ("anthropic-version".to_string(), "2024-10-22".to_string()),
+            (
+                "x-claude-code-session-id".to_string(),
+                "sess-abc".to_string(),
+            ),
+        ];
+        let headers = auth_headers_for(&providers, "openai_compatible", "sk-123", &forward);
+        assert_eq!(
+            headers,
+            vec![("authorization".to_string(), "Bearer sk-123".to_string())],
+            "non-anthropic providers must drop the entire forward set"
         );
     }
 
@@ -1495,29 +1635,38 @@ mod tests {
         routing.insert(
             "DATABASE".to_string(),
             RouteEntry {
-                model: "db-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "db-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             "DEPLOYMENT".to_string(),
             RouteEntry {
-                model: "dep-model".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "dep-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = RouteEntry {
-            model: "fb-model".to_string(),
-            endpoint: String::new(),
+            providers: vec![ProviderEntry {
+                model: "fb-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
         let result = c.classify("SELECT * FROM users").await;
@@ -1561,29 +1710,38 @@ mod tests {
         routing.insert(
             "ALPHA".to_string(),
             RouteEntry {
-                model: "a".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "a".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         routing.insert(
             "BETA".to_string(),
             RouteEntry {
-                model: "b".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "b".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = RouteEntry {
-            model: "fb".to_string(),
-            endpoint: String::new(),
+            providers: vec![ProviderEntry {
+                model: "fb".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
         // "alpha beta" gives ALPHA score=3 (meets threshold=3), BETA score=1 (meets threshold=1)
@@ -1602,11 +1760,14 @@ mod tests {
         let neg = vec![];
         let routing = HashMap::new();
         let fallback = RouteEntry {
-            model: "fb".to_string(),
-            endpoint: String::new(),
+            providers: vec![ProviderEntry {
+                model: "fb".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
         let result = c.classify("anything").await;
@@ -1647,19 +1808,25 @@ mod tests {
         routing.insert(
             "CODING".to_string(),
             RouteEntry {
-                model: "c".to_string(),
-                endpoint: String::new(),
+                providers: vec![ProviderEntry {
+                    model: "c".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
                 cost_per_1m_input_tokens: None,
-                provider_type: String::new(),
-                api_key_env: None,
             },
         );
         let fallback = RouteEntry {
-            model: "fb".to_string(),
-            endpoint: String::new(),
+            providers: vec![ProviderEntry {
+                model: "fb".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
             cost_per_1m_input_tokens: None,
-            provider_type: String::new(),
-            api_key_env: None,
         };
         let c = RegexClassifier::from_values(routing, fallback, 30, cats, &neg);
         // "code" matches CODING pattern (score=2), but negative pattern penalizes CODING by 3 → score=0

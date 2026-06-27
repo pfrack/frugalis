@@ -73,7 +73,7 @@ build-release-otel:
 
 # Run tests (forwards args: just test auth)
 test *ARGS:
-    cargo test {{ ARGS }}
+    cargo test {{ ARGS | quote }}
 
 # Run tests with otel feature
 test-otel:
@@ -219,9 +219,9 @@ otel-down:
 otel-logs:
     docker compose logs -f otel-collector
 
-# Start all compose services (postgres only by default)
+# Start compose services (postgres + app by default; add --profile otel for collector)
 compose-up:
-    docker compose up -d
+    docker compose --profile app up -d
 
 # Stop all compose services
 compose-down:
