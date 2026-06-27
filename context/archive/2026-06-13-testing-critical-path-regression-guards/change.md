@@ -1,10 +1,10 @@
 ---
 change_id: testing-critical-path-regression-guards
 title: Critical-path regression guards (test rollout phase 1)
-status: impl_reviewed
-created: 2026-06-13
-updated: 2026-06-14
-archived_at: null
+ status: archived
+ created: 2026-06-13
+ updated: 2026-06-27
+ archived_at: 2026-06-27T16:44:35Z
 ---
 
 ## Notes
