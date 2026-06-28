@@ -8468,6 +8468,43 @@ mod tests {
             .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
     }
+
+    #[tokio::test]
+    async fn test_cache_dashboard_requires_auth() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/cache")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_cache_dashboard_authenticated() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/cache")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body readable");
+        let body_str = std::str::from_utf8(&body).expect("UTF-8");
+        assert!(
+            body_str.contains("not configured"),
+            "should show disabled message: {body_str}"
+        );
+    }
 }
 
 #[cfg(test)]

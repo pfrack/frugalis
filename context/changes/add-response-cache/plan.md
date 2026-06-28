@@ -333,34 +333,34 @@ dashboard_page! {
 
 #### Manual
 
-- [ ] 1.5 Cache field is `None` in AppState when `[cache]` section is absent
-- [ ] 1.6 Cache is constructed with correct TTL and max_entries from `CONFIG_PATH` overlay
+- [x] 1.5 Cache field is `None` in AppState when `[cache]` section is absent
+- [x] 1.6 Cache is constructed with correct TTL and max_entries from `CONFIG_PATH` overlay
 
 ### Phase 2: Wire Cache Into Proxy Handlers
 
 #### Automated
 
-- [x] 2.1 All existing tests pass: `cargo test`
-- [x] 2.2 Cache integration tests pass (hit, miss, bypass, streaming, error, disabled)
-- [x] 2.3 Auth tests pass: `cargo test auth`
+- [x] 2.1 All existing tests pass: `cargo test` — 0ec63c3
+- [x] 2.2 Cache integration tests pass (hit, miss, bypass, streaming, error, disabled) — 0ec63c3
+- [x] 2.3 Auth tests pass: `cargo test auth` — 0ec63c3
 
 #### Manual
 
-- [ ] 2.4 Identical non-streaming request served from cache on second call
-- [ ] 2.5 `X-Frugalis-No-Cache: true` bypasses cache
-- [ ] 2.6 Streaming requests are never cached
-- [ ] 2.7 Error responses (5xx) are not cached
+- [x] 2.4 Identical non-streaming request served from cache on second call
+- [x] 2.5 `X-Frugalis-No-Cache: true` bypasses cache
+- [x] 2.6 Streaming requests are never cached
+- [x] 2.7 Error responses (5xx) are not cached
 
 ### Phase 3: Dashboard Cache Stats Page
 
 #### Automated
 
-- [ ] 3.1 Dashboard tests pass: `cargo test dashboard`
-- [ ] 3.2 Cache dashboard test: 200 with auth, disabled state, stats state
-- [ ] 3.3 Template compiles (Askama)
+- [x] 3.1 Dashboard tests pass: `cargo test dashboard`
+- [x] 3.2 Cache dashboard test: 200 with auth, disabled state, stats state
+- [x] 3.3 Template compiles (Askama)
 
 #### Manual
 
-- [ ] 3.4 `/dashboard/cache` renders with stats after authenticated requests
-- [ ] 3.5 Hit count increases after repeated identical requests
-- [ ] 3.6 Entry count drops after TTL expiry
+- [x] 3.4 `/dashboard/cache` renders with stats after authenticated requests
+- [x] 3.5 Hit count increases after repeated identical requests
+- [x] 3.6 Entry count drops after TTL expiry
