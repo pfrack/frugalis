@@ -72,6 +72,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-29 | circuit-breaker-health | proactive upstream health checks + circuit breaker (vs reactive S-17 failover) | S-20 | FR-003, NFR (resilience) | proposed |
 | S-30 | real-tokenizer | real tokenization for `/v1/messages/count_tokens` (replaces chars/4 heuristic) | — | FR-003 | proposed |
 | S-31 | multi-tenant-keys-budgets | per-user API keys + RBAC + budgets/quotas + audit logs | S-18 | Access Control | enterprise |
+| T-01 | code-structure-reorg | (tech debt) flat src/ reorganized into domain directories; main.rs shrinks from 8,460 to ~250 lines | — | NFR (maintainability) | planned |
 
 ## Streams
 
@@ -647,6 +648,19 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Risk:** High — new identity/tenant model; conflicts with the flat single-operator MVP design (explicit Non-Goal in PRD). Treated as enterprise-tier.
 - **Status:** enterprise (deferred)
 
+### T-01: Code structure reorganization — flat src/ to domain directories
+
+- **Outcome:** (tech debt) `src/` reorganized from 13 flat files into 6 domain directories (`proxy/`, `classification/`, `protocol/`, `config/`, `persistence/`, `dashboard/`). `main.rs` shrinks from 8,460 to ~250 lines. Tests co-located with their code. Dead code removed.
+- **Change ID:** `code-structure-reorg`
+- **PRD refs:** NFR (maintainability)
+- **Unlocks:** Easier onboarding, faster navigation, cleaner git diffs, enables future module-level feature flags
+- **Prerequisites:** — (no functional prerequisites; pure refactoring)
+- **Parallel with:** Any feature work (but not concurrently modifying the same files)
+- **Blockers:** Should not overlap with in-flight changes touching `main.rs` handlers
+- **Unknowns:** —
+- **Risk:** Low-medium — pure structural refactoring with no behavior changes. 4-phase plan ordered by coupling risk ensures compilation at each step. ~105 existing tests serve as regression guard.
+- **Status:** planned
+
 ## Backlog Handoff
 
 | Roadmap ID | Change ID | Suggested issue title | Ready for `/10x-plan` | Notes |
@@ -692,6 +706,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 | S-29 | circuit-breaker-health | Reliability: proactive upstream health checks + circuit breaker | yes | From research (Tier-3 #16). Prerequisite: S-20. |
 | S-30 | real-tokenizer | Compat: real tokenizer for count_tokens (replaces chars/4 heuristic) | yes | From research (Tier-3 #17). No prerequisites. |
 | S-31 | multi-tenant-keys-budgets | Enterprise: per-user API keys + RBAC + budgets/quotas + audit logs | no | From research (Tier-3 #11). Enterprise-tier — conflicts with flat single-operator MVP Non-Goal. Prerequisite: S-18. |
+| T-01 | code-structure-reorg | Tech debt: reorganize flat src/ into domain directories (proxy/, classification/, protocol/, config/, persistence/) | yes | Plan complete: `context/changes/code-structure-reorg/plan.md`. No prerequisites. Pure refactoring — no behavior changes. |
 
 ## Open Roadmap Questions
 

@@ -11,7 +11,6 @@ pub struct ProviderEntry {
     pub provider_type: String,
     pub api_key_env: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub timeout_ms: Option<u64>,
 }
 
@@ -77,7 +76,7 @@ pub struct ModelCosts {
     costs: HashMap<String, f64>,
 }
 
-impl crate::persistence::CostProvider for ModelCosts {
+impl crate::persistence::types::CostProvider for ModelCosts {
     fn get_cost(&self, model: &str) -> Option<f64> {
         self.get(model)
     }

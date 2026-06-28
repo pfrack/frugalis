@@ -47,6 +47,7 @@ src/
 ├── dashboard.rs               355 lines  (web UI handlers)
 ├── auth.rs                    283 lines  (bearer/basic auth middleware)
 ├── telemetry.rs               192 lines  (OpenTelemetry setup)
+├── cache.rs                   165 lines  (response cache, moka-backed)
 ├── routing.rs                 159 lines  (route table types)
 ├── test_util.rs                12 lines  (test helpers)
 └── translate/mod.rs             3 lines  ★ DEAD CODE — unused module
