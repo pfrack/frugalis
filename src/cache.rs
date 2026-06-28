@@ -163,4 +163,182 @@ mod tests {
             "cache should evict entries beyond max_capacity"
         );
     }
+
+    // ── Integration tests (moved from tests.rs) ──
+
+    use crate::*;
+    use crate::app::test_helpers::{test_categories, test_negative_patterns, test_app};
+    use crate::test_util::EnvGuard;
+    use axum::{body::Body, http::{header, Request, StatusCode}, Router};
+    use serial_test::serial;
+    use tower::util::ServiceExt;
+
+    fn test_app_with_cache(
+        ttl_secs: u64,
+        max_entries: u64,
+    ) -> (Router, httpmock::MockServer, Arc<ResponseCache>) {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        use std::collections::HashMap;
+        let cats = test_categories();
+        let server = httpmock::MockServer::start();
+        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build().expect("test reqwest client should build");
+        let auth_config = Arc::new(crate::auth::AuthConfig::from_values("proxy-token", "user", "password"));
+        let endpoint = server.url("/v1/chat/completions");
+        let env = "TEST_CACHE_PROXY";
+        let mut routing = HashMap::new();
+        routing.insert(cats[1].name.clone(), crate::config::routing::RouteEntry {
+            providers: vec![crate::config::routing::ProviderEntry { model: "sf-model".to_string(), endpoint: endpoint.clone(), provider_type: "openai_compatible".to_string(), api_key_env: Some(env.to_string()), timeout_ms: None }],
+            cost_per_1m_input_tokens: None,
+        });
+        routing.insert(cats[3].name.clone(), crate::config::routing::RouteEntry {
+            providers: vec![crate::config::routing::ProviderEntry { model: "ca-model".to_string(), endpoint, provider_type: "openai_compatible".to_string(), api_key_env: Some(env.to_string()), timeout_ms: None }],
+            cost_per_1m_input_tokens: None,
+        });
+        let fallback = crate::config::routing::RouteEntry {
+            providers: vec![crate::config::routing::ProviderEntry { model: "fallback-model".to_string(), endpoint: String::new(), provider_type: String::new(), api_key_env: None, timeout_ms: None }],
+            cost_per_1m_input_tokens: None,
+        };
+        let regex_classifier = crate::classification::regex::RegexClassifier::from_values(routing, fallback, 30, cats, &test_negative_patterns());
+        let classifier_chain = crate::classification::chain::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
+        let classifier_arc = Some(Arc::new(classifier_chain));
+        let mut merged_routing = std::collections::HashMap::new();
+        if let Some(cls) = classifier_arc.as_ref() {
+            for backend in cls.backends().iter() {
+                if let Some(r) = backend.get_routing() { merged_routing.extend(r.clone()); }
+            }
+        }
+        let response_cache = Arc::new(ResponseCache::new(ttl_secs, max_entries));
+        let app_state = Arc::new(crate::app::AppState {
+            persistence: None, classifier: classifier_arc, fewshot_classifier: None,
+            routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
+            model_costs: Arc::new(tokio::sync::RwLock::new(crate::config::routing::ModelCosts::empty())),
+            baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
+            classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            http_client: Some(client),
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(10_485_760)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
+            request_body_limit_bytes: 10_485_760,
+            streaming_channel_capacity: 32,
+            dashboard_config: crate::config::types::DashboardConfig::default(),
+            auth_providers: Arc::new(vec![]),
+            allowed_origins: Arc::new(tokio::sync::RwLock::new(vec![])),
+            response_cache: Some(response_cache.clone()),
+            #[cfg(feature = "otel")]
+            metrics: None,
+        });
+        let app = crate::app::build_app(auth_config, app_state);
+        (app, server, response_cache)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cache_hit_returns_cached_response() {
+        let _guard = EnvGuard("TEST_CACHE_PROXY");
+        std::env::set_var("TEST_CACHE_PROXY", "sk-test-cache");
+        let (app, server, _cache) = test_app_with_cache(60, 10);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200).header("content-type", "application/json").body(r#"{"id":"test","choices":[{"message":{"content":"hello"}}]}"#);
+        });
+        let body = r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#;
+        let resp1 = app.clone().oneshot(Request::builder().method("POST").uri("/v1/chat/completions").header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json").body(Body::from(body)).expect("valid request")).await.expect("request should succeed");
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let body1 = axum::body::to_bytes(resp1.into_body(), usize::MAX).await.expect("body readable");
+        assert_eq!(mock.hits(), 1);
+        let resp2 = app.oneshot(Request::builder().method("POST").uri("/v1/chat/completions").header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json").body(Body::from(body)).expect("valid request")).await.expect("request should succeed");
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX).await.expect("body readable");
+        assert_eq!(body1, body2);
+        assert_eq!(mock.hits(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cache_miss_proceeds_to_upstream() {
+        let _guard = EnvGuard("TEST_CACHE_PROXY");
+        std::env::set_var("TEST_CACHE_PROXY", "sk-test-cache");
+        let (app, server, _cache) = test_app_with_cache(60, 10);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200).header("content-type", "application/json").body(r#"{"id":"test","choices":[{"message":{"content":"ok"}}]}"#);
+        });
+        let response = app.oneshot(Request::builder().method("POST").uri("/v1/chat/completions").header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json").body(Body::from(r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#)).expect("valid request")).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cache_bypass_header_skips_cache() {
+        let _guard = EnvGuard("TEST_CACHE_PROXY");
+        std::env::set_var("TEST_CACHE_PROXY", "sk-test-cache");
+        let (app, server, _cache) = test_app_with_cache(60, 10);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200).header("content-type", "application/json").body(r#"{"id":"test","choices":[{"message":{"content":"ok"}}]}"#);
+        });
+        let body = r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#;
+        let _ = app.clone().oneshot(Request::builder().method("POST").uri("/v1/chat/completions").header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json").body(Body::from(body)).expect("valid request")).await.expect("request should succeed");
+        assert_eq!(mock.hits(), 1);
+        let resp = app.oneshot(Request::builder().method("POST").uri("/v1/chat/completions").header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json").header("x-frugalis-no-cache", "true").body(Body::from(body)).expect("valid request")).await.expect("request should succeed");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(mock.hits(), 2);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cache_streaming_not_cached() {
+        let _guard = EnvGuard("TEST_CACHE_PROXY");
+        std::env::set_var("TEST_CACHE_PROXY", "sk-test-cache");
+        let (app, server, cache) = test_app_with_cache(60, 10);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200).header("content-type", "text/event-stream").body("data: [DONE]\n\n");
+        });
+        let body = r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#;
+        for _ in 0..2 {
+            let _resp = app.clone().oneshot(Request::builder().method("POST").uri("/v1/chat/completions").header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json").body(Body::from(body)).expect("valid request")).await.expect("request should succeed");
+        }
+        assert_eq!(mock.hits(), 2);
+        assert_eq!(cache.stats().entry_count, 0);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cache_error_not_cached() {
+        let _guard = EnvGuard("TEST_CACHE_PROXY");
+        std::env::set_var("TEST_CACHE_PROXY", "sk-test-cache");
+        let (app, server, cache) = test_app_with_cache(60, 10);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(500).header("content-type", "application/json").body(r#"{"error":"internal"}"#);
+        });
+        let body = r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#;
+        for _ in 0..2 {
+            let _resp = app.clone().oneshot(Request::builder().method("POST").uri("/v1/chat/completions").header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json").body(Body::from(body)).expect("valid request")).await.expect("request should succeed");
+        }
+        assert_eq!(mock.hits(), 2);
+        assert_eq!(cache.stats().entry_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cache_disabled_when_no_config() {
+        let response = test_app().oneshot(Request::builder().method("POST").uri("/v1/chat/completions").header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json").body(Body::from(r#"{"messages":[{"role":"user","content":"hi"}]}"#)).expect("valid request")).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_cache_dashboard_requires_auth() {
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/cache").body(Body::empty()).expect("valid request")).await.expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_cache_dashboard_authenticated() {
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/cache").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("valid request")).await.expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body readable");
+        let body_str = std::str::from_utf8(&body).expect("UTF-8");
+        assert!(body_str.contains("not configured"));
+    }
 }

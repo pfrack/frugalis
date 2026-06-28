@@ -484,3 +484,142 @@ pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
     }
     format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", escaped)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::classification::types::{ClassificationResult, ClassificationTier};
+    use axum::http::{header, StatusCode};
+
+    #[test]
+    fn test_sanitize_for_nim_strips_unsupported_fields() {
+        let mut body = serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "top_k": 40,
+            "metadata": {"key": "value"},
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "stream": true
+        });
+        sanitize_for_nim(&mut body);
+        assert!(body.get("top_k").is_none());
+        assert!(body.get("metadata").is_none());
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("model").is_some());
+        assert!(body.get("messages").is_some());
+        assert!(body.get("stream").is_some());
+    }
+
+    #[test]
+    fn test_optimize_empty_messages_returns_canned_response() {
+        let body = serde_json::json!({"messages": []}).to_string().into_bytes();
+        let resp = try_optimize_request(&body, false);
+        assert!(resp.is_some());
+        assert_eq!(resp.unwrap().status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_optimize_hello_probe_openai_format() {
+        let body = serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}]}).to_string().into_bytes();
+        let resp = try_optimize_request(&body, false);
+        assert!(resp.is_some());
+    }
+
+    #[test]
+    fn test_optimize_hello_probe_anthropic_format() {
+        let body = serde_json::json!({"anthropic_version": "2023-06-01", "model": "test", "messages": [{"role": "user", "content": "hello"}]}).to_string().into_bytes();
+        let resp = try_optimize_request(&body, false);
+        assert!(resp.is_some());
+    }
+
+    #[test]
+    fn test_optimize_normal_request_not_matched() {
+        let body = serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "explain quantum computing in detail"}]}).to_string().into_bytes();
+        let resp = try_optimize_request(&body, false);
+        assert!(resp.is_none());
+    }
+
+    #[test]
+    fn test_optimize_array_content_hello() {
+        let body = serde_json::json!({"model": "test", "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}).to_string().into_bytes();
+        let resp = try_optimize_request(&body, false);
+        assert!(resp.is_some());
+    }
+
+    #[test]
+    fn test_optimize_missing_messages_not_matched() {
+        let body = serde_json::json!({"model": "test"}).to_string().into_bytes();
+        let resp = try_optimize_request(&body, false);
+        assert!(resp.is_none());
+    }
+
+    #[test]
+    fn test_optimize_stream_true_not_matched() {
+        let body = serde_json::json!({"messages": [{"role": "user", "content": "hello"}], "stream": true}).to_string().into_bytes();
+        let resp = try_optimize_request(&body, false);
+        assert!(resp.is_none());
+    }
+
+    #[test]
+    fn test_optimize_probe_returns_anthropic_format() {
+        let body = serde_json::json!({"model": "claude-sonnet-4-6-20250514", "messages": [{"role": "user", "content": "hello"}]}).to_string().into_bytes();
+        let resp = try_optimize_request(&body, true).expect("should match probe pattern");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_optimize_empty_messages_returns_anthropic_format() {
+        let body = serde_json::json!({"model": "claude-sonnet-4-6-20250514", "messages": []}).to_string().into_bytes();
+        let resp = try_optimize_request(&body, true).expect("should match empty messages");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_classification_only_json_contract_has_4_keys() {
+        let result = ClassificationResult {
+            category: "SYNTAX_FIX".to_string(),
+            model: "sf-model".to_string(),
+            tier: ClassificationTier::Regex,
+            providers: vec![],
+        };
+        let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result)).expect("should be valid JSON");
+        let obj = json.as_object().expect("should be a JSON object");
+        assert_eq!(obj.len(), 4);
+        assert_eq!(obj.get("status"), Some(&serde_json::json!("classified")));
+        assert_eq!(obj.get("category"), Some(&serde_json::json!("SYNTAX_FIX")));
+        assert_eq!(obj.get("model"), Some(&serde_json::json!("sf-model")));
+        assert_eq!(obj.get("tier"), Some(&serde_json::json!("Regex")));
+    }
+
+    #[test]
+    fn test_upstream_error_json_contract_has_3_keys() {
+        let json: serde_json::Value = serde_json::from_str(&upstream_error_json(502_u16, "upstream response too large")).expect("should be valid JSON");
+        let obj = json.as_object().expect("should be a JSON object");
+        assert_eq!(obj.len(), 3);
+        assert_eq!(obj.get("error"), Some(&serde_json::json!("upstream_error")));
+        assert_eq!(obj.get("status"), Some(&serde_json::json!(502)));
+        assert_eq!(obj.get("message"), Some(&serde_json::json!("upstream response too large")));
+    }
+
+    #[test]
+    fn test_json_response_sets_application_json_content_type() {
+        let resp = json_response(StatusCode::CREATED, "{}".to_string());
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let ct = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).expect("json_response must set Content-Type");
+        assert_eq!(ct, "application/json");
+    }
+
+    #[test]
+    fn test_classification_only_json_serializes_all_3_tiers() {
+        let tiers = [
+            (ClassificationTier::Regex, "Regex"),
+            (ClassificationTier::FewShot, "FewShot"),
+            (ClassificationTier::Fallback, "Fallback"),
+        ];
+        for (tier, expected_label) in tiers {
+            let result = ClassificationResult { category: "SYNTAX_FIX".to_string(), model: "sf-model".to_string(), tier, providers: vec![] };
+            let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result)).expect("should be valid JSON");
+            assert_eq!(json.get("tier").and_then(|v| v.as_str()), Some(expected_label));
+        }
+    }
+}

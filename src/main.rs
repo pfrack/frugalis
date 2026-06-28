@@ -28,9 +28,7 @@ mod test_util;
 use app::{build_app, AppState};
 use cli::CliMode;
 
-// Re-export for tests that reference these directly via `use crate::*`
-#[cfg(test)]
-pub(crate) use cli::{run_init, INIT_TEMPLATE};
+
 
 #[tokio::main]
 async fn main() {
@@ -512,5 +510,3 @@ async fn shutdown_signal() {
 
 
 
-#[cfg(test)]
-mod tests;
