@@ -63,7 +63,7 @@ pub(crate) fn handle_streaming_response(
                             // pathological upstream could produce a longer
                             // string).
                             let error_text: String = _e.to_string().chars().take(512).collect();
-                            let sse_error = crate::format_sse_error_event(&error_text);
+                            let sse_error = super::util::format_sse_error_event(&error_text);
                             let _ = tx.send(Bytes::from(sse_error)).await;
                             break;
                         }
@@ -181,7 +181,7 @@ pub(crate) async fn handle_streaming_error_with_transform(
         .collect::<String>();
     let status = upstream_response.status().as_u16();
     let transformed = transform(error_text, status);
-    let sse_error = crate::format_sse_error_event(&transformed);
+    let sse_error = super::util::format_sse_error_event(&transformed);
     let mut resp = Response::new(Body::from(sse_error));
     // Forward the upstream's status code to the client so it can react
     // to the specific failure class.
@@ -244,7 +244,7 @@ pub(crate) fn handle_anthropic_streaming_response(
                             buffer.extend_from_slice(&bytes);
                             const MAX_SSE_BUFFER: usize = 1024 * 1024; // 1 MB
                             if buffer.len() > MAX_SSE_BUFFER {
-                                let sse_error = crate::format_sse_error_event("SSE buffer exceeded 1 MB limit");
+                                let sse_error = super::util::format_sse_error_event("SSE buffer exceeded 1 MB limit");
                                 let _ = tx.send(Bytes::from(sse_error)).await;
                                 stream_status = "buffer_overflow";
                                 break;
@@ -275,7 +275,7 @@ pub(crate) fn handle_anthropic_streaming_response(
                         Some(Err(_e)) => {
                             stream_status = "stream_error";
                             let error_text: String = _e.to_string().chars().take(512).collect();
-                            let sse_error = crate::format_sse_error_event(&error_text);
+                            let sse_error = super::util::format_sse_error_event(&error_text);
                             let _ = tx.send(Bytes::from(sse_error)).await;
                             break;
                         }
@@ -397,7 +397,7 @@ pub(crate) fn handle_translating_anthropic_stream(
                             buffer.extend_from_slice(&bytes);
                             const MAX_SSE_BUFFER: usize = 1024 * 1024;
                             if buffer.len() > MAX_SSE_BUFFER {
-                                let sse_error = crate::format_sse_error_event("SSE buffer exceeded 1 MB limit");
+                                let sse_error = super::util::format_sse_error_event("SSE buffer exceeded 1 MB limit");
                                 let _ = tx.send(Bytes::from(sse_error)).await;
                                 stream_status = "buffer_overflow";
                                 break;
@@ -427,7 +427,7 @@ pub(crate) fn handle_translating_anthropic_stream(
                         Some(Err(_e)) => {
                             stream_status = "stream_error";
                             let error_text: String = _e.to_string().chars().take(512).collect();
-                            let sse_error = crate::format_sse_error_event(&error_text);
+                            let sse_error = super::util::format_sse_error_event(&error_text);
                             let _ = tx.send(Bytes::from(sse_error)).await;
                             break;
                         }

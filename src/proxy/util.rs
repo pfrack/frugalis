@@ -471,3 +471,16 @@ pub(crate) fn collect_forward_headers(headers: &HeaderMap) -> Vec<(String, Strin
     }
     out
 }
+
+pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
+    let mut escaped = String::with_capacity(error_msg.len() * 2);
+    for c in error_msg.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            c if (c as u32) < 0x20 => escaped.push(' '),
+            _ => escaped.push(c),
+        }
+    }
+    format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", escaped)
+}

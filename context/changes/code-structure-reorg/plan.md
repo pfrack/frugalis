@@ -401,11 +401,11 @@ No data migration. No config changes. No API changes. Downstream consumers (Dock
 
 #### Automated
 
-- [ ] 3.1 `cargo build` succeeds
-- [ ] 3.2 `cargo build --features otel` succeeds
-- [ ] 3.3 `cargo test` — all tests pass
-- [ ] 3.4 `cargo clippy` — no new warnings
-- [ ] 3.5 main.rs no longer contains handler function definitions
+- [x] 3.1 `cargo build` succeeds
+- [x] 3.2 `cargo build --features otel` succeeds
+- [x] 3.3 `cargo test` — all tests pass
+- [x] 3.4 `cargo clippy` — no new warnings
+- [x] 3.5 main.rs no longer contains handler function definitions
 
 #### Manual
 

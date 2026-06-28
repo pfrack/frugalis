@@ -29,6 +29,9 @@ mod quickstart;
 #[cfg(test)]
 mod test_util;
 
+#[cfg(test)]
+use proxy::util::format_sse_error_event;
+
 /// Shared application state injected into handlers via Axum's `State` extractor.
 /// `persistence` is `None` when `DATABASE_URL` is absent (persistence gracefully disabled).
 #[derive(Clone)]
@@ -678,19 +681,6 @@ async fn shutdown_signal() {
             info!("Shutdown signal received (SIGTERM), flushing telemetry");
         }
     }
-}
-
-pub(crate) fn format_sse_error_event(error_msg: &str) -> String {
-    let mut escaped = String::with_capacity(error_msg.len() * 2);
-    for c in error_msg.chars() {
-        match c {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            c if (c as u32) < 0x20 => escaped.push(' '),
-            _ => escaped.push(c),
-        }
-    }
-    format!("event: error\ndata: {{\"error\":\"{}\"}}\n\n", escaped)
 }
 
 /// Convert a non-2xx upstream response into an SSE error event for the client.
