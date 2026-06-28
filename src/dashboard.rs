@@ -426,298 +426,122 @@ mod tests {
     #[tokio::test]
     async fn test_dashboard_authenticated_returns_html() {
         let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("dashboard request should complete");
+            .oneshot(Request::builder().uri("/dashboard").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid"))
+            .await.expect("dashboard request should complete");
         assert_eq!(response.status(), StatusCode::OK);
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .expect("response should have Content-Type");
+        let content_type = response.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).expect("response should have Content-Type");
         assert!(content_type.starts_with("text/html"));
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body should be readable");
         let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
         assert!(body.contains("Frugalis Dashboard"));
     }
 
     #[tokio::test]
     async fn test_inferences_unauthenticated_returns_401() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/inferences")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/inferences").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
     async fn test_inferences_authenticated_returns_html() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/inferences")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/inferences").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+        let content_type = response.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
         assert!(content_type.starts_with("text/html"));
     }
 
     #[tokio::test]
     async fn test_inferences_empty_state() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/inferences")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/inferences").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body should be readable");
         let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
-        assert!(
-            body.contains("Database not configured") || body.contains("No inference records yet")
-        );
+        assert!(body.contains("Database not configured") || body.contains("No inference records yet"));
     }
 
     #[tokio::test]
     async fn test_inferences_invalid_params() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/inferences?offset=abc&limit=999999")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/inferences?offset=abc&limit=999999").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn test_inferences_db_error() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/inferences")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/inferences").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body should be readable");
         let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
         assert!(body.contains("Database not configured"));
     }
 
     #[tokio::test]
     async fn test_inferences_filter_by_category() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/inferences?filter_category=COMPLEX_REASONING")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/inferences?filter_category=COMPLEX_REASONING").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn test_inferences_pagination_offset() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/inferences?offset=20&limit=10")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/inferences?offset=20&limit=10").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn test_latency_unauthenticated_returns_401() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/latency")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/latency").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
     async fn test_latency_authenticated_returns_html() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/latency")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/latency").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+        let content_type = response.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
         assert!(content_type.starts_with("text/html"));
     }
 
     #[tokio::test]
     async fn test_latency_empty_state() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/latency")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/latency").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body should be readable");
         let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
         assert!(body.contains("Database not configured"));
     }
 
     #[tokio::test]
     async fn test_latency_invalid_hours_defaults() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/latency?hours=abc")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/latency?hours=abc").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/latency?hours=0")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/latency?hours=0").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn test_latency_out_of_range_clamped() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/latency?hours=99999")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/latency?hours=99999").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn test_savings_unauthenticated_returns_401() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/savings")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/savings").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
     async fn test_savings_authenticated_returns_html() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/savings")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/savings").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+        let content_type = response.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
         assert!(content_type.starts_with("text/html"));
     }
 
     #[tokio::test]
     async fn test_savings_no_persistence_shows_error() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/dashboard/savings")
-                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should complete");
+        let response = test_app().oneshot(Request::builder().uri("/dashboard/savings").header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==").body(Body::empty()).expect("request should be valid")).await.expect("request should complete");
         assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should be readable");
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body should be readable");
         let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
         assert!(body.contains("Database not configured"));
     }

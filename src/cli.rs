@@ -140,10 +140,7 @@ mod tests {
     use super::*;
 
     fn init_scratch(label: &str) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         let dir = std::env::temp_dir().join(format!("frugalis-init-{label}-{nanos}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir should be creatable");
@@ -152,31 +149,16 @@ mod tests {
 
     #[test]
     fn init_template_contains_all_five_routing_sections() {
-        for section in [
-            "[routing.DEFAULT]",
-            "[routing.FILE_READING]",
-            "[routing.SYNTAX_FIX]",
-            "[routing.COMPLEX_REASONING]",
-            "[routing.CASUAL]",
-        ] {
-            assert!(
-                INIT_TEMPLATE.contains(section),
-                "init template should contain section {section}"
-            );
+        for section in ["[routing.DEFAULT]", "[routing.FILE_READING]", "[routing.SYNTAX_FIX]", "[routing.COMPLEX_REASONING]", "[routing.CASUAL]"] {
+            assert!(INIT_TEMPLATE.contains(section), "init template should contain section {section}");
         }
     }
 
     #[test]
     fn init_template_parses_as_valid_toml_syntax() {
-        let value: toml::Value =
-            toml::from_str(INIT_TEMPLATE).expect("init template should be valid TOML syntax");
-        let table = value
-            .as_table()
-            .expect("init template should be a top-level TOML table");
-        let routing = table
-            .get("routing")
-            .and_then(|v| v.as_table())
-            .expect("init template should have a [routing] table");
+        let value: toml::Value = toml::from_str(INIT_TEMPLATE).expect("init template should be valid TOML syntax");
+        let table = value.as_table().expect("init template should be a top-level TOML table");
+        let routing = table.get("routing").and_then(|v| v.as_table()).expect("init template should have a [routing] table");
         assert_eq!(routing.len(), 5);
     }
 
@@ -194,8 +176,7 @@ mod tests {
         let dir = init_scratch("refuse");
         let path = dir.join("frugalis.toml");
         std::fs::write(&path, "preexisting content").expect("seed write should succeed");
-        let err = run_init(Some(path.to_str().unwrap()), false)
-            .expect_err("overwrite must be refused without --force");
+        let err = run_init(Some(path.to_str().unwrap()), false).expect_err("overwrite must be refused without --force");
         assert!(err.contains("refusing to overwrite"));
         let still = std::fs::read_to_string(&path).expect("file should still be readable");
         assert_eq!(still, "preexisting content");
