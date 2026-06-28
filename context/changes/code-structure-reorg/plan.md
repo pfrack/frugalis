@@ -385,17 +385,17 @@ No data migration. No config changes. No API changes. Downstream consumers (Dock
 
 #### Automated
 
-- [x] 2.1 `cargo build` succeeds
-- [x] 2.2 `cargo build --features otel` succeeds
-- [x] 2.3 `cargo test` — all tests pass
-- [x] 2.4 `cargo clippy` — no new warnings
-- [x] 2.5 `src/routing.rs`, `src/intent_classifier.rs`, `src/fewshot_classifier.rs` no longer exist
+- [x] 2.1 `cargo build` succeeds — e2416f9
+- [x] 2.2 `cargo build --features otel` succeeds — e2416f9
+- [x] 2.3 `cargo test` — all tests pass — e2416f9
+- [x] 2.4 `cargo clippy` — no new warnings — e2416f9
+- [x] 2.5 `src/routing.rs`, `src/intent_classifier.rs`, `src/fewshot_classifier.rs` no longer exist — e2416f9
 
 #### Manual
 
-- [x] 2.6 Confirm `src/config/` has 4 files
-- [x] 2.7 Confirm `src/classification/` has 6 files
-- [x] 2.8 No `use crate::routing::` or `use crate::intent_classifier::` imports remain
+- [x] 2.6 Confirm `src/config/` has 4 files — e2416f9
+- [x] 2.7 Confirm `src/classification/` has 6 files — e2416f9
+- [x] 2.8 No `use crate::routing::` or `use crate::intent_classifier::` imports remain — e2416f9
 
 ### Phase 3: Proxy Extraction from main.rs
 

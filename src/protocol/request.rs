@@ -700,7 +700,8 @@ fn convert_anthropic_assistant_message(msg: &serde_json::Value) -> serde_json::V
 #[cfg(test)]
 mod tests {
     use super::*;
-        fn test_basic_text_request() {
+    #[test]
+    fn test_basic_text_request() {
             let input = json!({
                 "model": "gpt-4",
                 "messages": [
@@ -719,7 +720,8 @@ mod tests {
             let content = msgs[0].get("content").unwrap().as_array().unwrap();
             assert_eq!(content[0].get("text").unwrap().as_str().unwrap(), "Hello");
         }
-        fn test_translate_request_inserts_top_level_cache_control() {
+    #[test]
+    fn test_translate_request_inserts_top_level_cache_control() {
             // OpenAI client → Anthropic upstream: the translator must auto-insert
             // a top-level ephemeral cache_control so Anthropic's automatic prompt
             // caching activates with no per-block surgery and no beta header.
@@ -737,7 +739,8 @@ mod tests {
                 "automatic caching uses an ephemeral top-level breakpoint"
             );
         }
-        fn test_anthropic_to_openai_request_strips_cache_control_and_signals() {
+    #[test]
+    fn test_anthropic_to_openai_request_strips_cache_control_and_signals() {
             // Anthropic body WITH a cache_control breakpoint on a message block.
             // The OpenAI body must NOT carry cache_control (no native equivalent),
             // and the signal must report had_cache_control = true so logging can
@@ -765,7 +768,8 @@ mod tests {
             let msgs = translated.get("messages").unwrap().as_array().unwrap();
             assert!(!msgs.is_empty());
         }
-        fn test_anthropic_to_openai_request_no_cache_control_signal_when_absent() {
+    #[test]
+    fn test_anthropic_to_openai_request_no_cache_control_signal_when_absent() {
             // No breakpoint anywhere -> had_cache_control = false.
             let input = json!({
                 "model": "claude-3.5",
@@ -1046,6 +1050,7 @@ mod tests {
             let input_val = content[0].get("input").unwrap();
             assert_eq!(input_val.get("raw").unwrap().as_str().unwrap(), "not-json");
         }
+        #[test]
         fn test_a2o_system_string() {
             let input = json!({
                 "model": "claude-sonnet-4-20250514",
@@ -1061,6 +1066,7 @@ mod tests {
                 "You are helpful."
             );
         }
+        #[test]
         fn test_a2o_system_block_array() {
             let input = json!({
                 "model": "m",
@@ -1075,6 +1081,7 @@ mod tests {
                 "Part 1\n\nPart 2"
             );
         }
+        #[test]
         fn test_a2o_user_text_string() {
             let input = json!({
                 "model": "m", "max_tokens": 1024,
@@ -1084,6 +1091,7 @@ mod tests {
             let msgs = result.get("messages").unwrap().as_array().unwrap();
             assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "Hello");
         }
+        #[test]
         fn test_a2o_user_text_blocks_joined() {
             let input = json!({
                 "model": "m", "max_tokens": 1024,
@@ -1096,6 +1104,7 @@ mod tests {
             let msgs = result.get("messages").unwrap().as_array().unwrap();
             assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "A\n\nB");
         }
+        #[test]
         fn test_a2o_user_image_source() {
             let input = json!({
                 "model": "m", "max_tokens": 1024,
@@ -1121,6 +1130,7 @@ mod tests {
                 "data:image/png;base64,abc123"
             );
         }
+        #[test]
         fn test_a2o_user_tool_result() {
             let input = json!({
                 "model": "m", "max_tokens": 1024,
@@ -1140,6 +1150,7 @@ mod tests {
                 "result data"
             );
         }
+        #[test]
         fn test_a2o_assistant_text() {
             let input = json!({
                 "model": "m", "max_tokens": 1024,
@@ -1152,6 +1163,7 @@ mod tests {
             assert_eq!(msgs[0].get("role").unwrap().as_str().unwrap(), "assistant");
             assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "Hello");
         }
+        #[test]
         fn test_a2o_assistant_tool_use() {
             let input = json!({
                 "model": "m", "max_tokens": 1024,
@@ -1185,6 +1197,7 @@ mod tests {
             .unwrap();
             assert_eq!(args.get("path").unwrap().as_str().unwrap(), "/src");
         }
+        #[test]
         fn test_a2o_assistant_thinking() {
             let input = json!({
                 "model": "m", "max_tokens": 1024,
@@ -1201,6 +1214,7 @@ mod tests {
             );
             assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "Answer");
         }
+        #[test]
         fn test_a2o_redacted_thinking_dropped() {
             let input = json!({
                 "model": "m", "max_tokens": 1024,
@@ -1214,6 +1228,7 @@ mod tests {
             assert!(msgs[0].get("reasoning_content").is_none());
             assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "Done");
         }
+        #[test]
         fn test_a2o_tool_definitions() {
             let input = json!({
                 "model": "m", "max_tokens": 1024,
@@ -1235,6 +1250,7 @@ mod tests {
                 "object"
             );
         }
+        #[test]
         fn test_a2o_tool_choice_mapping() {
             // auto
             let input = json!({"model": "m", "max_tokens": 1024, "messages": [{"role":"user","content":"Hi"}], "tool_choice": {"type": "auto"}});
@@ -1261,6 +1277,7 @@ mod tests {
                 "my_fn"
             );
         }
+        #[test]
         fn test_a2o_post_pass_reasoning_fix() {
             let input = json!({
                 "model": "m", "max_tokens": 1024,
@@ -1283,6 +1300,7 @@ mod tests {
                 " "
             );
         }
+        #[test]
         fn test_a2o_stream_options_set() {
             let input = json!({
                 "model": "m", "max_tokens": 1024, "stream": true,
@@ -1298,6 +1316,7 @@ mod tests {
                 .as_bool()
                 .unwrap());
         }
+        #[test]
         fn test_a2o_fields_dropped() {
             let input = json!({
                 "model": "m", "max_tokens": 1024,

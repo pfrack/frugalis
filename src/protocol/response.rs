@@ -369,6 +369,7 @@ fn status_to_anthropic_error_type(status: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+        #[test]
         fn test_translate_response_maps_cache_tokens_to_openai() {
             // Anth→OAI non-streaming: Anthropic cache_read/cache_creation must
             // surface as OpenAI prompt_tokens_details.cached_tokens, and
@@ -409,6 +410,7 @@ mod tests {
                 "cached_tokens must map from Anthropic cache_read_input_tokens"
             );
         }
+        #[test]
         fn test_translate_response_no_cache_tokens_still_emits_details() {
             // When the upstream reports no caching, cached_tokens must be 0 (not
             // absent), and prompt_tokens falls back to input_tokens.
@@ -431,6 +433,7 @@ mod tests {
                 .and_then(|v| v.as_u64());
             assert_eq!(cached, Some(0));
         }
+        #[test]
         fn test_openai_to_anthropic_response_maps_cached_tokens() {
             // OAI→Anth non-streaming: OpenAI cached_tokens must surface as
             // Anthropic cache_read_input_tokens, with the invariant
@@ -481,6 +484,7 @@ mod tests {
                 "Anthropic input invariant must equal OpenAI prompt_tokens"
             );
         }
+        #[test]
         fn test_text_content_blocks() {
             let input = json!({
                 "id": "msg_1",
@@ -498,6 +502,7 @@ mod tests {
             let msg = result.get("choices").unwrap()[0].get("message").unwrap();
             assert_eq!(msg.get("content").unwrap().as_str().unwrap(), "Hello world");
         }
+        #[test]
         fn test_thinking_content() {
             let input = json!({
                 "id": "msg_1",
@@ -519,6 +524,7 @@ mod tests {
             );
             assert_eq!(msg.get("content").unwrap().as_str().unwrap(), "Answer");
         }
+        #[test]
         fn test_tool_use_blocks() {
             let input = json!({
                 "id": "msg_1",
@@ -561,6 +567,7 @@ mod tests {
             .unwrap();
             assert_eq!(args.get("path").unwrap().as_str().unwrap(), "/src");
         }
+        #[test]
         fn test_redacted_thinking_omitted() {
             let input = json!({
                 "id": "msg_1",
@@ -579,6 +586,7 @@ mod tests {
             assert!(msg.get("reasoning_content").is_none());
             assert_eq!(msg.get("content").unwrap().as_str().unwrap(), "Done");
         }
+        #[test]
         fn test_stop_reason_mapping() {
             fn check(anthropic: &str, expected_openai: &str) {
                 let input = json!({
@@ -603,6 +611,7 @@ mod tests {
             check("tool_use", "tool_calls");
             check("stop_sequence", "stop");
         }
+        #[test]
         fn test_usage_mapping() {
             let input = json!({
                 "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
@@ -619,6 +628,7 @@ mod tests {
             );
             assert_eq!(usage.get("total_tokens").unwrap().as_u64().unwrap(), 150);
         }
+        #[test]
         fn test_error_translation() {
             let input =
                 r#"{"type":"error","error":{"type":"overloaded_error","message":"Too many requests"}}"#;
@@ -655,6 +665,7 @@ mod tests {
                 529
             );
         }
+        #[test]
         fn test_error_translation_malformed_body() {
             let result = translate_error("not json", 500);
             let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -669,6 +680,7 @@ mod tests {
                 "not json"
             );
         }
+        #[test]
         fn test_a2o_response_text() {
             let input = json!({
                 "id": "chatcmpl-abc",
@@ -688,6 +700,7 @@ mod tests {
                 "end_turn"
             );
         }
+        #[test]
         fn test_a2o_response_with_tool_calls() {
             let input = json!({
                 "id": "chatcmpl-abc",
@@ -722,6 +735,7 @@ mod tests {
                 "tool_use"
             );
         }
+        #[test]
         fn test_a2o_response_with_reasoning() {
             let input = json!({
                 "id": "chatcmpl-abc",
@@ -745,6 +759,7 @@ mod tests {
             assert_eq!(content[1].get("type").unwrap().as_str().unwrap(), "text");
             assert_eq!(content[1].get("text").unwrap().as_str().unwrap(), "Answer");
         }
+        #[test]
         fn test_a2o_response_finish_reason_mapping() {
             fn check(fr: &str, expected: &str) {
                 let input = json!({
@@ -765,6 +780,7 @@ mod tests {
             check("function_call", "tool_use");
             check("content_filter", "end_turn");
         }
+        #[test]
         fn test_a2o_response_usage_mapping() {
             let input = json!({
                 "id": "x", "object": "chat.completion", "model": "m",
@@ -777,6 +793,7 @@ mod tests {
             assert_eq!(usage.get("output_tokens").unwrap().as_u64().unwrap(), 50);
             assert!(usage.get("total_tokens").is_none());
         }
+        #[test]
         fn test_a2o_error_valid_json() {
             let input = r#"{"error":{"message":"Rate limit exceeded","type":"rate_limit","code":"rate_limit_exceeded"}}"#;
             let result = openai_to_anthropic_error(input, 429);
@@ -792,6 +809,7 @@ mod tests {
                 "rate_limit_error"
             );
         }
+        #[test]
         fn test_a2o_error_malformed() {
             let result = openai_to_anthropic_error("not json", 500);
             let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -799,6 +817,7 @@ mod tests {
             assert_eq!(err.get("message").unwrap().as_str().unwrap(), "not json");
             assert_eq!(err.get("type").unwrap().as_str().unwrap(), "api_error");
         }
+        #[test]
         fn test_a2o_error_status_mapping() {
             let result = openai_to_anthropic_error(r#"{"error":{"message":"x"}}"#, 401);
             let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();

@@ -653,7 +653,8 @@ pub fn openai_to_anthropic_stream_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-        fn test_translate_stream_event_accumulates_cache_tokens_across_events() {
+    #[test]
+    fn test_translate_stream_event_accumulates_cache_tokens_across_events() {
             // Anthropic streaming reports input_tokens + cache_creation in
             // message_start and output_tokens + cache_read in message_delta. The
             // translator must combine both halves into the terminal OpenAI usage
@@ -687,7 +688,8 @@ mod tests {
             assert_eq!(state.chunk_id, "msg_1");
             assert_eq!(state.model, "claude-sonnet-4-20250514");
         }
-        fn test_stream_text_delta() {
+    #[test]
+    fn test_stream_text_delta() {
             let mut state = StreamTranslateState {
                 chunk_id: "msg_1".into(),
                 model: "m".into(),
@@ -699,7 +701,8 @@ mod tests {
             assert!(result.is_some());
             assert!(result.unwrap().contains("Hello"));
         }
-        fn test_stream_thinking_delta() {
+    #[test]
+    fn test_stream_thinking_delta() {
             let mut state = StreamTranslateState {
                 chunk_id: "msg_1".into(),
                 model: "m".into(),
@@ -711,7 +714,8 @@ mod tests {
             assert!(result.is_some());
             assert!(result.unwrap().contains("reasoning_content"));
         }
-        fn test_stream_tool_use_start() {
+    #[test]
+    fn test_stream_tool_use_start() {
             let mut state = StreamTranslateState {
                 chunk_id: "msg_1".into(),
                 model: "m".into(),
@@ -726,7 +730,8 @@ mod tests {
             assert!(chunk.contains("read_file"));
             assert!(state.has_tool_use);
         }
-        fn test_stream_input_json_delta() {
+    #[test]
+    fn test_stream_input_json_delta() {
             let mut state = StreamTranslateState {
                 chunk_id: "msg_1".into(),
                 model: "m".into(),
@@ -743,7 +748,8 @@ mod tests {
             assert!(chunk.contains("\"arguments\""));
             assert!(chunk.contains("tool_calls"));
         }
-        fn test_stream_content_block_stop_tool() {
+    #[test]
+    fn test_stream_content_block_stop_tool() {
             let mut state = StreamTranslateState {
                 chunk_id: "msg_1".into(),
                 model: "m".into(),
@@ -757,7 +763,8 @@ mod tests {
             assert_eq!(state.tool_index, 1);
             assert!(!state.has_tool_use);
         }
-        fn test_stream_message_delta_stop() {
+    #[test]
+    fn test_stream_message_delta_stop() {
             let mut state = StreamTranslateState {
                 chunk_id: "msg_1".into(),
                 model: "m".into(),
@@ -771,25 +778,29 @@ mod tests {
             assert!(chunks.contains("\"finish_reason\":\"stop\""));
             assert!(chunks.contains("\"completion_tokens\":42"));
         }
-        fn test_stream_message_stop() {
+    #[test]
+    fn test_stream_message_stop() {
             let mut state = StreamTranslateState::default();
             let result = translate_stream_event("message_stop", "{}", &mut state);
             assert_eq!(result.unwrap(), "data: [DONE]\n\n");
         }
-        fn test_parse_sse_events() {
+    #[test]
+    fn test_parse_sse_events() {
             let input = b"event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n";
             let events = parse_sse_events(input);
             assert_eq!(events.len(), 2);
             assert_eq!(events[0].0, "message_start");
             assert_eq!(events[1].0, "content_block_delta");
         }
-        fn test_parse_sse_events_no_event_type() {
+    #[test]
+    fn test_parse_sse_events_no_event_type() {
             let input = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n";
             let events = parse_sse_events(input);
             assert_eq!(events.len(), 1);
             assert_eq!(events[0].0, "message"); // default
         }
-        fn test_a2o_stream_first_chunk_emits_message_start() {
+    #[test]
+    fn test_a2o_stream_first_chunk_emits_message_start() {
             let mut state = AnthropicStreamState::default();
             let data = r#"{"id":"chatcmpl-abc","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}"#;
             let result = openai_to_anthropic_stream_event("message", data, &mut state);
@@ -800,7 +811,8 @@ mod tests {
             assert!(state.message_started);
             assert_eq!(state.model, "gpt-4o");
         }
-        fn test_a2o_stream_content_delta() {
+    #[test]
+    fn test_a2o_stream_content_delta() {
             let mut state = AnthropicStreamState {
                 message_started: true,
                 model: "m".into(),
@@ -814,7 +826,8 @@ mod tests {
             assert!(result.contains("Hello"));
             assert_eq!(state.open_block.as_deref(), Some("text"));
         }
-        fn test_a2o_stream_reasoning_delta() {
+    #[test]
+    fn test_a2o_stream_reasoning_delta() {
             let mut state = AnthropicStreamState {
                 message_started: true,
                 model: "m".into(),
@@ -828,7 +841,8 @@ mod tests {
             assert!(result.contains("Thinking..."));
             assert_eq!(state.open_block.as_deref(), Some("thinking"));
         }
-        fn test_a2o_stream_tool_call_new() {
+    #[test]
+    fn test_a2o_stream_tool_call_new() {
             let mut state = AnthropicStreamState {
                 message_started: true,
                 model: "m".into(),
@@ -843,7 +857,8 @@ mod tests {
             assert_eq!(state.open_block.as_deref(), Some("tool_use"));
             assert!(state.tool_state.contains_key(&0));
         }
-        fn test_a2o_stream_tool_call_arguments() {
+    #[test]
+    fn test_a2o_stream_tool_call_arguments() {
             let mut state = AnthropicStreamState {
                 message_started: true,
                 model: "m".into(),
@@ -856,7 +871,8 @@ mod tests {
             assert!(result.contains("input_json_delta"));
             assert!(result.contains("{\\\"path\\\":"));
         }
-        fn test_a2o_stream_finish_reason() {
+    #[test]
+    fn test_a2o_stream_finish_reason() {
             let mut state = AnthropicStreamState {
                 message_started: true,
                 model: "m".into(),
@@ -869,7 +885,8 @@ mod tests {
             assert!(result.contains("message_delta"));
             assert!(result.contains("end_turn"));
         }
-        fn test_a2o_stream_done() {
+    #[test]
+    fn test_a2o_stream_done() {
             let mut state = AnthropicStreamState {
                 message_started: true,
                 model: "m".into(),
@@ -878,7 +895,8 @@ mod tests {
             let result = openai_to_anthropic_stream_event("message", "[DONE]", &mut state).unwrap();
             assert!(result.contains("message_stop"));
         }
-        fn test_a2o_stream_block_transition() {
+    #[test]
+    fn test_a2o_stream_block_transition() {
             let mut state = AnthropicStreamState {
                 message_started: true,
                 model: "m".into(),

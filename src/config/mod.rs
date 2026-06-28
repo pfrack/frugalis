@@ -359,7 +359,6 @@ pub(crate) fn merge_configs(base: &mut ConfigRoot, overlay: ConfigRoot) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use std::path::PathBuf;
 
     #[test]

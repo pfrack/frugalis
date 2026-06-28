@@ -241,7 +241,6 @@ impl RegexClassifier {
 mod tests {
     use super::*;
     use crate::config::routing::{ProviderEntry, RouteEntry};
-    use serial_test::serial;
 
     fn test_categories() -> Vec<CategoryConfig> {
         vec![

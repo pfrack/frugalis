@@ -68,7 +68,7 @@ pub(crate) mod test_util {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::classification::types::{ClassificationResult, ClassificationTier};
+    use crate::classification::types::ClassificationResult;
 
     /// Test-only `IntentClassify` impl that records how many times
     /// `classify()` is invoked and returns a configurable
@@ -96,8 +96,7 @@ pub(crate) mod test_util {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classification::types::{ClassificationResult, ClassificationTier};
-    use serial_test::serial;
+    use crate::classification::types::ClassificationResult;
 
     // ── ClassifierChain Tests ────────────────────────────────────────────────────
 
