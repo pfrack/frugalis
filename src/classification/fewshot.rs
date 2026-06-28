@@ -5,14 +5,12 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use tokio::fs;
 
-use crate::config::FewShotConfig;
-use crate::intent_classifier::{
-    code_block_re, ClassificationResult, ClassificationTier, FewShotExample, IntentClassify,
-    RouteEntry,
-};
-use crate::routing::DEFAULT_MODEL;
+use crate::classification::chain::IntentClassify;
+use crate::classification::types::{ClassificationResult, ClassificationTier, FewShotExample};
+use crate::config::routing::{RouteEntry, DEFAULT_MODEL};
+use crate::config::types::FewShotConfig;
 
-pub(crate) struct FewShotClassifier {
+pub struct FewShotClassifier {
     vocabulary: RwLock<dashmap::DashMap<String, usize>>,
     intent_patterns: RwLock<dashmap::DashMap<String, Vec<Vec<f64>>>>,
     training_data: Arc<tokio::sync::RwLock<Vec<FewShotExample>>>,
@@ -29,7 +27,7 @@ impl FewShotClassifier {
         fallback_entry: RouteEntry,
     ) -> Self {
         let bootstrap: Vec<FewShotExample> =
-            serde_yaml::from_str(include_str!("../data/fewshot_bootstrap.yaml"))
+            serde_yaml::from_str(include_str!("../../data/fewshot_bootstrap.yaml"))
                 .expect("bootstrap YAML must be valid");
 
         // Load persisted training data; merge with bootstrap (persisted wins on text match)
@@ -69,7 +67,7 @@ impl FewShotClassifier {
 
     fn preprocess(text: &str) -> String {
         let lower = text.to_lowercase();
-        let no_blocks = code_block_re().replace_all(&lower, " ");
+        let no_blocks = crate::classification::code_block_re().replace_all(&lower, " ");
         let collapsed: Vec<&str> = no_blocks.split_whitespace().collect();
         collapsed.join(" ")
     }
@@ -189,7 +187,6 @@ impl FewShotClassifier {
             );
         }
 
-        // Atomically swap: only hold write locks for the assignment
         *self.vocabulary.write().unwrap() = new_vocab;
         *self.intent_patterns.write().unwrap() = new_patterns;
     }
@@ -206,12 +203,10 @@ impl FewShotClassifier {
             category: actual_category,
             confidence: satisfaction,
         };
-        // Push the new example and decide whether to trigger retraining
         let (should_retrain, data_clone) = {
             let mut data = self.training_data.write().await;
             data.push(example);
 
-            // Eviction: Respect max_training_examples by removing oldest non-bootstrap entries
             if data.len() > self.config.max_training_examples {
                 let mut boots = Vec::new();
                 let mut feedback = Vec::new();
@@ -239,17 +234,14 @@ impl FewShotClassifier {
             let currently_retraining = self.retraining_in_progress.load(Ordering::SeqCst);
             let will_retrain = need_retrain && !currently_retraining;
             if will_retrain {
-                // Attempt to set the flag to mark that we are responsible for retraining
                 if self
                     .retraining_in_progress
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
-                    // Clone training data for retraining after releasing the write lock
                     let data_clone = data.clone();
                     (true, Some(data_clone))
                 } else {
-                    // Another thread beat us to it
                     (false, None)
                 }
             } else {
@@ -257,12 +249,10 @@ impl FewShotClassifier {
             }
         };
 
-        // Perform retraining and persistence outside the write lock
         if should_retrain {
             if let Some(data_snapshot) = data_clone {
                 self.retrain_internal(&data_snapshot);
                 self.save_training_data(&data_snapshot).await;
-                // Clear the retraining flag
                 self.retraining_in_progress.store(false, Ordering::SeqCst);
             }
         }
@@ -292,8 +282,7 @@ impl FewShotClassifier {
                 Err(e) => {
                     tracing::warn!(
                         "Failed to parse few-shot training data from {}: {}",
-                        path,
-                        e
+                        path, e
                     );
                     vec![]
                 }
@@ -367,7 +356,7 @@ impl IntentClassify for FewShotClassifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intent_classifier::ProviderEntry;
+    use crate::config::routing::ProviderEntry;
 
     fn make_config() -> FewShotConfig {
         let nanos = std::time::SystemTime::now()

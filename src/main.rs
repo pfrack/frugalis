@@ -67,30 +67,28 @@ impl Drop for RequestMetrics {
 
 mod auth;
 mod cache;
+mod classification;
 mod config;
 mod dashboard;
-mod fewshot_classifier;
-mod intent_classifier;
 mod persistence;
 mod protocol;
 mod quickstart;
-mod routing;
 
 #[cfg(test)]
 mod test_util;
 
-use intent_classifier::IntentClassify;
+use classification::chain::IntentClassify;
 
 /// Shared application state injected into handlers via Axum's `State` extractor.
 /// `persistence` is `None` when `DATABASE_URL` is absent (persistence gracefully disabled).
 #[derive(Clone)]
 pub struct AppState {
     persistence: Option<persistence::PersistenceConfig>,
-    classifier: Option<Arc<intent_classifier::ClassifierChain>>,
-    fewshot_classifier: Option<Arc<fewshot_classifier::FewShotClassifier>>,
+    classifier: Option<Arc<classification::chain::ClassifierChain>>,
+    fewshot_classifier: Option<Arc<classification::fewshot::FewShotClassifier>>,
     routing:
-        Arc<tokio::sync::RwLock<std::collections::HashMap<String, intent_classifier::RouteEntry>>>,
-    model_costs: Arc<tokio::sync::RwLock<intent_classifier::ModelCosts>>,
+        Arc<tokio::sync::RwLock<std::collections::HashMap<String, config::routing::RouteEntry>>>,
+    model_costs: Arc<tokio::sync::RwLock<config::routing::ModelCosts>>,
     baseline_model: Arc<tokio::sync::RwLock<String>>,
     classify_db_log: Arc<std::sync::atomic::AtomicBool>,
     http_client: Option<reqwest::Client>,
@@ -98,8 +96,8 @@ pub struct AppState {
     keepalive_interval_secs: Arc<tokio::sync::RwLock<u64>>,
     request_body_limit_bytes: usize,
     streaming_channel_capacity: usize,
-    dashboard_config: config::DashboardConfig,
-    auth_providers: Arc<Vec<config::AuthProviderConfig>>,
+    dashboard_config: config::types::DashboardConfig,
+    auth_providers: Arc<Vec<config::types::AuthProviderConfig>>,
     allowed_origins: Arc<RwLock<Vec<String>>>,
     response_cache: Option<Arc<cache::ResponseCache>>,
     #[cfg(feature = "otel")]
@@ -328,7 +326,7 @@ ENVIRONMENT:
         }
     }
 
-    let server_config = config::load_server_config_from_value(&config_root);
+    let server_config = config::loader::load_server_config_from_value(&config_root);
 
     // Initialize OpenTelemetry providers before tracing (layers reference the providers)
     #[cfg(feature = "otel")]
@@ -380,14 +378,14 @@ ENVIRONMENT:
         info!("No CONFIG_PATH set — using embedded defaults. Run `frugalis --init` to generate a starter config.");
     }
 
-    let regex_config = config::load_regex_classifier_config_from_value(&config_root);
+    let regex_config = config::loader::load_regex_classifier_config_from_value(&config_root);
 
     // Load global classifiers config
-    let classifiers_config = config::load_classifiers_config_from_value(&config_root);
+    let classifiers_config = config::loader::load_classifiers_config_from_value(&config_root);
 
-    let negative_patterns = config::load_negative_patterns_from_value(&config_root);
+    let negative_patterns = config::loader::load_negative_patterns_from_value(&config_root);
 
-    let http_config = config::load_http_config_from_value(&config_root);
+    let http_config = config::loader::load_http_config_from_value(&config_root);
     let max_upstream_body_bytes = http_config.max_upstream_body_bytes;
     let keepalive_interval_secs = http_config.keepalive_interval_secs;
 
@@ -402,9 +400,9 @@ ENVIRONMENT:
         .expect("reqwest client should build");
 
     let classify_db_log = config_root.classify_db_log.unwrap_or(false);
-    let auth_providers = Arc::new(config::load_auth_providers_from_value(&config_root));
+    let auth_providers = Arc::new(config::loader::load_auth_providers_from_value(&config_root));
     let (classifier, routing, model_costs, baseline_model, fewshot_classifier) = {
-        let categories_res = config::load_categories_from_value(&config_root);
+        let categories_res = config::loader::load_categories_from_value(&config_root);
         let categories_ok = categories_res.is_ok();
         let mut categories = categories_res.unwrap_or_default();
 
@@ -415,7 +413,7 @@ ENVIRONMENT:
             .unwrap_or_else(|| PathBuf::from("./patterns"));
         for cat in &mut categories {
             if let Some(ref pf) = cat.patterns_file.take() {
-                match config::load_patterns_from_file(pf, &patterns_dir) {
+                match config::loader::load_patterns_from_file(pf, &patterns_dir) {
                     Ok(entries) => {
                         cat.patterns = entries;
                     }
@@ -427,14 +425,14 @@ ENVIRONMENT:
             }
         }
 
-        let (mut routing_map, mut fallback_entry) = match config::routing_from_value(&config_root) {
+        let (mut routing_map, mut fallback_entry) = match config::loader::routing_from_value(&config_root) {
             Ok((map, fallback)) => (map, fallback),
             Err(e) => {
                 warn!(
                     "routing config parsing failed: {}; using hardcoded routing defaults",
                     e
                 );
-                config::hardcoded_routing(&categories)
+                config::loader::hardcoded_routing(&categories)
             }
         };
 
@@ -450,7 +448,7 @@ ENVIRONMENT:
             if !missing.is_empty() {
                 warn!("Categories {:?} missing routing entries; falling back to empty categories and hardcoded routing", missing);
                 categories = vec![];
-                let (new_map, new_fallback) = config::hardcoded_routing(&categories);
+                let (new_map, new_fallback) = config::loader::hardcoded_routing(&categories);
                 routing_map = new_map;
                 fallback_entry = new_fallback;
             }
@@ -482,24 +480,24 @@ ENVIRONMENT:
             );
         }
 
-        let model_costs = config::build_model_costs(&config_root, &routing_map);
+        let model_costs = config::loader::build_model_costs(&config_root, &routing_map);
         let baseline_model = config_root
             .baseline_model
             .clone()
-            .unwrap_or_else(|| intent_classifier::DEFAULT_MODEL_COMPLEX.to_string());
-        let mut fewshot_classifier: Option<Arc<fewshot_classifier::FewShotClassifier>> = None;
+            .unwrap_or_else(|| config::routing::DEFAULT_MODEL_COMPLEX.to_string());
+        let mut fewshot_classifier: Option<Arc<classification::fewshot::FewShotClassifier>> = None;
         if !classifiers_config.enabled {
             info!("All classifiers disabled via config");
             (None, HashMap::new(), model_costs, baseline_model, None)
         } else {
-            let mut backends: Vec<Arc<dyn intent_classifier::IntentClassify + Send + Sync>> =
+            let mut backends: Vec<Arc<dyn classification::chain::IntentClassify + Send + Sync>> =
                 Vec::new();
 
             for name in &classifiers_config.order {
                 match name.as_str() {
                     "regex" => {
                         if regex_config.enabled {
-                            match intent_classifier::RegexClassifier::from_env(
+                            match classification::regex::RegexClassifier::from_env(
                                 routing_map.clone(),
                                 fallback_entry.clone(),
                                 regex_config.short_prompt_len,
@@ -519,8 +517,8 @@ ENVIRONMENT:
                         }
                     }
                     "fewshot" => {
-                        if let Some(config) = config::load_fewshot_config_from_value(&config_root) {
-                            let fewshot = Arc::new(fewshot_classifier::FewShotClassifier::new(
+                        if let Some(config) = config::loader::load_fewshot_config_from_value(&config_root) {
+                            let fewshot = Arc::new(classification::fewshot::FewShotClassifier::new(
                                 config,
                                 routing_map.clone(),
                                 fallback_entry.clone(),
@@ -532,9 +530,9 @@ ENVIRONMENT:
                     }
                     "llm" => {
                         if let Some(llm_config) =
-                            config::load_llm_classifier_config_from_value(&config_root)
+                            config::loader::load_llm_classifier_config_from_value(&config_root)
                         {
-                            let llm = intent_classifier::LLMClassifier::new(
+                            let llm = classification::llm::LLMClassifier::new(
                                 llm_config,
                                 http_client.clone(),
                                 categories.clone(),
@@ -557,7 +555,7 @@ ENVIRONMENT:
                 warn!("no classifier backends enabled");
                 (None, HashMap::new(), model_costs, baseline_model, None)
             } else {
-                let chain = intent_classifier::ClassifierChain::new(backends);
+                let chain = classification::chain::ClassifierChain::new(backends);
                 let mut merged_routing = HashMap::new();
                 for backend in chain.backends().iter() {
                     if let Some(r) = backend.get_routing() {
@@ -575,8 +573,8 @@ ENVIRONMENT:
         }
     };
 
-    let db_config = config::load_database_config_from_value(&config_root);
-    let persistence_settings = config::load_persistence_config_from_value(&config_root);
+    let db_config = config::loader::load_database_config_from_value(&config_root);
+    let persistence_settings = config::loader::load_persistence_config_from_value(&config_root);
     let semaphore_limit = db_config.log_concurrency_limit as usize;
 
     let persistence_state = {
@@ -650,11 +648,11 @@ ENVIRONMENT:
         }
     };
 
-    let cors_config = config::load_cors_config_from_value(&config_root);
+    let cors_config = config::loader::load_cors_config_from_value(&config_root);
     let allowed_origins = Arc::new(RwLock::new(cors_config.allowed_origins));
 
     let response_cache: Option<Arc<cache::ResponseCache>> =
-        config::load_cache_config_from_value(&config_root).map(|cfg| {
+        config::loader::load_cache_config_from_value(&config_root).map(|cfg| {
             info!(
                 "Response cache enabled: ttl={}s max_entries={}",
                 cfg.ttl_secs, cfg.max_entries
@@ -677,7 +675,7 @@ ENVIRONMENT:
         keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(keepalive_interval_secs as u64)),
         request_body_limit_bytes: http_config.request_body_limit_bytes,
         streaming_channel_capacity: http_config.streaming_channel_capacity,
-        dashboard_config: config::load_dashboard_config_from_value(&config_root),
+        dashboard_config: config::loader::load_dashboard_config_from_value(&config_root),
         auth_providers,
         allowed_origins,
         response_cache,
@@ -1030,7 +1028,7 @@ fn session_id_from_forward(forward_headers: &[(String, String)]) -> Option<&str>
 #[allow(clippy::too_many_arguments)]
 fn log_classification(
     state: &AppState,
-    classification: &intent_classifier::ClassificationResult,
+    classification: &classification::types::ClassificationResult,
     _body_str: &str,
     prompt: &str,
     start: std::time::Instant,
@@ -1059,7 +1057,7 @@ fn log_classification(
 #[allow(clippy::too_many_arguments)]
 fn log_classification_with_usage(
     state: &AppState,
-    classification: &intent_classifier::ClassificationResult,
+    classification: &classification::types::ClassificationResult,
     _body_str: &str,
     prompt: &str,
     start: std::time::Instant,
@@ -1088,7 +1086,7 @@ fn log_classification_with_usage(
 #[allow(clippy::too_many_arguments)]
 fn enqueue_inference_record(
     state: &AppState,
-    classification: &intent_classifier::ClassificationResult,
+    classification: &classification::types::ClassificationResult,
     prompt: &str,
     start: std::time::Instant,
     log_status: &str,
@@ -1172,7 +1170,7 @@ async fn classify_and_log(
 
     let classification = match state.classifier.as_ref() {
         Some(c) => c.classify(&prompt).await,
-        None => intent_classifier::ClassificationResult::fallback(),
+        None => classification::types::ClassificationResult::fallback(),
     };
 
     #[cfg(feature = "otel")]
@@ -1246,7 +1244,7 @@ fn anthropic_error_json(error_type: &str, message: &str) -> String {
     .to_string()
 }
 
-fn classification_only_json(result: &intent_classifier::ClassificationResult) -> String {
+fn classification_only_json(result: &classification::types::ClassificationResult) -> String {
     serde_json::json!({
         "status": "classified",
         "category": result.category,
@@ -1298,10 +1296,10 @@ fn collect_forward_headers(headers: &HeaderMap) -> Vec<(String, String)> {
 
 fn build_upstream_request(
     client: &reqwest::Client,
-    provider: &routing::ProviderEntry,
+    provider: &config::routing::ProviderEntry,
     body: &Bytes,
     api_key: &str,
-    auth_providers: &[config::AuthProviderConfig],
+    auth_providers: &[config::types::AuthProviderConfig],
     forward_headers: &[(String, String)],
 ) -> Result<(bool, reqwest::RequestBuilder), String> {
     let mut req_body: serde_json::Value =
@@ -1332,7 +1330,7 @@ fn build_upstream_request(
     // on provider_type. The auth credential is always applied, and
     // `collect_forward_headers` excludes `authorization` / `x-api-key`, so a
     // client can never overwrite the resolved upstream key.
-    let auth_headers = intent_classifier::auth_headers_for(
+    let auth_headers = classification::llm::auth_headers_for(
         auth_providers,
         &provider.provider_type,
         api_key,
@@ -1440,7 +1438,7 @@ async fn handle_buffered_response(
 #[allow(clippy::too_many_arguments)]
 fn handle_streaming_response(
     state: Arc<AppState>,
-    classification: intent_classifier::ClassificationResult,
+    classification: classification::types::ClassificationResult,
     body_str: String,
     prompt: String,
     start: Instant,
@@ -1665,7 +1663,7 @@ async fn handle_streaming_error_with_transform(
 #[allow(clippy::too_many_arguments)]
 fn handle_anthropic_streaming_response(
     state: Arc<AppState>,
-    classification: intent_classifier::ClassificationResult,
+    classification: classification::types::ClassificationResult,
     body_str: String,
     prompt: String,
     start: Instant,
@@ -1950,7 +1948,7 @@ async fn translate_openai_buffered_to_anthropic(
 #[allow(clippy::too_many_arguments)]
 fn handle_translating_anthropic_stream(
     state: Arc<AppState>,
-    classification: intent_classifier::ClassificationResult,
+    classification: classification::types::ClassificationResult,
     body_str: String,
     prompt: String,
     start: Instant,
@@ -2200,17 +2198,17 @@ async fn completion_handler(
     {
         let routing = state.routing.read().await;
         match routing.get(category) {
-            Some(entry) => intent_classifier::ClassificationResult {
+            Some(entry) => classification::types::ClassificationResult {
                 category: category.clone(),
                 model: model.clone(),
-                tier: intent_classifier::ClassificationTier::Fallback,
+                tier: classification::types::ClassificationTier::Fallback,
                 providers: entry.providers.clone(),
             },
             None => {
                 warn!("X-Frugalis-Category '{category}' not found in routing configuration; degrading to classification JSON");
                 let fallback = match state.classifier.as_ref() {
                     Some(c) => c.classify("").await,
-                    None => intent_classifier::ClassificationResult::fallback(),
+                    None => classification::types::ClassificationResult::fallback(),
                 };
                 let response_body = classification_only_json(&fallback);
                 log_classification(&state, &fallback, &body_str, "", start, "ok", 1, "");
@@ -2220,7 +2218,7 @@ async fn completion_handler(
     } else {
         match state.classifier.as_ref() {
             Some(c) => c.classify(&prompt).await,
-            None => intent_classifier::ClassificationResult::fallback(),
+            None => classification::types::ClassificationResult::fallback(),
         }
     };
 
@@ -2399,7 +2397,7 @@ async fn completion_handler(
             let anthropic_bytes =
                 Bytes::from(serde_json::to_vec(&anthropic_body).unwrap_or_default());
 
-            let auth_headers = intent_classifier::auth_headers_for(
+            let auth_headers = classification::llm::auth_headers_for(
                 &state.auth_providers,
                 &provider.provider_type,
                 &api_key,
@@ -2983,17 +2981,17 @@ async fn messages_handler(
     {
         let routing = state.routing.read().await;
         match routing.get(category) {
-            Some(entry) => intent_classifier::ClassificationResult {
+            Some(entry) => classification::types::ClassificationResult {
                 category: category.clone(),
                 model: model.clone(),
-                tier: intent_classifier::ClassificationTier::Fallback,
+                tier: classification::types::ClassificationTier::Fallback,
                 providers: entry.providers.clone(),
             },
             None => {
                 warn!("X-Frugalis-Category '{category}' not found in routing configuration; degrading to classification JSON");
                 let fallback = match state.classifier.as_ref() {
                     Some(c) => c.classify("").await,
-                    None => intent_classifier::ClassificationResult::fallback(),
+                    None => classification::types::ClassificationResult::fallback(),
                 };
                 let response_body = classification_only_json(&fallback);
                 log_classification(&state, &fallback, &body_str, "", start, "ok", 1, "");
@@ -3003,7 +3001,7 @@ async fn messages_handler(
     } else {
         match state.classifier.as_ref() {
             Some(c) => c.classify(&prompt).await,
-            None => intent_classifier::ClassificationResult::fallback(),
+            None => classification::types::ClassificationResult::fallback(),
         }
     };
 
@@ -3656,15 +3654,15 @@ fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Ro
 }
 
 #[cfg(test)]
-fn test_categories() -> Vec<intent_classifier::CategoryConfig> {
+fn test_categories() -> Vec<classification::types::CategoryConfig> {
     vec![
-        intent_classifier::CategoryConfig {
+        classification::types::CategoryConfig {
             name: "FILE_READING".to_string(),
             description: String::new(),
             threshold: 3,
             priority: 1,
             patterns: vec![
-                intent_classifier::PatternEntry {
+                classification::types::PatternEntry {
                     regex: r"(?i)\b(?:read|show|display|print|cat|view|open)\s+(?:the\s+)?(?:file|contents|this\s+file|that\s+file)\b".to_string(),
                     weight: 3,
                 },
@@ -3672,13 +3670,13 @@ fn test_categories() -> Vec<intent_classifier::CategoryConfig> {
             patterns_file: None,
             dual_threshold: None,
         },
-        intent_classifier::CategoryConfig {
+        classification::types::CategoryConfig {
             name: "SYNTAX_FIX".to_string(),
             description: String::new(),
             threshold: 3,
             priority: 2,
             patterns: vec![
-                intent_classifier::PatternEntry {
+                classification::types::PatternEntry {
                     regex: r"(?i)\b(?:fix|correct|repair|patch)\s+(?:this|the|my|a)\s+(?:bug|error|issue|typo|problem|mistake|warning)".to_string(),
                     weight: 3,
                 },
@@ -3686,13 +3684,13 @@ fn test_categories() -> Vec<intent_classifier::CategoryConfig> {
             patterns_file: None,
             dual_threshold: None,
         },
-        intent_classifier::CategoryConfig {
+        classification::types::CategoryConfig {
             name: "COMPLEX_REASONING".to_string(),
             description: String::new(),
             threshold: 3,
             priority: 3,
             patterns: vec![
-                intent_classifier::PatternEntry {
+                classification::types::PatternEntry {
                     regex: r"(?i)\b(?:architect|design\s+pattern|system\s+design|trade.?off|refactor|restructure|rearchitect)".to_string(),
                     weight: 3,
                 },
@@ -3700,13 +3698,13 @@ fn test_categories() -> Vec<intent_classifier::CategoryConfig> {
             patterns_file: None,
             dual_threshold: None,
         },
-        intent_classifier::CategoryConfig {
+        classification::types::CategoryConfig {
             name: "CASUAL".to_string(),
             description: String::new(),
             threshold: 1,
             priority: 4,
             patterns: vec![
-                intent_classifier::PatternEntry {
+                classification::types::PatternEntry {
                     regex: r"(?i)^\s*(?:hi|hey|hello|greetings|good\s+morning|good\s+afternoon|good\s+evening|howdy)(?:\s+there)?[\s!.,]*$".to_string(),
                     weight: 3,
                 },
@@ -3718,7 +3716,7 @@ fn test_categories() -> Vec<intent_classifier::CategoryConfig> {
 }
 
 #[cfg(test)]
-fn test_negative_patterns() -> Vec<intent_classifier::NegativePatternConfig> {
+fn test_negative_patterns() -> Vec<classification::types::NegativePatternConfig> {
     vec![]
 }
 
@@ -3749,13 +3747,13 @@ mod tests {
     /// Build an `AppState` from a `RegexClassifier` and optional HTTP client.
     /// Mergeroutes from all classifier backends.
     fn make_test_app_state(
-        classifier: intent_classifier::RegexClassifier,
+        classifier: classification::regex::RegexClassifier,
         http_client: Option<reqwest::Client>,
-        model_costs: intent_classifier::ModelCosts,
+        model_costs: config::routing::ModelCosts,
         baseline_model: String,
         max_upstream_body_bytes: usize,
     ) -> Arc<AppState> {
-        let classifier_chain = intent_classifier::ClassifierChain::new(vec![Arc::new(classifier)]);
+        let classifier_chain = classification::chain::ClassifierChain::new(vec![Arc::new(classifier)]);
         let classifier_arc = Some(Arc::new(classifier_chain));
         let mut merged_routing = std::collections::HashMap::new();
         if let Some(cls) = classifier_arc.as_ref() {
@@ -3778,7 +3776,7 @@ mod tests {
             keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
             request_body_limit_bytes: 10_485_760,
             streaming_channel_capacity: 32,
-            dashboard_config: config::DashboardConfig::default(),
+            dashboard_config: config::types::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
             response_cache: None,
@@ -3801,7 +3799,7 @@ mod tests {
             fewshot_classifier: None,
             routing: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             model_costs: Arc::new(tokio::sync::RwLock::new(
-                intent_classifier::ModelCosts::empty(),
+                config::routing::ModelCosts::empty(),
             )),
             baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
             classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3810,7 +3808,7 @@ mod tests {
             keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
             request_body_limit_bytes: 10_485_760,
             streaming_channel_capacity: 32,
-            dashboard_config: config::DashboardConfig::default(),
+            dashboard_config: config::types::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
             response_cache: None,
@@ -3832,8 +3830,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -3845,8 +3843,8 @@ mod tests {
         );
         routing.insert(
             cats[3].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -3856,8 +3854,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = intent_classifier::RouteEntry {
-            providers: vec![intent_classifier::ProviderEntry {
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -3866,7 +3864,7 @@ mod tests {
             }],
             cost_per_1m_input_tokens: None,
         };
-        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
             routing,
             fallback,
             30,
@@ -3876,7 +3874,7 @@ mod tests {
         let app_state = make_test_app_state(
             regex_classifier,
             None,
-            intent_classifier::ModelCosts::empty(),
+            config::routing::ModelCosts::empty(),
             String::new(),
             10_485_760,
         );
@@ -3929,8 +3927,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -3942,8 +3940,8 @@ mod tests {
         );
         routing.insert(
             cats[3].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -3953,8 +3951,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = intent_classifier::RouteEntry {
-            providers: vec![intent_classifier::ProviderEntry {
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -3963,7 +3961,7 @@ mod tests {
             }],
             cost_per_1m_input_tokens: None,
         };
-        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
             routing,
             fallback,
             30,
@@ -3975,7 +3973,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let fewshot_config = config::FewShotConfig {
+        let fewshot_config = config::types::FewShotConfig {
             enabled: true,
             confidence_threshold: 0.4,
             cold_start_threshold: 0.6,
@@ -3986,11 +3984,11 @@ mod tests {
             max_vocabulary_warn: 5000,
             max_training_examples: 10000,
         };
-        let fewshot = fewshot_classifier::FewShotClassifier::new(
+        let fewshot = classification::fewshot::FewShotClassifier::new(
             fewshot_config,
             HashMap::new(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "fallback-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -4001,7 +3999,7 @@ mod tests {
             },
         );
 
-        let chain = intent_classifier::ClassifierChain::new(vec![
+        let chain = classification::chain::ClassifierChain::new(vec![
             Arc::new(regex_classifier),
             Arc::new(fewshot),
         ]);
@@ -4009,12 +4007,12 @@ mod tests {
         // Regex should catch "fix this bug"
         let result = chain.classify("fix this bug").await;
         assert_eq!(result.category, "SYNTAX_FIX");
-        assert_eq!(result.tier, intent_classifier::ClassificationTier::Regex);
+        assert_eq!(result.tier, classification::types::ClassificationTier::Regex);
 
         // Regex returns Fallback on non-matching prompt, few-shot catches bootstrap text
         let result = chain.classify("can you explain what a hash map is").await;
         assert_eq!(result.category, "CASUAL");
-        assert_eq!(result.tier, intent_classifier::ClassificationTier::FewShot);
+        assert_eq!(result.tier, classification::types::ClassificationTier::FewShot);
     }
 
     // ── 3-backend chain integration test (Risk #1 — production data path floor) ──
@@ -4028,7 +4026,7 @@ mod tests {
     async fn test_chain_3_backend_escalates_to_llm() {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use httpmock::prelude::*;
-        use intent_classifier::test_util::CountingClassifier;
+        use classification::chain::test_util::CountingClassifier;
         use std::collections::HashMap;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -4054,8 +4052,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             "SYNTAX_FIX".to_string(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -4067,8 +4065,8 @@ mod tests {
         );
         routing.insert(
             "CASUAL".to_string(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -4078,8 +4076,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = intent_classifier::RouteEntry {
-            providers: vec![intent_classifier::ProviderEntry {
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -4088,7 +4086,7 @@ mod tests {
             }],
             cost_per_1m_input_tokens: None,
         };
-        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
             routing,
             fallback,
             30,
@@ -4101,10 +4099,10 @@ mod tests {
         let fewshot_counter = Arc::new(AtomicUsize::new(0));
         let fewshot_stub = CountingClassifier {
             counter: fewshot_counter.clone(),
-            result: intent_classifier::ClassificationResult::fallback(),
+            result: classification::types::ClassificationResult::fallback(),
         };
 
-        let llm_config = config::LlmClassifierConfig {
+        let llm_config = config::types::LlmClassifierConfig {
             enabled: true,
             model: "gpt-4o-mini".to_string(),
             endpoint: server.url("/v1/chat/completions"),
@@ -4113,14 +4111,14 @@ mod tests {
             prompt_template_path: None,
             timeout_secs: 3,
         };
-        let llm = intent_classifier::LLMClassifier::new(
+        let llm = classification::llm::LLMClassifier::new(
             llm_config,
             reqwest::Client::new(),
             cats_for_llm,
             Arc::new(vec![]),
         );
 
-        let chain = intent_classifier::ClassifierChain::new(vec![
+        let chain = classification::chain::ClassifierChain::new(vec![
             Arc::new(regex_classifier),
             Arc::new(fewshot_stub),
             Arc::new(llm),
@@ -4138,7 +4136,7 @@ mod tests {
         // tier != Fallback and returns this result. We verify the escalation
         // happened via side-effect counters, not via tier inspection.
         assert_eq!(result.category, "SYNTAX_FIX");
-        assert_eq!(result.tier, intent_classifier::ClassificationTier::Regex);
+        assert_eq!(result.tier, classification::types::ClassificationTier::Regex);
         assert_eq!(
             fewshot_counter.load(Ordering::SeqCst),
             1,
@@ -4286,8 +4284,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: "https://test.endpoint".to_string(),
                     provider_type: provider_type_val.to_string(),
@@ -4299,8 +4297,8 @@ mod tests {
         );
         routing.insert(
             cats[3].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -4310,8 +4308,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = intent_classifier::RouteEntry {
-            providers: vec![intent_classifier::ProviderEntry {
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -4320,7 +4318,7 @@ mod tests {
             }],
             cost_per_1m_input_tokens: None,
         };
-        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
             routing,
             fallback,
             30,
@@ -4330,7 +4328,7 @@ mod tests {
         let app_state = make_test_app_state(
             regex_classifier,
             None,
-            intent_classifier::ModelCosts::empty(),
+            config::routing::ModelCosts::empty(),
             String::new(),
             10_485_760,
         );
@@ -5525,8 +5523,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: endpoint.clone(),
                     provider_type: "openai_compatible".to_string(),
@@ -5538,8 +5536,8 @@ mod tests {
         );
         routing.insert(
             cats[3].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint,
                     provider_type: "openai_compatible".to_string(),
@@ -5549,8 +5547,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = intent_classifier::RouteEntry {
-            providers: vec![intent_classifier::ProviderEntry {
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -5559,7 +5557,7 @@ mod tests {
             }],
             cost_per_1m_input_tokens: None,
         };
-        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
             routing,
             fallback,
             30,
@@ -5569,7 +5567,7 @@ mod tests {
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
-            intent_classifier::ModelCosts::empty(),
+            config::routing::ModelCosts::empty(),
             String::new(),
             max_upstream_body_bytes,
         );
@@ -5603,8 +5601,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: endpoint.clone(),
                     provider_type: "anthropic".to_string(),
@@ -5616,8 +5614,8 @@ mod tests {
         );
         routing.insert(
             cats[3].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint,
                     provider_type: "anthropic".to_string(),
@@ -5627,8 +5625,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = intent_classifier::RouteEntry {
-            providers: vec![intent_classifier::ProviderEntry {
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -5637,7 +5635,7 @@ mod tests {
             }],
             cost_per_1m_input_tokens: None,
         };
-        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
             routing,
             fallback,
             30,
@@ -5647,7 +5645,7 @@ mod tests {
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
-            intent_classifier::ModelCosts::empty(),
+            config::routing::ModelCosts::empty(),
             String::new(),
             max_upstream_body_bytes,
         );
@@ -6026,8 +6024,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: endpoint.clone(),
                     provider_type: "openai_compatible".to_string(),
@@ -6039,8 +6037,8 @@ mod tests {
         );
         routing.insert(
             cats[3].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint,
                     provider_type: "openai_compatible".to_string(),
@@ -6050,8 +6048,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = intent_classifier::RouteEntry {
-            providers: vec![intent_classifier::ProviderEntry {
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -6060,7 +6058,7 @@ mod tests {
             }],
             cost_per_1m_input_tokens: None,
         };
-        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
             routing,
             fallback,
             30,
@@ -6068,7 +6066,7 @@ mod tests {
             &test_negative_patterns(),
         );
         let classifier_chain =
-            intent_classifier::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
+            classification::chain::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
         let classifier_arc = Some(Arc::new(classifier_chain));
         let mut merged_routing = std::collections::HashMap::new();
         if let Some(cls) = classifier_arc.as_ref() {
@@ -6087,7 +6085,7 @@ mod tests {
             fewshot_classifier: None,
             routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
             model_costs: Arc::new(tokio::sync::RwLock::new(
-                intent_classifier::ModelCosts::empty(),
+                config::routing::ModelCosts::empty(),
             )),
             baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
             classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -6096,7 +6094,7 @@ mod tests {
             keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
             request_body_limit_bytes: 10_485_760,
             streaming_channel_capacity: 32,
-            dashboard_config: config::DashboardConfig::default(),
+            dashboard_config: config::types::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
             response_cache: None,
@@ -6140,8 +6138,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
                     provider_type: "openai_compatible".to_string(),
@@ -6153,8 +6151,8 @@ mod tests {
         );
         routing.insert(
             cats[3].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
                     provider_type: "openai_compatible".to_string(),
@@ -6164,8 +6162,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = intent_classifier::RouteEntry {
-            providers: vec![intent_classifier::ProviderEntry {
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -6174,7 +6172,7 @@ mod tests {
             }],
             cost_per_1m_input_tokens: None,
         };
-        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
             routing,
             fallback,
             30,
@@ -6184,7 +6182,7 @@ mod tests {
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
-            intent_classifier::ModelCosts::empty(),
+            config::routing::ModelCosts::empty(),
             String::new(),
             10_485_760,
         );
@@ -6926,8 +6924,8 @@ mod tests {
         let mut routing = std::collections::HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: url,
                     provider_type: "openai_compatible".to_string(),
@@ -6937,8 +6935,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = intent_classifier::RouteEntry {
-            providers: vec![intent_classifier::ProviderEntry {
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -6947,7 +6945,7 @@ mod tests {
             }],
             cost_per_1m_input_tokens: None,
         };
-        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
             routing,
             fallback,
             30,
@@ -6957,7 +6955,7 @@ mod tests {
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
-            intent_classifier::ModelCosts::empty(),
+            config::routing::ModelCosts::empty(),
             String::new(),
             10_485_760,
         );
@@ -7324,10 +7322,10 @@ mod tests {
     /// `classification_only_json` must emit exactly 4 keys with the right types.
     #[test]
     fn test_classification_only_json_contract_has_4_keys() {
-        let result = intent_classifier::ClassificationResult {
+        let result = classification::types::ClassificationResult {
             category: "SYNTAX_FIX".to_string(),
             model: "sf-model".to_string(),
-            tier: intent_classifier::ClassificationTier::Regex,
+            tier: classification::types::ClassificationTier::Regex,
             providers: vec![],
         };
         let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result))
@@ -7403,12 +7401,12 @@ mod tests {
     #[test]
     fn test_classification_only_json_serializes_all_3_tiers() {
         let tiers = [
-            (intent_classifier::ClassificationTier::Regex, "Regex"),
-            (intent_classifier::ClassificationTier::FewShot, "FewShot"),
-            (intent_classifier::ClassificationTier::Fallback, "Fallback"),
+            (classification::types::ClassificationTier::Regex, "Regex"),
+            (classification::types::ClassificationTier::FewShot, "FewShot"),
+            (classification::types::ClassificationTier::Fallback, "Fallback"),
         ];
         for (tier, expected_label) in tiers {
-            let result = intent_classifier::ClassificationResult {
+            let result = classification::types::ClassificationResult {
                 category: "SYNTAX_FIX".to_string(),
                 model: "sf-model".to_string(),
                 tier,
@@ -7928,8 +7926,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "gpt-4o".to_string(),
                     endpoint: endpoint.clone(),
                     provider_type: "openai_compatible".to_string(),
@@ -7939,8 +7937,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = intent_classifier::RouteEntry {
-            providers: vec![intent_classifier::ProviderEntry {
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -7949,7 +7947,7 @@ mod tests {
             }],
             cost_per_1m_input_tokens: None,
         };
-        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
             routing,
             fallback,
             30,
@@ -7959,7 +7957,7 @@ mod tests {
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
-            intent_classifier::ModelCosts::empty(),
+            config::routing::ModelCosts::empty(),
             String::new(),
             10_485_760,
         );
@@ -8175,8 +8173,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: endpoint.clone(),
                     provider_type: "openai_compatible".to_string(),
@@ -8188,8 +8186,8 @@ mod tests {
         );
         routing.insert(
             cats[3].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint,
                     provider_type: "openai_compatible".to_string(),
@@ -8199,8 +8197,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = intent_classifier::RouteEntry {
-            providers: vec![intent_classifier::ProviderEntry {
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -8209,7 +8207,7 @@ mod tests {
             }],
             cost_per_1m_input_tokens: None,
         };
-        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
             routing,
             fallback,
             30,
@@ -8217,7 +8215,7 @@ mod tests {
             &test_negative_patterns(),
         );
         let classifier_chain =
-            intent_classifier::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
+            classification::chain::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
         let classifier_arc = Some(Arc::new(classifier_chain));
         let mut merged_routing = std::collections::HashMap::new();
         if let Some(cls) = classifier_arc.as_ref() {
@@ -8235,7 +8233,7 @@ mod tests {
             fewshot_classifier: None,
             routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
             model_costs: Arc::new(tokio::sync::RwLock::new(
-                intent_classifier::ModelCosts::empty(),
+                config::routing::ModelCosts::empty(),
             )),
             baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
             classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -8244,7 +8242,7 @@ mod tests {
             keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
             request_body_limit_bytes: 10_485_760,
             streaming_channel_capacity: 32,
-            dashboard_config: config::DashboardConfig::default(),
+            dashboard_config: config::types::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
             response_cache: Some(response_cache.clone()),
@@ -8558,8 +8556,8 @@ mod slow_tests {
         let mut routing = std::collections::HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            intent_classifier::RouteEntry {
-                providers: vec![intent_classifier::ProviderEntry {
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: url,
                     provider_type: "openai_compatible".to_string(),
@@ -8569,8 +8567,8 @@ mod slow_tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = intent_classifier::RouteEntry {
-            providers: vec![intent_classifier::ProviderEntry {
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -8579,17 +8577,17 @@ mod slow_tests {
             }],
             cost_per_1m_input_tokens: None,
         };
-        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
             routing,
             fallback,
             30,
             cats,
             &test_negative_patterns(),
         );
-        let model_costs = intent_classifier::ModelCosts::empty();
+        let model_costs = config::routing::ModelCosts::empty();
         let baseline_model = String::new();
         let classifier_chain =
-            intent_classifier::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
+            classification::chain::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
         let classifier = Some(Arc::new(classifier_chain));
         let mut merged_routing = HashMap::new();
         if let Some(cls) = classifier.as_ref() {
@@ -8617,7 +8615,7 @@ mod slow_tests {
             keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(1)),
             request_body_limit_bytes: 10_485_760,
             streaming_channel_capacity: 32,
-            dashboard_config: config::DashboardConfig::default(),
+            dashboard_config: config::types::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
             response_cache: None,

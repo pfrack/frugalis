@@ -612,7 +612,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_savings_estimate_empty() {
         let pc = test_backend();
-        let mc = crate::intent_classifier::ModelCosts::from_costs(
+        let mc = crate::config::routing::ModelCosts::from_costs(
             std::collections::HashMap::new(),
         );
         let model = format!("Z_TST_SAV_EMPTY_{}", uuid::Uuid::new_v4());
@@ -654,7 +654,7 @@ mod tests {
         let mut costs = std::collections::HashMap::new();
         costs.insert(model_a.clone(), 0.15);
         costs.insert(model_b.clone(), 3.00);
-        let mc = crate::intent_classifier::ModelCosts::from_costs(costs);
+        let mc = crate::config::routing::ModelCosts::from_costs(costs);
         let baseline = model_b.clone();
         let now = chrono::Utc::now();
 
@@ -712,7 +712,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_savings_estimate_unknown_cost_model() {
         let pc = test_backend();
-        let mc = crate::intent_classifier::ModelCosts::from_costs(
+        let mc = crate::config::routing::ModelCosts::from_costs(
             std::collections::HashMap::new(),
         );
         let model = format!("Z_TST_SAV_UNK_{}", uuid::Uuid::new_v4());
@@ -755,7 +755,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_savings_estimate_filters_null_category() {
         let pc = test_backend();
-        let mc = crate::intent_classifier::ModelCosts::from_costs(
+        let mc = crate::config::routing::ModelCosts::from_costs(
             std::collections::HashMap::new(),
         );
 
@@ -793,7 +793,7 @@ mod tests {
         let model = format!("Z_TST_SAV_FB_{}", uuid::Uuid::new_v4());
         let mut costs = std::collections::HashMap::new();
         costs.insert(model.clone(), 0.15);
-        let mc = crate::intent_classifier::ModelCosts::from_costs(costs);
+        let mc = crate::config::routing::ModelCosts::from_costs(costs);
 
         pc.backend
             .insert_inference(&InferenceRecord {
