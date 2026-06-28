@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[derive(Clone, Debug)]
 pub struct CachedEntry {
     pub body: String,
+    #[allow(dead_code)]
     pub content_type: String,
     pub status: u16,
 }
@@ -67,7 +68,7 @@ impl ResponseCache {
         CacheStats {
             hit_count: self.hits.load(Ordering::Relaxed),
             miss_count: self.misses.load(Ordering::Relaxed),
-            entry_count: self.cache.entry_count() as u64,
+            entry_count: self.cache.entry_count(),
             max_entries: self.max_entries,
             ttl_secs: self.ttl_secs,
         }
