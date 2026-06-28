@@ -401,30 +401,30 @@ No data migration. No config changes. No API changes. Downstream consumers (Dock
 
 #### Automated
 
-- [x] 3.1 `cargo build` succeeds
-- [x] 3.2 `cargo build --features otel` succeeds
-- [x] 3.3 `cargo test` — all tests pass
-- [x] 3.4 `cargo clippy` — no new warnings
-- [x] 3.5 main.rs no longer contains handler function definitions
+- [x] 3.1 `cargo build` succeeds — 3d1e6a3
+- [x] 3.2 `cargo build --features otel` succeeds — 3d1e6a3
+- [x] 3.3 `cargo test` — all tests pass — 3d1e6a3
+- [x] 3.4 `cargo clippy` — no new warnings — 3d1e6a3
+- [x] 3.5 main.rs no longer contains handler function definitions — 3d1e6a3
 
 #### Manual
 
-- [ ] 3.6 Confirm `src/proxy/` has 5 files
-- [ ] 3.7 `wc -l src/main.rs` ≤ 5,500 lines
-- [ ] 3.8 `cargo run -- --help` still works
+- [x] 3.6 Confirm `src/proxy/` has 5 files — 3d1e6a3
+- [x] 3.7 `wc -l src/main.rs` ≤ 5,500 lines — 3d1e6a3
+- [x] 3.8 `cargo run -- --help` still works — 3d1e6a3
 
 ### Phase 4: AppState + Router Extraction + Test Reorganization
 
 #### Automated
 
-- [ ] 4.1 `cargo build` succeeds
-- [ ] 4.2 `cargo build --features otel` succeeds
-- [ ] 4.3 `cargo test` — all tests pass
-- [ ] 4.4 `cargo clippy` — no new warnings
-- [ ] 4.5 `wc -l src/main.rs` ≤ 300 lines
+- [x] 4.1 `cargo build` succeeds
+- [x] 4.2 `cargo build --features otel` succeeds
+- [x] 4.3 `cargo test` — all tests pass
+- [x] 4.4 `cargo clippy` — no new warnings
+- [x] 4.5 `wc -l src/main.rs` ≤ 300 lines
 
 #### Manual
 
-- [ ] 4.6 `cargo run -- --help` prints help
-- [ ] 4.7 `cargo run -- --validate` validates config
-- [ ] 4.8 Test count unchanged from before Phase 1
+- [x] 4.6 `cargo run -- --help` prints help
+- [x] 4.7 `cargo run -- --validate` validates config
+- [x] 4.8 Test count unchanged from before Phase 1

@@ -3,7 +3,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use tracing::debug;
 
-use crate::AppState;
+use crate::app::AppState;
 use crate::classification::chain::IntentClassify;
 
 #[cfg(feature = "otel")]

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tower_http::services::ServeDir;
 use tracing::debug;
 
-use crate::{auth, persistence, AppState};
+use crate::{app::AppState, auth, persistence};
 use persistence::PersistenceBackend;
 
 /// Navigation page entry registered in `PAGES`.

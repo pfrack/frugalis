@@ -5,7 +5,7 @@ use futures::StreamExt;
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use crate::AppState;
+use crate::app::AppState;
 
 /// Set up SSE streaming response with keepalive and logging.
 /// The `Unpin` bound is required because the byte_stream is moved into a spawned task.

@@ -1,4 +1,4 @@
-use crate::AppState;
+use crate::app::AppState;
 use crate::classification::chain::IntentClassify;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
