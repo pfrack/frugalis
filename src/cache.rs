@@ -166,7 +166,11 @@ mod tests {
 
     // ── Integration tests (moved from tests.rs) ──
 
-    use crate::*;
+    
+    
+    use std::sync::Arc;
+    
+    
     use crate::app::test_helpers::{test_categories, test_negative_patterns, test_app};
     use crate::test_util::EnvGuard;
     use axum::{body::Body, http::{header, Request, StatusCode}, Router};

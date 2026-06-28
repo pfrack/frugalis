@@ -503,8 +503,10 @@ pub(crate) fn handle_translating_anthropic_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::*;
+    use crate::{auth, classification, config};
+    use crate::app::build_app;
+    use std::sync::Arc;
+    
     use crate::app::test_helpers::{test_categories, test_negative_patterns, make_test_app_state};
     use crate::proxy::util::format_sse_error_event;
     use crate::proxy::handlers::tests::test_app_with_http_client;
@@ -836,7 +838,11 @@ mod tests {
     }
 
     mod slow_tests {
-        use crate::*;
+        use crate::{auth, classification, config};
+        use crate::app::{AppState, build_app};
+        use std::sync::Arc;
+        use std::collections::HashMap;
+        use tokio::sync::RwLock;
         use crate::app::test_helpers::{test_categories, test_negative_patterns};
         use axum::{
             body::Body,

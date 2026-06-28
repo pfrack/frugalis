@@ -61,7 +61,10 @@ pub fn log_inference(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::*;
+    use crate::{app, auth, classification, config};
+    
+    use std::sync::Arc;
+    
     use crate::app::test_helpers::{test_categories, test_negative_patterns};
     use crate::test_util::EnvGuard;
     use axum::{body::Body, http::{header, Request, StatusCode}, Router};

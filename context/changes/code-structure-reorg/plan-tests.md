@@ -220,27 +220,27 @@ None — compile-time only change. May slightly improve incremental compilation 
 
 #### Automated
 
-- [x] 5.1 `cargo build` succeeds
-- [x] 5.2 `cargo build --features otel` succeeds
-- [x] 5.3 `cargo test` — 365 tests pass
-- [x] 5.4 `cargo clippy` — no new warnings
-- [x] 5.5 `src/tests.rs` no longer exists
+- [x] 5.1 `cargo build` succeeds — 5a182ea
+- [x] 5.2 `cargo build --features otel` succeeds — 5a182ea
+- [x] 5.3 `cargo test` — 365 tests pass — 5a182ea
+- [x] 5.4 `cargo clippy` — no new warnings — 5a182ea
+- [x] 5.5 `src/tests.rs` no longer exists — 5a182ea
 
 #### Manual
 
-- [x] 5.6 Each domain module has a `#[cfg(test)] mod tests` block
-- [x] 5.7 `cargo test proxy::handlers` runs handler tests
-- [x] 5.8 `cargo test proxy::streaming` runs streaming tests
+- [x] 5.6 Each domain module has a `#[cfg(test)] mod tests` block — 5a182ea
+- [x] 5.7 `cargo test proxy::handlers` runs handler tests — 5a182ea
+- [x] 5.8 `cargo test proxy::streaming` runs streaming tests — 5a182ea
 
 ### Phase 6: Cleanup and Verification
 
 #### Automated
 
-- [ ] 6.1 `cargo test` — 365 tests pass
-- [ ] 6.2 `cargo clippy` — zero warnings
-- [ ] 6.3 No `use crate::*` in any test module
+- [x] 6.1 `cargo test` — 365 tests pass
+- [x] 6.2 `cargo clippy` — zero warnings
+- [x] 6.3 No `use crate::*` in any test module
 
 #### Manual
 
-- [ ] 6.4 `wc -l src/main.rs` decreased
-- [ ] 6.5 `grep -r "mod tests" src/` shows test blocks in domain modules
+- [x] 6.4 `wc -l src/main.rs` decreased
+- [x] 6.5 `grep -r "mod tests" src/` shows test blocks in domain modules

@@ -1679,7 +1679,8 @@ pub(crate) async fn feedback_handler(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::*;
+    use crate::{auth, classification, config};
+    use crate::app::build_app;
     use crate::app::test_helpers::{test_categories, test_negative_patterns, make_test_app_state, test_app, test_app_with_classifier, parse_json_body};
     use crate::test_util::EnvGuard;
     use axum::{
