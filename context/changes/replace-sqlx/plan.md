@@ -334,9 +334,9 @@ Convert migration files to refinery format, remove `sqlite.rs` and `postgres.rs`
 
 #### Automated
 
-- [x] 1.1 `cargo build` succeeds with new deps
-- [x] 1.2 `cargo test --lib` passes all existing tests
-- [x] 1.3 `cargo clippy` has no new warnings
+- [x] 1.1 `cargo build` succeeds with new deps — 037b53c
+- [x] 1.2 `cargo test --lib` passes all existing tests — 037b53c
+- [x] 1.3 `cargo clippy` has no new warnings — 037b53c
 
 #### Manual
 
@@ -346,10 +346,10 @@ Convert migration files to refinery format, remove `sqlite.rs` and `postgres.rs`
 
 #### Automated
 
-- [ ] 2.1 `cargo build` succeeds
-- [ ] 2.2 SqlBackend insert + fetch round-trip test passes
-- [ ] 2.3 SqlBackend insert + fetch with category filter test passes
-- [ ] 2.4 Existing tests still pass
+- [x] 2.1 `cargo build` succeeds
+- [x] 2.2 SqlBackend insert + fetch round-trip test passes
+- [x] 2.3 SqlBackend insert + fetch with category filter test passes
+- [x] 2.4 Existing tests still pass
 
 #### Manual
 
@@ -359,10 +359,10 @@ Convert migration files to refinery format, remove `sqlite.rs` and `postgres.rs`
 
 #### Automated
 
-- [ ] 3.1 fetch_latency_summary test passes for SqlBackend
-- [ ] 3.2 fetch_savings_estimate test passes for SqlBackend
-- [ ] 3.3 All existing persistence tests pass
-- [ ] 3.4 `cargo clippy` clean
+- [x] 3.1 fetch_latency_summary test passes for SqlBackend
+- [x] 3.2 fetch_savings_estimate test passes for SqlBackend
+- [x] 3.3 All existing persistence tests pass
+- [x] 3.4 `cargo clippy` clean
 
 #### Manual
 
@@ -373,11 +373,11 @@ Convert migration files to refinery format, remove `sqlite.rs` and `postgres.rs`
 
 #### Automated
 
-- [ ] 4.1 `cargo build` succeeds (no references to deleted files)
-- [ ] 4.2 All persistence tests pass with new SqlBackend
-- [ ] 4.3 `cargo clippy` clean
-- [ ] 4.4 `cargo test` full suite passes
-- [ ] 4.5 No dead code warnings from removed modules
+- [x] 4.1 `cargo build` succeeds (no references to deleted files)
+- [x] 4.2 All persistence tests pass with new SqlBackend
+- [x] 4.3 `cargo clippy` clean
+- [x] 4.4 `cargo test` full suite passes
+- [x] 4.5 No dead code warnings from removed modules
 
 #### Manual
 

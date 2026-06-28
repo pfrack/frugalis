@@ -15,4 +15,4 @@ rustc-ice-*.txt
 .DS_Store
 
 # Training data
-data/fewshot_training.yaml
+data/fewshot_training.yamlsql_backend_test_*

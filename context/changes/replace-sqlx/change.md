@@ -3,7 +3,7 @@ id: replace-sqlx
 title: Replace sqlx with a better database library
 status: implementing
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-06-29
 ---
 
 # Replace sqlx

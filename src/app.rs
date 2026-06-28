@@ -241,18 +241,17 @@ pub(crate) async fn build_persistence(
 
     let db_url = std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty());
 
-    if let Some(_url) = db_url {
-        let backend = persistence::postgres::PostgresBackend::from_env(&db_config).await;
-        match backend {
-            Ok(b) => {
-                info!("Persistence backend: postgres (via DATABASE_URL)");
+    if let Some(url) = db_url {
+        match persistence::sql_backend::SqlBackend::connect(&url).await {
+            Ok(backend) => {
+                info!("Persistence backend: sql (unified, via DATABASE_URL)");
                 Some(persistence::PersistenceConfig {
-                    backend: Arc::new(persistence::DbBackend::Postgres(b)),
+                    backend: Arc::new(persistence::DbBackend::Sql(backend)),
                     task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
                 })
             }
             Err(e) => {
-                panic!("{e}");
+                panic!("Persistence backend failed: {e}");
             }
         }
     } else {
@@ -267,18 +266,15 @@ pub(crate) async fn build_persistence(
                 })
             }
             "sqlite" => {
-                match persistence::sqlite::SqliteBackend::from_path(
-                    &persistence_settings.sqlite_path,
-                )
-                .await
-                {
+                let sqlite_url = format!("sqlite:{}?mode=rwc", persistence_settings.sqlite_path);
+                match persistence::sql_backend::SqlBackend::connect(&sqlite_url).await {
                     Ok(backend) => {
                         info!(
-                            "Persistence backend: sqlite (path={})",
+                            "Persistence backend: sql (sqlite, path={})",
                             persistence_settings.sqlite_path
                         );
                         Some(persistence::PersistenceConfig {
-                            backend: Arc::new(persistence::DbBackend::Sqlite(backend)),
+                            backend: Arc::new(persistence::DbBackend::Sql(backend)),
                             task_semaphore: Arc::new(tokio::sync::Semaphore::new(
                                 semaphore_limit,
                             )),
