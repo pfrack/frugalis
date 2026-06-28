@@ -72,7 +72,7 @@ mod dashboard;
 mod fewshot_classifier;
 mod intent_classifier;
 mod persistence;
-mod protocol_translation;
+mod protocol;
 mod quickstart;
 mod routing;
 
@@ -584,7 +584,7 @@ ENVIRONMENT:
 
         // Priority 1: DATABASE_URL env var forces Postgres.
         if let Some(_url) = db_url {
-            let backend = persistence::PostgresBackend::from_env(&db_config).await;
+            let backend = persistence::postgres::PostgresBackend::from_env(&db_config).await;
             match backend {
                 Ok(b) => {
                     info!("Persistence backend: postgres (via DATABASE_URL)");
@@ -602,7 +602,7 @@ ENVIRONMENT:
             match persistence_settings.backend.as_str() {
                 "postgres" => {
                     warn!("[persistence] backend = \"postgres\" but DATABASE_URL is not set; falling through to memory");
-                    let backend = persistence::MemoryBackend::new();
+                    let backend = persistence::memory::MemoryBackend::new();
                     info!("Persistence backend: memory (per config fallback)");
                     Some(persistence::PersistenceConfig {
                         backend: Arc::new(persistence::DbBackend::Memory(backend)),
@@ -610,7 +610,7 @@ ENVIRONMENT:
                     })
                 }
                 "sqlite" => {
-                    match persistence::SqliteBackend::from_path(&persistence_settings.sqlite_path)
+                    match persistence::sqlite::SqliteBackend::from_path(&persistence_settings.sqlite_path)
                         .await
                     {
                         Ok(backend) => {
@@ -627,7 +627,7 @@ ENVIRONMENT:
                         }
                         Err(e) => {
                             warn!("SQLite backend failed ({}); falling back to memory", e);
-                            let backend = persistence::MemoryBackend::new();
+                            let backend = persistence::memory::MemoryBackend::new();
                             Some(persistence::PersistenceConfig {
                                 backend: Arc::new(persistence::DbBackend::Memory(backend)),
                                 task_semaphore: Arc::new(tokio::sync::Semaphore::new(
@@ -639,7 +639,7 @@ ENVIRONMENT:
                 }
                 _ => {
                     // Default: memory.
-                    let backend = persistence::MemoryBackend::new();
+                    let backend = persistence::memory::MemoryBackend::new();
                     info!("Persistence backend: memory");
                     Some(persistence::PersistenceConfig {
                         backend: Arc::new(persistence::DbBackend::Memory(backend)),
@@ -1607,7 +1607,7 @@ async fn handle_streaming_error(upstream_response: reqwest::Response) -> Respons
 /// `handle_streaming_error`) with the upstream's status code.
 async fn handle_anthropic_streaming_error(upstream_response: reqwest::Response) -> Response {
     handle_streaming_error_with_transform(upstream_response, |body, status| {
-        protocol_translation::translate_error(&body, status)
+        protocol::response::translate_error(&body, status)
     })
     .await
 }
@@ -1694,7 +1694,7 @@ fn handle_anthropic_streaming_response(
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(keepalive_secs));
         let mut stream = byte_stream;
         let mut stream_status = "ok";
-        let mut translate_state = protocol_translation::StreamTranslateState::default();
+        let mut translate_state = protocol::stream::StreamTranslateState::default();
         let mut buffer = Vec::new();
         interval.tick().await;
         loop {
@@ -1710,7 +1710,7 @@ fn handle_anthropic_streaming_response(
                                 stream_status = "buffer_overflow";
                                 break;
                             }
-                            let events = protocol_translation::parse_sse_events(&buffer);
+                            let events = protocol::stream::parse_sse_events(&buffer);
                             if !events.is_empty() {
                                 // Drain only up to last complete event boundary; keep partial tail.
                                 if let Some(last_boundary) = buffer.windows(2).rposition(|w| w == b"\n\n") {
@@ -1720,7 +1720,7 @@ fn handle_anthropic_streaming_response(
                                 }
                                 for (event_type, data) in &events {
                                     if let Some(openai_chunk) =
-                                        protocol_translation::translate_stream_event(
+                                        protocol::stream::translate_stream_event(
                                             event_type,
                                             data,
                                             &mut translate_state,
@@ -1743,10 +1743,10 @@ fn handle_anthropic_streaming_response(
                         None => {
                             // Stream ended — flush remaining buffer.
                             if !buffer.is_empty() {
-                                let events = protocol_translation::parse_sse_events(&buffer);
+                                let events = protocol::stream::parse_sse_events(&buffer);
                                 for (event_type, data) in &events {
                                     if let Some(openai_chunk) =
-                                        protocol_translation::translate_stream_event(
+                                        protocol::stream::translate_stream_event(
                                             event_type,
                                             data,
                                             &mut translate_state,
@@ -1838,7 +1838,7 @@ async fn translate_anthropic_buffered_response(
         let status =
             StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let translated =
-            protocol_translation::translate_error(&error_body, upstream_status.as_u16());
+            protocol::response::translate_error(&error_body, upstream_status.as_u16());
         return (status, translated);
     }
 
@@ -1865,7 +1865,7 @@ async fn translate_anthropic_buffered_response(
     };
 
     match serde_json::from_str::<serde_json::Value>(&upstream_body) {
-        Ok(parsed) => match protocol_translation::translate_response(&parsed) {
+        Ok(parsed) => match protocol::response::translate_response(&parsed) {
             Ok(translated) => {
                 let body_str = serde_json::to_string(&translated).unwrap_or(upstream_body);
                 (StatusCode::OK, body_str)
@@ -1901,7 +1901,7 @@ async fn translate_openai_buffered_to_anthropic(
         let status =
             StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let translated =
-            protocol_translation::openai_to_anthropic_error(&error_body, upstream_status.as_u16());
+            protocol::response::openai_to_anthropic_error(&error_body, upstream_status.as_u16());
         return (status, translated);
     }
 
@@ -1928,7 +1928,7 @@ async fn translate_openai_buffered_to_anthropic(
     };
 
     match serde_json::from_str::<serde_json::Value>(&upstream_body) {
-        Ok(parsed) => match protocol_translation::openai_to_anthropic_response(&parsed) {
+        Ok(parsed) => match protocol::response::openai_to_anthropic_response(&parsed) {
             Ok(translated) => {
                 let body_str = serde_json::to_string(&translated).unwrap_or(upstream_body);
                 (StatusCode::OK, body_str)
@@ -1979,7 +1979,7 @@ fn handle_translating_anthropic_stream(
             tokio::time::interval(std::time::Duration::from_secs(keepalive_interval_secs));
         let mut stream = byte_stream;
         let mut stream_status = "ok";
-        let mut translate_state = protocol_translation::AnthropicStreamState::default();
+        let mut translate_state = protocol::stream::AnthropicStreamState::default();
         let mut buffer = Vec::new();
         interval.tick().await;
         loop {
@@ -1995,7 +1995,7 @@ fn handle_translating_anthropic_stream(
                                 stream_status = "buffer_overflow";
                                 break;
                             }
-                            let events = protocol_translation::parse_sse_events(&buffer);
+                            let events = protocol::stream::parse_sse_events(&buffer);
                             if !events.is_empty() {
                                 if let Some(last_boundary) = buffer.windows(2).rposition(|w| w == b"\n\n") {
                                     buffer.drain(..last_boundary + 2);
@@ -2004,7 +2004,7 @@ fn handle_translating_anthropic_stream(
                                 }
                                 for (event_type, data) in &events {
                                     if let Some(anthropic_events) =
-                                        protocol_translation::openai_to_anthropic_stream_event(
+                                        protocol::stream::openai_to_anthropic_stream_event(
                                             event_type,
                                             data,
                                             &mut translate_state,
@@ -2026,10 +2026,10 @@ fn handle_translating_anthropic_stream(
                         }
                         None => {
                             if !buffer.is_empty() {
-                                let events = protocol_translation::parse_sse_events(&buffer);
+                                let events = protocol::stream::parse_sse_events(&buffer);
                                 for (event_type, data) in &events {
                                     if let Some(anthropic_events) =
-                                        protocol_translation::openai_to_anthropic_stream_event(
+                                        protocol::stream::openai_to_anthropic_stream_event(
                                             event_type,
                                             data,
                                             &mut translate_state,
@@ -2372,7 +2372,7 @@ async fn completion_handler(
                 }
             };
 
-            let anthropic_body = match protocol_translation::translate_request(&parsed_body) {
+            let anthropic_body = match protocol::request::translate_request(&parsed_body) {
                 Ok(b) => b,
                 Err(e) => {
                     log_classification(
@@ -3156,7 +3156,7 @@ async fn messages_handler(
                     );
                 }
             };
-            match protocol_translation::anthropic_to_openai_request_with_cache_signal(&parsed) {
+            match protocol::request::anthropic_to_openai_request_with_cache_signal(&parsed) {
                 Ok((translated, had_cache_control)) => {
                     if had_cache_control {
                         debug!(
@@ -3282,7 +3282,7 @@ async fn messages_handler(
                                 handle_streaming_error_with_transform(
                                     upstream_response,
                                     |body, status| {
-                                        protocol_translation::openai_to_anthropic_error(
+                                        protocol::response::openai_to_anthropic_error(
                                             &body, status,
                                         )
                                     },
@@ -4853,7 +4853,7 @@ mod tests {
     /// Runs only when DATABASE_URL is set.
     #[tokio::test]
     async fn persistence_integration_prompt_char_count_column_exists() {
-        let pool = match persistence::test_pool().await {
+        let pool = match persistence::backend::test_pool().await {
             Some(p) => p,
             None => {
                 eprintln!("SKIP persistence_integration_prompt_char_count_column_exists: DATABASE_URL not set or unreachable");
@@ -4878,7 +4878,7 @@ mod tests {
 
     #[tokio::test]
     async fn persistence_integration_insert_and_read_back() {
-        let pool = match persistence::test_pool().await {
+        let pool = match persistence::backend::test_pool().await {
             Some(p) => p,
             None => {
                 eprintln!("SKIP persistence_integration_insert_and_read_back: DATABASE_URL not set or unreachable");
@@ -4886,7 +4886,7 @@ mod tests {
             }
         };
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
-        let backend = persistence::PostgresBackend {
+        let backend = persistence::postgres::PostgresBackend {
             pool: (*pool).clone(),
         };
         let db_backend = Arc::new(persistence::DbBackend::Postgres(backend));
@@ -4969,7 +4969,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn persistence_integration_sse_streaming_success() {
-        let pool = match persistence::test_pool().await {
+        let pool = match persistence::backend::test_pool().await {
             Some(p) => p,
             None => {
                 eprintln!("SKIP persistence_integration_sse_streaming_success: DATABASE_URL not set or unreachable");
@@ -5039,7 +5039,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn persistence_integration_sse_streaming_error() {
-        let pool = match persistence::test_pool().await {
+        let pool = match persistence::backend::test_pool().await {
             Some(p) => p,
             None => {
                 eprintln!("SKIP persistence_integration_sse_streaming_error: DATABASE_URL not set or unreachable");
@@ -5118,7 +5118,7 @@ mod tests {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         let _guard = EnvGuard("MOCK_API_KEY");
         std::env::set_var("MOCK_API_KEY", "sk-test");
-        let memory_backend = persistence::MemoryBackend::new();
+        let memory_backend = persistence::memory::MemoryBackend::new();
         let records_handle = memory_backend.records.clone();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
         let backend = Arc::new(persistence::DbBackend::Memory(memory_backend));
@@ -5175,7 +5175,7 @@ mod tests {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         let _guard = EnvGuard("MOCK_API_KEY");
         std::env::set_var("MOCK_API_KEY", "sk-test");
-        let memory_backend = persistence::MemoryBackend::new();
+        let memory_backend = persistence::memory::MemoryBackend::new();
         let records_handle = memory_backend.records.clone();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
         let backend = Arc::new(persistence::DbBackend::Memory(memory_backend));
@@ -5251,7 +5251,7 @@ mod tests {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         let _guard = EnvGuard("MOCK_API_KEY");
         std::env::set_var("MOCK_API_KEY", "sk-test");
-        let memory_backend = persistence::MemoryBackend::new();
+        let memory_backend = persistence::memory::MemoryBackend::new();
         // Inject one failure into the next insert. The flag auto-resets to
         // false after the first call (see MemoryBackend::insert_inference).
         memory_backend
@@ -6117,7 +6117,7 @@ mod tests {
         semaphore: Arc<tokio::sync::Semaphore>,
         http_client: Option<reqwest::Client>,
     ) -> (Router, httpmock::MockServer) {
-        let pg_backend = persistence::PostgresBackend {
+        let pg_backend = persistence::postgres::PostgresBackend {
             pool: (*pool).clone(),
         };
         let backend = Arc::new(persistence::DbBackend::Postgres(pg_backend));
