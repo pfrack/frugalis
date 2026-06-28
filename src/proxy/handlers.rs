@@ -601,14 +601,14 @@ pub(crate) async fn completion_handler(
                         );
                         #[cfg(feature = "otel")]
                         rm.set_status(status);
-                        if status == StatusCode::OK {
+                        if status.is_success() {
                             if let Some(ref key) = cache_key {
                                 if let Some(ref cache) = state.response_cache {
                                     cache.put(
                                         key.clone(),
                                         crate::cache::CachedEntry {
                                             body: response_body.clone(),
-                                            status: 200,
+                                            status: status.as_u16(),
                                         },
                                     );
                                 }
@@ -844,14 +844,14 @@ pub(crate) async fn completion_handler(
                     );
                     #[cfg(feature = "otel")]
                     rm.set_status(status);
-                    if status == StatusCode::OK {
+                    if status.is_success() {
                         if let Some(ref key) = cache_key {
                             if let Some(ref cache) = state.response_cache {
                                 cache.put(
                                     key.clone(),
                                         crate::cache::CachedEntry {
                                             body: resp_body.clone(),
-                                            status: 200,
+                                            status: status.as_u16(),
                                         },
                                 );
                             }
@@ -1507,14 +1507,14 @@ pub(crate) async fn messages_handler(
                     );
                     #[cfg(feature = "otel")]
                     rm.set_status(status);
-                    if status == StatusCode::OK {
+                    if status.is_success() {
                         if let Some(ref key) = cache_key {
                             if let Some(ref cache) = state.response_cache {
                                 cache.put(
                                     key.clone(),
                                         crate::cache::CachedEntry {
                                             body: resp_body.clone(),
-                                            status: 200,
+                                            status: status.as_u16(),
                                         },
                                 );
                             }
