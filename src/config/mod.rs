@@ -3,18 +3,15 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-pub mod loader;
-pub mod routing;
-pub mod types;
+pub(crate) mod loader;
+pub(crate) mod routing;
+pub(crate) mod types;
 
-pub(crate) use crate::classification::types::{
-    CategoryConfig, NegativePatternConfig, PatternEntry,
-};
 pub(crate) use routing::RouteEntry;
 pub(crate) use types::{
-    AuthProviderConfig, CacheConfig, ClassifiersConfig, CorsConfig, DashboardConfig,
-    DatabaseConfig, FewShotConfig, HttpConfig, LlmClassifierConfig, PersistenceSettings,
-    RegexClassifierConfig, ServerConfig,
+    AuthProviderConfig, CacheConfig, CategoryConfig, ClassifiersConfig, CorsConfig,
+    DashboardConfig, DatabaseConfig, FewShotConfig, HttpConfig, LlmClassifierConfig,
+    NegativePatternConfig, PatternEntry, PersistenceSettings, RegexClassifierConfig, ServerConfig,
 };
 
 /// Top-level configuration root that mirrors every section in `config.toml` (or

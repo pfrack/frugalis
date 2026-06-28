@@ -325,13 +325,11 @@ mod tests {
         let poll_start = std::time::Instant::now();
         let poll_timeout = std::time::Duration::from_secs(3);
         loop {
-            let count: i64 = sqlx::query_scalar(&format!(
-                "SELECT COUNT(*) FROM inferences WHERE prompt_snippet LIKE '%{}%'",
-                test_message
-            ))
-            .fetch_one(pool.as_ref())
-            .await
-            .expect("count query should succeed");
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inferences WHERE prompt_snippet LIKE ?")
+                .bind(format!("%{}%", test_message))
+                .fetch_one(pool.as_ref())
+                .await
+                .expect("count query should succeed");
             if count >= 2 {
                 break;
             }
@@ -340,7 +338,8 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        let rows = sqlx::query(&format!("SELECT status FROM inferences WHERE prompt_snippet LIKE '%{}%' ORDER BY created_at ASC", test_message))
+        let rows = sqlx::query("SELECT status FROM inferences WHERE prompt_snippet LIKE ? ORDER BY created_at ASC")
+            .bind(format!("%{}%", test_message))
             .fetch_all(pool.as_ref()).await.expect("query should succeed");
         use sqlx::Row;
         let statuses: Vec<String> = rows
@@ -392,13 +391,11 @@ mod tests {
         let poll_start = std::time::Instant::now();
         let poll_timeout = std::time::Duration::from_secs(3);
         loop {
-            let count: i64 = sqlx::query_scalar(&format!(
-                "SELECT COUNT(*) FROM inferences WHERE prompt_snippet LIKE '%{}%'",
-                test_message
-            ))
-            .fetch_one(pool.as_ref())
-            .await
-            .expect("count query should succeed");
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inferences WHERE prompt_snippet LIKE ?")
+                .bind(format!("%{}%", test_message))
+                .fetch_one(pool.as_ref())
+                .await
+                .expect("count query should succeed");
             if count >= 1 {
                 break;
             }
@@ -407,7 +404,8 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        let rows = sqlx::query(&format!("SELECT status FROM inferences WHERE prompt_snippet LIKE '%{}%' ORDER BY created_at ASC", test_message))
+        let rows = sqlx::query("SELECT status FROM inferences WHERE prompt_snippet LIKE ? ORDER BY created_at ASC")
+            .bind(format!("%{}%", test_message))
             .fetch_all(pool.as_ref()).await.expect("query should succeed");
         use sqlx::Row;
         let statuses: Vec<String> = rows

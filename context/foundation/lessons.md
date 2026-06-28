@@ -57,3 +57,10 @@
 - **Problem**: PR scope stops matching change scope. The reviewing skill (/10x-impl-review) cannot meaningfully verify the bundled work against the originating plan, because no plan covers it. Reverting the bundled work is destructive (some of it is load-bearing for the implemented sibling changes), so the drift stays in main indefinitely and the next plan-vs-PR review surfaces the same finding with no clean fix. Concrete instance: Tests #12 PR (commit 35906ce) bundled ~1,200 lines of artifacts from the `readme-bootstrap` change folder (README.md + research + change.md), the `opentelemetry-integration` plan addenda and review report, OTel F6 production code in `src/telemetry.rs`, and a `cargo fmt` sweep on `src/config.rs` / `src/dashboard.rs` / `src/routing.rs` — none of which were in the testing-critical-path-regression-guards plan's "Changes Required".
 - **Rule**: Before opening a PR, rebase the feature branch onto the current main and confirm the diff against main is exactly the work for the change's plan. If a feature branch has been staging other changes' work, either (a) split that work off into its own branch and PR first, or (b) explicitly call out the bundled scope in the PR description and get reviewer sign-off that the drift is acceptable. Do not let a squash merge hide a multi-PR scope creep inside a single change folder.
 - **Applies to**: frame
+
+## Organize src/ into domain subdirectories, not flat
+
+- **Context**: Any phase that creates new source modules or adds substantial logic to `src/`. Especially when a new subsystem has multiple concerns.
+- **Problem**: Without domain grouping, `src/` grows into a flat namespace with a monolithic main.rs (was 8,460 lines across 13 files) — hard to navigate, merge conflicts on every touch, no clear boundaries between subsystems.
+- **Rule**: Always group source files into domain-named subdirectories (`proxy/`, `classification/`, `config/`, etc.) when a module exceeds 2-3 files or crosses subsystem boundaries. Never add new top-level `.rs` files without a directory home.
+- **Applies to**: plan, implement, impl-review

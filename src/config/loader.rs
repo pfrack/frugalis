@@ -5,7 +5,7 @@ use tracing::{debug, warn};
 use super::routing::*;
 use super::types::*;
 use super::ConfigRoot;
-use crate::classification::types::{CategoryConfig, NegativePatternConfig, PatternEntry};
+use crate::config::types::{CategoryConfig, NegativePatternConfig, PatternEntry};
 
 #[cfg(test)]
 pub(crate) const CONFIG_DEFAULT: &str = "config.toml";
