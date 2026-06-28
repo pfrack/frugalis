@@ -434,7 +434,9 @@ pub(crate) fn anthropic_error_json(error_type: &str, message: &str) -> String {
     .to_string()
 }
 
-pub(crate) fn classification_only_json(result: &crate::classification::types::ClassificationResult) -> String {
+pub(crate) fn classification_only_json(
+    result: &crate::classification::types::ClassificationResult,
+) -> String {
     serde_json::json!({
         "status": "classified",
         "category": result.category,
@@ -548,14 +550,19 @@ mod tests {
 
     #[test]
     fn test_optimize_missing_messages_not_matched() {
-        let body = serde_json::json!({"model": "test"}).to_string().into_bytes();
+        let body = serde_json::json!({"model": "test"})
+            .to_string()
+            .into_bytes();
         let resp = try_optimize_request(&body, false);
         assert!(resp.is_none());
     }
 
     #[test]
     fn test_optimize_stream_true_not_matched() {
-        let body = serde_json::json!({"messages": [{"role": "user", "content": "hello"}], "stream": true}).to_string().into_bytes();
+        let body =
+            serde_json::json!({"messages": [{"role": "user", "content": "hello"}], "stream": true})
+                .to_string()
+                .into_bytes();
         let resp = try_optimize_request(&body, false);
         assert!(resp.is_none());
     }
@@ -569,7 +576,9 @@ mod tests {
 
     #[test]
     fn test_optimize_empty_messages_returns_anthropic_format() {
-        let body = serde_json::json!({"model": "claude-sonnet-4-6-20250514", "messages": []}).to_string().into_bytes();
+        let body = serde_json::json!({"model": "claude-sonnet-4-6-20250514", "messages": []})
+            .to_string()
+            .into_bytes();
         let resp = try_optimize_request(&body, true).expect("should match empty messages");
         assert_eq!(resp.status(), StatusCode::OK);
     }
@@ -582,7 +591,8 @@ mod tests {
             tier: ClassificationTier::Regex,
             providers: vec![],
         };
-        let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result)).expect("should be valid JSON");
+        let json: serde_json::Value =
+            serde_json::from_str(&classification_only_json(&result)).expect("should be valid JSON");
         let obj = json.as_object().expect("should be a JSON object");
         assert_eq!(obj.len(), 4);
         assert_eq!(obj.get("status"), Some(&serde_json::json!("classified")));
@@ -593,19 +603,28 @@ mod tests {
 
     #[test]
     fn test_upstream_error_json_contract_has_3_keys() {
-        let json: serde_json::Value = serde_json::from_str(&upstream_error_json(502_u16, "upstream response too large")).expect("should be valid JSON");
+        let json: serde_json::Value =
+            serde_json::from_str(&upstream_error_json(502_u16, "upstream response too large"))
+                .expect("should be valid JSON");
         let obj = json.as_object().expect("should be a JSON object");
         assert_eq!(obj.len(), 3);
         assert_eq!(obj.get("error"), Some(&serde_json::json!("upstream_error")));
         assert_eq!(obj.get("status"), Some(&serde_json::json!(502)));
-        assert_eq!(obj.get("message"), Some(&serde_json::json!("upstream response too large")));
+        assert_eq!(
+            obj.get("message"),
+            Some(&serde_json::json!("upstream response too large"))
+        );
     }
 
     #[test]
     fn test_json_response_sets_application_json_content_type() {
         let resp = json_response(StatusCode::CREATED, "{}".to_string());
         assert_eq!(resp.status(), StatusCode::CREATED);
-        let ct = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).expect("json_response must set Content-Type");
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .expect("json_response must set Content-Type");
         assert_eq!(ct, "application/json");
     }
 
@@ -617,9 +636,18 @@ mod tests {
             (ClassificationTier::Fallback, "Fallback"),
         ];
         for (tier, expected_label) in tiers {
-            let result = ClassificationResult { category: "SYNTAX_FIX".to_string(), model: "sf-model".to_string(), tier, providers: vec![] };
-            let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result)).expect("should be valid JSON");
-            assert_eq!(json.get("tier").and_then(|v| v.as_str()), Some(expected_label));
+            let result = ClassificationResult {
+                category: "SYNTAX_FIX".to_string(),
+                model: "sf-model".to_string(),
+                tier,
+                providers: vec![],
+            };
+            let json: serde_json::Value = serde_json::from_str(&classification_only_json(&result))
+                .expect("should be valid JSON");
+            assert_eq!(
+                json.get("tier").and_then(|v| v.as_str()),
+                Some(expected_label)
+            );
         }
     }
 }
