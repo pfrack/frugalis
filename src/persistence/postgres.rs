@@ -179,7 +179,7 @@ impl PersistenceBackend for PostgresBackend {
         );
         let count_sql = format!("SELECT COUNT(*) FROM inferences{}", where_clause);
 
-        let mut count_query = sqlx::query(&count_sql);
+        let mut count_query = sqlx::query(sqlx::AssertSqlSafe(count_sql));
         if let Some(cat) = filter_category {
             count_query = count_query.bind(cat);
         }
@@ -193,7 +193,7 @@ impl PersistenceBackend for PostgresBackend {
             .try_get(0)
             .map_err(|e| QueryError(e.to_string()))?;
 
-        let mut data_query = sqlx::query(&data_sql);
+        let mut data_query = sqlx::query(sqlx::AssertSqlSafe(data_sql));
         if let Some(cat) = filter_category {
             data_query = data_query.bind(cat);
         }

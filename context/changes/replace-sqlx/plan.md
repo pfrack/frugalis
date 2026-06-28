@@ -334,9 +334,9 @@ Convert migration files to refinery format, remove `sqlite.rs` and `postgres.rs`
 
 #### Automated
 
-- [ ] 1.1 `cargo build` succeeds with new deps
-- [ ] 1.2 `cargo test --lib` passes all existing tests
-- [ ] 1.3 `cargo clippy` has no new warnings
+- [x] 1.1 `cargo build` succeeds with new deps
+- [x] 1.2 `cargo test --lib` passes all existing tests
+- [x] 1.3 `cargo clippy` has no new warnings
 
 #### Manual
 
