@@ -326,10 +326,10 @@ dashboard_page! {
 
 #### Automated
 
-- [x] 1.1 Project compiles: `cargo build`
-- [x] 1.2 All existing tests pass: `cargo test`
-- [x] 1.3 Cache unit tests pass: `cargo test cache`
-- [x] 1.4 Cache config tests pass (included in `cargo test config`)
+- [x] 1.1 Project compiles: `cargo build` — 1ab45c1
+- [x] 1.2 All existing tests pass: `cargo test` — 1ab45c1
+- [x] 1.3 Cache unit tests pass: `cargo test cache` — 1ab45c1
+- [x] 1.4 Cache config tests pass (included in `cargo test config`) — 1ab45c1
 
 #### Manual
 
@@ -340,9 +340,9 @@ dashboard_page! {
 
 #### Automated
 
-- [ ] 2.1 All existing tests pass: `cargo test`
-- [ ] 2.2 Cache integration tests pass (hit, miss, bypass, streaming, error, disabled)
-- [ ] 2.3 Auth tests pass: `cargo test auth`
+- [x] 2.1 All existing tests pass: `cargo test`
+- [x] 2.2 Cache integration tests pass (hit, miss, bypass, streaming, error, disabled)
+- [x] 2.3 Auth tests pass: `cargo test auth`
 
 #### Manual
 
