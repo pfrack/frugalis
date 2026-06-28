@@ -417,14 +417,14 @@ No data migration. No config changes. No API changes. Downstream consumers (Dock
 
 #### Automated
 
-- [x] 4.1 `cargo build` succeeds
-- [x] 4.2 `cargo build --features otel` succeeds
-- [x] 4.3 `cargo test` — all tests pass
-- [x] 4.4 `cargo clippy` — no new warnings
-- [x] 4.5 `wc -l src/main.rs` ≤ 300 lines
+- [x] 4.1 `cargo build` succeeds — 0ef70aa
+- [x] 4.2 `cargo build --features otel` succeeds — 0ef70aa
+- [x] 4.3 `cargo test` — all tests pass — 0ef70aa
+- [x] 4.4 `cargo clippy` — no new warnings — 0ef70aa
+- [x] 4.5 `wc -l src/main.rs` ≤ 300 lines — 0ef70aa
 
 #### Manual
 
-- [x] 4.6 `cargo run -- --help` prints help
-- [x] 4.7 `cargo run -- --validate` validates config
-- [x] 4.8 Test count unchanged from before Phase 1
+- [x] 4.6 `cargo run -- --help` prints help — 0ef70aa
+- [x] 4.7 `cargo run -- --validate` validates config — 0ef70aa
+- [x] 4.8 Test count unchanged from before Phase 1 — 0ef70aa
