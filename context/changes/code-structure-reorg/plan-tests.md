@@ -236,11 +236,11 @@ None — compile-time only change. May slightly improve incremental compilation 
 
 #### Automated
 
-- [x] 6.1 `cargo test` — 365 tests pass
-- [x] 6.2 `cargo clippy` — zero warnings
-- [x] 6.3 No `use crate::*` in any test module
+- [x] 6.1 `cargo test` — 365 tests pass — 886ab52
+- [x] 6.2 `cargo clippy` — zero warnings — 886ab52
+- [x] 6.3 No `use crate::*` in any test module — 886ab52
 
 #### Manual
 
-- [x] 6.4 `wc -l src/main.rs` decreased
-- [x] 6.5 `grep -r "mod tests" src/` shows test blocks in domain modules
+- [x] 6.4 `wc -l src/main.rs` decreased — 886ab52
+- [x] 6.5 `grep -r "mod tests" src/` shows test blocks in domain modules — 886ab52
