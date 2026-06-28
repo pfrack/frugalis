@@ -346,10 +346,10 @@ Convert migration files to refinery format, remove `sqlite.rs` and `postgres.rs`
 
 #### Automated
 
-- [x] 2.1 `cargo build` succeeds
-- [x] 2.2 SqlBackend insert + fetch round-trip test passes
-- [x] 2.3 SqlBackend insert + fetch with category filter test passes
-- [x] 2.4 Existing tests still pass
+- [x] 2.1 `cargo build` succeeds — 1931b7d
+- [x] 2.2 SqlBackend insert + fetch round-trip test passes — 1931b7d
+- [x] 2.3 SqlBackend insert + fetch with category filter test passes — 1931b7d
+- [x] 2.4 Existing tests still pass — 1931b7d
 
 #### Manual
 
@@ -359,10 +359,10 @@ Convert migration files to refinery format, remove `sqlite.rs` and `postgres.rs`
 
 #### Automated
 
-- [x] 3.1 fetch_latency_summary test passes for SqlBackend
-- [x] 3.2 fetch_savings_estimate test passes for SqlBackend
-- [x] 3.3 All existing persistence tests pass
-- [x] 3.4 `cargo clippy` clean
+- [x] 3.1 fetch_latency_summary test passes for SqlBackend — 1931b7d
+- [x] 3.2 fetch_savings_estimate test passes for SqlBackend — 1931b7d
+- [x] 3.3 All existing persistence tests pass — 1931b7d
+- [x] 3.4 `cargo clippy` clean — 1931b7d
 
 #### Manual
 
@@ -373,11 +373,11 @@ Convert migration files to refinery format, remove `sqlite.rs` and `postgres.rs`
 
 #### Automated
 
-- [x] 4.1 `cargo build` succeeds (no references to deleted files)
-- [x] 4.2 All persistence tests pass with new SqlBackend
-- [x] 4.3 `cargo clippy` clean
-- [x] 4.4 `cargo test` full suite passes
-- [x] 4.5 No dead code warnings from removed modules
+- [x] 4.1 `cargo build` succeeds (no references to deleted files) — 1931b7d
+- [x] 4.2 All persistence tests pass with new SqlBackend — 1931b7d
+- [x] 4.3 `cargo clippy` clean — 1931b7d
+- [x] 4.4 `cargo test` full suite passes — 1931b7d
+- [x] 4.5 No dead code warnings from removed modules — 1931b7d
 
 #### Manual
 
