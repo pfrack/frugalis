@@ -355,12 +355,12 @@ dashboard_page! {
 
 #### Automated
 
-- [x] 3.1 Dashboard tests pass: `cargo test dashboard`
-- [x] 3.2 Cache dashboard test: 200 with auth, disabled state, stats state
-- [x] 3.3 Template compiles (Askama)
+- [x] 3.1 Dashboard tests pass: `cargo test dashboard` — 94e2b37
+- [x] 3.2 Cache dashboard test: 200 with auth, disabled state, stats state — 94e2b37
+- [x] 3.3 Template compiles (Askama) — 94e2b37
 
 #### Manual
 
-- [x] 3.4 `/dashboard/cache` renders with stats after authenticated requests
-- [x] 3.5 Hit count increases after repeated identical requests
-- [x] 3.6 Entry count drops after TTL expiry
+- [x] 3.4 `/dashboard/cache` renders with stats after authenticated requests — 94e2b37
+- [x] 3.5 Hit count increases after repeated identical requests — 94e2b37
+- [x] 3.6 Entry count drops after TTL expiry — 94e2b37
