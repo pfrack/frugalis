@@ -370,16 +370,16 @@ No data migration. No config changes. No API changes. Downstream consumers (Dock
 
 #### Automated
 
-- [x] 1.1 `cargo build` succeeds with no warnings
-- [x] 1.2 `cargo build --features otel` succeeds
-- [x] 1.3 `cargo test` — all tests pass
-- [x] 1.4 `cargo clippy` — no new warnings
-- [x] 1.5 `src/translate/` directory no longer exists
+- [x] 1.1 `cargo build` succeeds with no warnings — 239d48d
+- [x] 1.2 `cargo build --features otel` succeeds — 239d48d
+- [x] 1.3 `cargo test` — all tests pass — 239d48d
+- [x] 1.4 `cargo clippy` — no new warnings — 239d48d
+- [x] 1.5 `src/translate/` directory no longer exists — 239d48d
 
 #### Manual
 
-- [x] 1.6 Confirm `src/protocol/` has 4 files
-- [x] 1.7 Confirm `src/persistence/` has 6 files
+- [x] 1.6 Confirm `src/protocol/` has 4 files — 239d48d
+- [x] 1.7 Confirm `src/persistence/` has 6 files — 239d48d
 
 ### Phase 2: Config + Classification Cluster Extraction
 
