@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::SqlitePool;
 use sqlx::Row;
+use sqlx::SqlitePool;
 use tracing::error;
 
 use super::backend::{percentile_99, retry_once, PersistenceBackend};

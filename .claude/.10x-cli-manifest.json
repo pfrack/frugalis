@@ -1,9 +1,9 @@
 {
   "package": "@przeprogramowani/10x-cli",
-  "version": "1.7.0",
+  "version": "1.10.0",
   "manifestVersion": 3,
-  "lastApplied": "2026-06-01T11:11:01.642Z",
-  "lessonId": "m3l5",
+  "lastApplied": "2026-06-28T20:32:46.733Z",
+  "lessonId": "m0l0",
   "course": "10xdevs3",
   "tool": "claude-code",
   "files": {
@@ -230,7 +230,8 @@
       "m1l5-3-extend-prerequisites.md",
       "m1l5-4-store-plan.md",
       "m3l2-ad-hoc-testing.md",
-      "m3l4-e2e-prompt.md"
+      "m3l4-e2e-prompt.md",
+      "mvp-check.md"
     ],
     "configs": [],
     "promptHashes": {
@@ -240,7 +241,8 @@
       "m1l5-3-extend-prerequisites.md": "3418ae7c2ffc10f9cce9ad23b48b845033b57793fc2816df66c6deb8b6eae867",
       "m1l5-4-store-plan.md": "0f72fd90618f05bd8f6784825d217e128fa3148def28024995f1ad1026b34f48",
       "m3l2-ad-hoc-testing.md": "6a4509b6b90d3ea9229d19dbec77aea0c6812d0d706144006f9465e195f5387f",
-      "m3l4-e2e-prompt.md": "88989bf92deacee0aa3bbdadddba775bec4ddd6e5d063e10f097cbb73e2a4309"
+      "m3l4-e2e-prompt.md": "88989bf92deacee0aa3bbdadddba775bec4ddd6e5d063e10f097cbb73e2a4309",
+      "mvp-check.md": "925dbc3beb572cb90e858c8ec1ed6c813803cc7169bbf8be727cf29a83ccd839"
     }
   },
   "lessons": {
@@ -1826,6 +1828,15 @@
         "m1l5-4-store-plan.md",
         "m3l2-ad-hoc-testing.md",
         "m3l4-e2e-prompt.md"
+      ],
+      "configs": []
+    },
+    "m0l0": {
+      "appliedAt": "2026-06-28T20:32:46.733Z",
+      "skills": {},
+      "prompts": [
+        "skill-explainer.md",
+        "mvp-check.md"
       ],
       "configs": []
     }

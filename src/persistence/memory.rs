@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use std::sync::atomic::AtomicBool;
 
 use super::backend::{percentile_99, PersistenceBackend};
-use super::types::{prompt_chars_to_cost, CostProvider, InferenceLog, InferenceRecord, LatencySummary, LatencySummaryRow, QueryError, SavingsEstimate};
+use super::types::{
+    prompt_chars_to_cost, CostProvider, InferenceLog, InferenceRecord, LatencySummary,
+    LatencySummaryRow, QueryError, SavingsEstimate,
+};
 
 /// Ephemeral in-process persistence backend.
 ///
@@ -253,7 +256,9 @@ mod tests {
     fn test_backend() -> PersistenceConfig {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         PersistenceConfig {
-            backend: Arc::new(super::super::backend::DbBackend::Memory(MemoryBackend::new())),
+            backend: Arc::new(super::super::backend::DbBackend::Memory(
+                MemoryBackend::new(),
+            )),
             task_semaphore: Arc::new(Semaphore::new(100)),
         }
     }
@@ -621,9 +626,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_savings_estimate_empty() {
         let pc = test_backend();
-        let mc = crate::config::routing::ModelCosts::from_costs(
-            std::collections::HashMap::new(),
-        );
+        let mc = crate::config::routing::ModelCosts::from_costs(std::collections::HashMap::new());
         let model = format!("Z_TST_SAV_EMPTY_{}", uuid::Uuid::new_v4());
         pc.backend
             .insert_inference(&InferenceRecord {
@@ -721,9 +724,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_savings_estimate_unknown_cost_model() {
         let pc = test_backend();
-        let mc = crate::config::routing::ModelCosts::from_costs(
-            std::collections::HashMap::new(),
-        );
+        let mc = crate::config::routing::ModelCosts::from_costs(std::collections::HashMap::new());
         let model = format!("Z_TST_SAV_UNK_{}", uuid::Uuid::new_v4());
 
         pc.backend
@@ -764,9 +765,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_savings_estimate_filters_null_category() {
         let pc = test_backend();
-        let mc = crate::config::routing::ModelCosts::from_costs(
-            std::collections::HashMap::new(),
-        );
+        let mc = crate::config::routing::ModelCosts::from_costs(std::collections::HashMap::new());
 
         pc.backend
             .insert_inference(&InferenceRecord {

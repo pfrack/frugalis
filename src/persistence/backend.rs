@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use tracing::warn;
 
 #[cfg(test)]
-use std::time::Duration;
-#[cfg(test)]
 use sqlx::PgPool;
+#[cfg(test)]
+use std::time::Duration;
 
 use super::memory::MemoryBackend;
 use super::postgres::PostgresBackend;

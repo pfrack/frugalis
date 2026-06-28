@@ -649,271 +649,270 @@ pub fn openai_to_anthropic_stream_event(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn test_translate_stream_event_accumulates_cache_tokens_across_events() {
-            // Anthropic streaming reports input_tokens + cache_creation in
-            // message_start and output_tokens + cache_read in message_delta. The
-            // translator must combine both halves into the terminal OpenAI usage
-            // chunk with cached_tokens set.
-            let mut state = StreamTranslateState::default();
-            let start = r#"{"type":"message_start","message":{"id":"msg_s","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"usage":{"input_tokens":100,"output_tokens":0,"cache_creation_input_tokens":12}}}"#;
-            translate_stream_event("message_start", start, &mut state);
-            let delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20,"cache_read_input_tokens":80}}"#;
-            let out = translate_stream_event("message_delta", delta, &mut state);
-            let out = out.expect("message_delta must emit a usage chunk");
-            // prompt_tokens = input_tokens(100) + cache_creation(12) + cache_read(80) = 192
-            assert!(
-                out.contains("\"prompt_tokens\":192"),
-                "prompt_tokens must combine all input/cache fields, got: {out}"
-            );
-            assert!(
-                out.contains("\"cached_tokens\":80"),
-                "cached_tokens must map from cache_read_input_tokens, got: {out}"
-            );
-        }
+        // Anthropic streaming reports input_tokens + cache_creation in
+        // message_start and output_tokens + cache_read in message_delta. The
+        // translator must combine both halves into the terminal OpenAI usage
+        // chunk with cached_tokens set.
+        let mut state = StreamTranslateState::default();
+        let start = r#"{"type":"message_start","message":{"id":"msg_s","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"usage":{"input_tokens":100,"output_tokens":0,"cache_creation_input_tokens":12}}}"#;
+        translate_stream_event("message_start", start, &mut state);
+        let delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20,"cache_read_input_tokens":80}}"#;
+        let out = translate_stream_event("message_delta", delta, &mut state);
+        let out = out.expect("message_delta must emit a usage chunk");
+        // prompt_tokens = input_tokens(100) + cache_creation(12) + cache_read(80) = 192
+        assert!(
+            out.contains("\"prompt_tokens\":192"),
+            "prompt_tokens must combine all input/cache fields, got: {out}"
+        );
+        assert!(
+            out.contains("\"cached_tokens\":80"),
+            "cached_tokens must map from cache_read_input_tokens, got: {out}"
+        );
+    }
 
-        #[test]
-        fn test_stream_message_start() {
-            let mut state = StreamTranslateState::default();
-            let data = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":0,"output_tokens":0}}}"#;
-            let result = translate_stream_event("message_start", data, &mut state);
-            assert!(result.is_some());
-            let chunk_str = result.unwrap();
-            assert!(chunk_str.contains("chatcmpl-msg_1"));
-            assert!(state.started);
-            assert_eq!(state.chunk_id, "msg_1");
-            assert_eq!(state.model, "claude-sonnet-4-20250514");
-        }
+    #[test]
+    fn test_stream_message_start() {
+        let mut state = StreamTranslateState::default();
+        let data = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":0,"output_tokens":0}}}"#;
+        let result = translate_stream_event("message_start", data, &mut state);
+        assert!(result.is_some());
+        let chunk_str = result.unwrap();
+        assert!(chunk_str.contains("chatcmpl-msg_1"));
+        assert!(state.started);
+        assert_eq!(state.chunk_id, "msg_1");
+        assert_eq!(state.model, "claude-sonnet-4-20250514");
+    }
     #[test]
     fn test_stream_text_delta() {
-            let mut state = StreamTranslateState {
-                chunk_id: "msg_1".into(),
-                model: "m".into(),
-                started: true,
-                ..Default::default()
-            };
-            let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
-            let result = translate_stream_event("content_block_delta", data, &mut state);
-            assert!(result.is_some());
-            assert!(result.unwrap().contains("Hello"));
-        }
+        let mut state = StreamTranslateState {
+            chunk_id: "msg_1".into(),
+            model: "m".into(),
+            started: true,
+            ..Default::default()
+        };
+        let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let result = translate_stream_event("content_block_delta", data, &mut state);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("Hello"));
+    }
     #[test]
     fn test_stream_thinking_delta() {
-            let mut state = StreamTranslateState {
-                chunk_id: "msg_1".into(),
-                model: "m".into(),
-                started: true,
-                ..Default::default()
-            };
-            let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Hmm..."}}"#;
-            let result = translate_stream_event("content_block_delta", data, &mut state);
-            assert!(result.is_some());
-            assert!(result.unwrap().contains("reasoning_content"));
-        }
+        let mut state = StreamTranslateState {
+            chunk_id: "msg_1".into(),
+            model: "m".into(),
+            started: true,
+            ..Default::default()
+        };
+        let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Hmm..."}}"#;
+        let result = translate_stream_event("content_block_delta", data, &mut state);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("reasoning_content"));
+    }
     #[test]
     fn test_stream_tool_use_start() {
-            let mut state = StreamTranslateState {
-                chunk_id: "msg_1".into(),
-                model: "m".into(),
-                started: true,
-                ..Default::default()
-            };
-            let data = r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}"#;
-            let result = translate_stream_event("content_block_start", data, &mut state);
-            assert!(result.is_some());
-            let chunk = result.unwrap();
-            assert!(chunk.contains("toolu_1"));
-            assert!(chunk.contains("read_file"));
-            assert!(state.has_tool_use);
-        }
+        let mut state = StreamTranslateState {
+            chunk_id: "msg_1".into(),
+            model: "m".into(),
+            started: true,
+            ..Default::default()
+        };
+        let data = r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}"#;
+        let result = translate_stream_event("content_block_start", data, &mut state);
+        assert!(result.is_some());
+        let chunk = result.unwrap();
+        assert!(chunk.contains("toolu_1"));
+        assert!(chunk.contains("read_file"));
+        assert!(state.has_tool_use);
+    }
     #[test]
     fn test_stream_input_json_delta() {
-            let mut state = StreamTranslateState {
-                chunk_id: "msg_1".into(),
-                model: "m".into(),
-                started: true,
-                tool_index: 0,
-                has_tool_use: true,
-                ..Default::default()
-            };
-            let data = r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#;
-            let result = translate_stream_event("content_block_delta", data, &mut state);
-            assert!(result.is_some());
-            let chunk = result.unwrap();
-            // OpenAI format uses function.arguments, not input_json_delta
-            assert!(chunk.contains("\"arguments\""));
-            assert!(chunk.contains("tool_calls"));
-        }
+        let mut state = StreamTranslateState {
+            chunk_id: "msg_1".into(),
+            model: "m".into(),
+            started: true,
+            tool_index: 0,
+            has_tool_use: true,
+            ..Default::default()
+        };
+        let data = r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#;
+        let result = translate_stream_event("content_block_delta", data, &mut state);
+        assert!(result.is_some());
+        let chunk = result.unwrap();
+        // OpenAI format uses function.arguments, not input_json_delta
+        assert!(chunk.contains("\"arguments\""));
+        assert!(chunk.contains("tool_calls"));
+    }
     #[test]
     fn test_stream_content_block_stop_tool() {
-            let mut state = StreamTranslateState {
-                chunk_id: "msg_1".into(),
-                model: "m".into(),
-                started: true,
-                tool_index: 0,
-                has_tool_use: true,
-                ..Default::default()
-            };
-            let result = translate_stream_event("content_block_stop", r#"{"index":1}"#, &mut state);
-            assert!(result.is_none());
-            assert_eq!(state.tool_index, 1);
-            assert!(!state.has_tool_use);
-        }
+        let mut state = StreamTranslateState {
+            chunk_id: "msg_1".into(),
+            model: "m".into(),
+            started: true,
+            tool_index: 0,
+            has_tool_use: true,
+            ..Default::default()
+        };
+        let result = translate_stream_event("content_block_stop", r#"{"index":1}"#, &mut state);
+        assert!(result.is_none());
+        assert_eq!(state.tool_index, 1);
+        assert!(!state.has_tool_use);
+    }
     #[test]
     fn test_stream_message_delta_stop() {
-            let mut state = StreamTranslateState {
-                chunk_id: "msg_1".into(),
-                model: "m".into(),
-                started: true,
-                ..Default::default()
-            };
-            let data = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#;
-            let result = translate_stream_event("message_delta", data, &mut state);
-            assert!(result.is_some());
-            let chunks = result.unwrap();
-            assert!(chunks.contains("\"finish_reason\":\"stop\""));
-            assert!(chunks.contains("\"completion_tokens\":42"));
-        }
+        let mut state = StreamTranslateState {
+            chunk_id: "msg_1".into(),
+            model: "m".into(),
+            started: true,
+            ..Default::default()
+        };
+        let data = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#;
+        let result = translate_stream_event("message_delta", data, &mut state);
+        assert!(result.is_some());
+        let chunks = result.unwrap();
+        assert!(chunks.contains("\"finish_reason\":\"stop\""));
+        assert!(chunks.contains("\"completion_tokens\":42"));
+    }
     #[test]
     fn test_stream_message_stop() {
-            let mut state = StreamTranslateState::default();
-            let result = translate_stream_event("message_stop", "{}", &mut state);
-            assert_eq!(result.unwrap(), "data: [DONE]\n\n");
-        }
+        let mut state = StreamTranslateState::default();
+        let result = translate_stream_event("message_stop", "{}", &mut state);
+        assert_eq!(result.unwrap(), "data: [DONE]\n\n");
+    }
     #[test]
     fn test_parse_sse_events() {
-            let input = b"event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n";
-            let events = parse_sse_events(input);
-            assert_eq!(events.len(), 2);
-            assert_eq!(events[0].0, "message_start");
-            assert_eq!(events[1].0, "content_block_delta");
-        }
+        let input = b"event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n";
+        let events = parse_sse_events(input);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, "message_start");
+        assert_eq!(events[1].0, "content_block_delta");
+    }
     #[test]
     fn test_parse_sse_events_no_event_type() {
-            let input = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n";
-            let events = parse_sse_events(input);
-            assert_eq!(events.len(), 1);
-            assert_eq!(events[0].0, "message"); // default
-        }
+        let input = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n";
+        let events = parse_sse_events(input);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "message"); // default
+    }
     #[test]
     fn test_a2o_stream_first_chunk_emits_message_start() {
-            let mut state = AnthropicStreamState::default();
-            let data = r#"{"id":"chatcmpl-abc","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}"#;
-            let result = openai_to_anthropic_stream_event("message", data, &mut state);
-            assert!(result.is_some());
-            let out = result.unwrap();
-            assert!(out.contains("message_start"));
-            assert!(out.contains("\"id\":\"abc\""));
-            assert!(state.message_started);
-            assert_eq!(state.model, "gpt-4o");
-        }
+        let mut state = AnthropicStreamState::default();
+        let data = r#"{"id":"chatcmpl-abc","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}"#;
+        let result = openai_to_anthropic_stream_event("message", data, &mut state);
+        assert!(result.is_some());
+        let out = result.unwrap();
+        assert!(out.contains("message_start"));
+        assert!(out.contains("\"id\":\"abc\""));
+        assert!(state.message_started);
+        assert_eq!(state.model, "gpt-4o");
+    }
     #[test]
     fn test_a2o_stream_content_delta() {
-            let mut state = AnthropicStreamState {
-                message_started: true,
-                model: "m".into(),
-                ..Default::default()
-            };
-            let data = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
-            let result = openai_to_anthropic_stream_event("message", data, &mut state).unwrap();
-            assert!(result.contains("content_block_start"));
-            assert!(result.contains("\"type\":\"text\""));
-            assert!(result.contains("text_delta"));
-            assert!(result.contains("Hello"));
-            assert_eq!(state.open_block.as_deref(), Some("text"));
-        }
+        let mut state = AnthropicStreamState {
+            message_started: true,
+            model: "m".into(),
+            ..Default::default()
+        };
+        let data = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
+        let result = openai_to_anthropic_stream_event("message", data, &mut state).unwrap();
+        assert!(result.contains("content_block_start"));
+        assert!(result.contains("\"type\":\"text\""));
+        assert!(result.contains("text_delta"));
+        assert!(result.contains("Hello"));
+        assert_eq!(state.open_block.as_deref(), Some("text"));
+    }
     #[test]
     fn test_a2o_stream_reasoning_delta() {
-            let mut state = AnthropicStreamState {
-                message_started: true,
-                model: "m".into(),
-                ..Default::default()
-            };
-            let data = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"reasoning_content":"Thinking..."},"finish_reason":null}]}"#;
-            let result = openai_to_anthropic_stream_event("message", data, &mut state).unwrap();
-            assert!(result.contains("content_block_start"));
-            assert!(result.contains("\"type\":\"thinking\""));
-            assert!(result.contains("thinking_delta"));
-            assert!(result.contains("Thinking..."));
-            assert_eq!(state.open_block.as_deref(), Some("thinking"));
-        }
+        let mut state = AnthropicStreamState {
+            message_started: true,
+            model: "m".into(),
+            ..Default::default()
+        };
+        let data = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"reasoning_content":"Thinking..."},"finish_reason":null}]}"#;
+        let result = openai_to_anthropic_stream_event("message", data, &mut state).unwrap();
+        assert!(result.contains("content_block_start"));
+        assert!(result.contains("\"type\":\"thinking\""));
+        assert!(result.contains("thinking_delta"));
+        assert!(result.contains("Thinking..."));
+        assert_eq!(state.open_block.as_deref(), Some("thinking"));
+    }
     #[test]
     fn test_a2o_stream_tool_call_new() {
-            let mut state = AnthropicStreamState {
-                message_started: true,
-                model: "m".into(),
-                ..Default::default()
-            };
-            let data = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}]}"#;
-            let result = openai_to_anthropic_stream_event("message", data, &mut state).unwrap();
-            assert!(result.contains("content_block_start"));
-            assert!(result.contains("tool_use"));
-            assert!(result.contains("call_1"));
-            assert!(result.contains("read_file"));
-            assert_eq!(state.open_block.as_deref(), Some("tool_use"));
-            assert!(state.tool_state.contains_key(&0));
-        }
+        let mut state = AnthropicStreamState {
+            message_started: true,
+            model: "m".into(),
+            ..Default::default()
+        };
+        let data = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}]}"#;
+        let result = openai_to_anthropic_stream_event("message", data, &mut state).unwrap();
+        assert!(result.contains("content_block_start"));
+        assert!(result.contains("tool_use"));
+        assert!(result.contains("call_1"));
+        assert!(result.contains("read_file"));
+        assert_eq!(state.open_block.as_deref(), Some("tool_use"));
+        assert!(state.tool_state.contains_key(&0));
+    }
     #[test]
     fn test_a2o_stream_tool_call_arguments() {
-            let mut state = AnthropicStreamState {
-                message_started: true,
-                model: "m".into(),
-                open_block: Some("tool_use".into()),
-                ..Default::default()
-            };
-            state.tool_state.insert(0, ("call_1".into(), "fn".into()));
-            let data = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]},"finish_reason":null}]}"#;
-            let result = openai_to_anthropic_stream_event("message", data, &mut state).unwrap();
-            assert!(result.contains("input_json_delta"));
-            assert!(result.contains("{\\\"path\\\":"));
-        }
+        let mut state = AnthropicStreamState {
+            message_started: true,
+            model: "m".into(),
+            open_block: Some("tool_use".into()),
+            ..Default::default()
+        };
+        state.tool_state.insert(0, ("call_1".into(), "fn".into()));
+        let data = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]},"finish_reason":null}]}"#;
+        let result = openai_to_anthropic_stream_event("message", data, &mut state).unwrap();
+        assert!(result.contains("input_json_delta"));
+        assert!(result.contains("{\\\"path\\\":"));
+    }
     #[test]
     fn test_a2o_stream_finish_reason() {
-            let mut state = AnthropicStreamState {
-                message_started: true,
-                model: "m".into(),
-                open_block: Some("text".into()),
-                ..Default::default()
-            };
-            let data = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
-            let result = openai_to_anthropic_stream_event("message", data, &mut state).unwrap();
-            assert!(result.contains("content_block_stop"));
-            assert!(result.contains("message_delta"));
-            assert!(result.contains("end_turn"));
-        }
+        let mut state = AnthropicStreamState {
+            message_started: true,
+            model: "m".into(),
+            open_block: Some("text".into()),
+            ..Default::default()
+        };
+        let data = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        let result = openai_to_anthropic_stream_event("message", data, &mut state).unwrap();
+        assert!(result.contains("content_block_stop"));
+        assert!(result.contains("message_delta"));
+        assert!(result.contains("end_turn"));
+    }
     #[test]
     fn test_a2o_stream_done() {
-            let mut state = AnthropicStreamState {
-                message_started: true,
-                model: "m".into(),
-                ..Default::default()
-            };
-            let result = openai_to_anthropic_stream_event("message", "[DONE]", &mut state).unwrap();
-            assert!(result.contains("message_stop"));
-        }
+        let mut state = AnthropicStreamState {
+            message_started: true,
+            model: "m".into(),
+            ..Default::default()
+        };
+        let result = openai_to_anthropic_stream_event("message", "[DONE]", &mut state).unwrap();
+        assert!(result.contains("message_stop"));
+    }
     #[test]
     fn test_a2o_stream_block_transition() {
-            let mut state = AnthropicStreamState {
-                message_started: true,
-                model: "m".into(),
-                ..Default::default()
-            };
-            // First: reasoning
-            let data = r#"{"id":"x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"reasoning_content":"think"},"finish_reason":null}]}"#;
-            openai_to_anthropic_stream_event("message", data, &mut state);
-            assert_eq!(state.open_block.as_deref(), Some("thinking"));
-            assert_eq!(state.block_index, 0);
+        let mut state = AnthropicStreamState {
+            message_started: true,
+            model: "m".into(),
+            ..Default::default()
+        };
+        // First: reasoning
+        let data = r#"{"id":"x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"reasoning_content":"think"},"finish_reason":null}]}"#;
+        openai_to_anthropic_stream_event("message", data, &mut state);
+        assert_eq!(state.open_block.as_deref(), Some("thinking"));
+        assert_eq!(state.block_index, 0);
 
-            // Then: content (should close thinking first)
-            let data = r#"{"id":"x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}"#;
-            let result = openai_to_anthropic_stream_event("message", data, &mut state).unwrap();
-            assert!(result.contains("content_block_stop"));
-            assert!(result.contains("content_block_start"));
-            assert_eq!(state.open_block.as_deref(), Some("text"));
-            assert_eq!(state.block_index, 1);
-        }
+        // Then: content (should close thinking first)
+        let data = r#"{"id":"x","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}"#;
+        let result = openai_to_anthropic_stream_event("message", data, &mut state).unwrap();
+        assert!(result.contains("content_block_stop"));
+        assert!(result.contains("content_block_start"));
+        assert_eq!(state.open_block.as_deref(), Some("text"));
+        assert_eq!(state.block_index, 1);
+    }
 }

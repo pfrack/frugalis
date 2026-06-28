@@ -28,8 +28,6 @@ mod test_util;
 use app::{build_app, AppState};
 use cli::CliMode;
 
-
-
 #[tokio::main]
 async fn main() {
     let cli::CliResult { mode, force } = cli::parse_args();
@@ -203,16 +201,17 @@ async fn main() {
             }
         }
 
-        let (mut routing_map, mut fallback_entry) = match config::loader::routing_from_value(&config_root) {
-            Ok((map, fallback)) => (map, fallback),
-            Err(e) => {
-                warn!(
-                    "routing config parsing failed: {}; using hardcoded routing defaults",
-                    e
-                );
-                config::loader::hardcoded_routing(&categories)
-            }
-        };
+        let (mut routing_map, mut fallback_entry) =
+            match config::loader::routing_from_value(&config_root) {
+                Ok((map, fallback)) => (map, fallback),
+                Err(e) => {
+                    warn!(
+                        "routing config parsing failed: {}; using hardcoded routing defaults",
+                        e
+                    );
+                    config::loader::hardcoded_routing(&categories)
+                }
+            };
 
         // Validate that all custom categories have corresponding routing entries.
         // If any category missing, fall back to hardcoded categories and matching routing.
@@ -295,12 +294,15 @@ async fn main() {
                         }
                     }
                     "fewshot" => {
-                        if let Some(config) = config::loader::load_fewshot_config_from_value(&config_root) {
-                            let fewshot = Arc::new(classification::fewshot::FewShotClassifier::new(
-                                config,
-                                routing_map.clone(),
-                                fallback_entry.clone(),
-                            ));
+                        if let Some(config) =
+                            config::loader::load_fewshot_config_from_value(&config_root)
+                        {
+                            let fewshot =
+                                Arc::new(classification::fewshot::FewShotClassifier::new(
+                                    config,
+                                    routing_map.clone(),
+                                    fallback_entry.clone(),
+                                ));
                             info!("Few-shot classifier enabled");
                             fewshot_classifier = Some(fewshot.clone());
                             backends.push(fewshot);
@@ -386,8 +388,10 @@ async fn main() {
                     })
                 }
                 "sqlite" => {
-                    match persistence::sqlite::SqliteBackend::from_path(&persistence_settings.sqlite_path)
-                        .await
+                    match persistence::sqlite::SqliteBackend::from_path(
+                        &persistence_settings.sqlite_path,
+                    )
+                    .await
                     {
                         Ok(backend) => {
                             info!(
@@ -507,6 +511,3 @@ async fn shutdown_signal() {
         }
     }
 }
-
-
-

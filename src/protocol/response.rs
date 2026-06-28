@@ -365,471 +365,470 @@ fn status_to_anthropic_error_type(status: u16) -> &'static str {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-        #[test]
-        fn test_translate_response_maps_cache_tokens_to_openai() {
-            // Anth→OAI non-streaming: Anthropic cache_read/cache_creation must
-            // surface as OpenAI prompt_tokens_details.cached_tokens, and
-            // prompt_tokens must be the FULL prompt (non-cached + cached) so
-            // OpenAI clients see an accurate total.
-            let input = json!({
-                "id": "msg_1",
-                "type": "message",
-                "role": "assistant",
-                "model": "claude",
-                "content": [{"type": "text", "text": "hi"}],
-                "stop_reason": "end_turn",
-                "usage": {
-                    "input_tokens": 100,
-                    "output_tokens": 20,
-                    "cache_read_input_tokens": 80,
-                    "cache_creation_input_tokens": 5
-                }
-            });
-            let result = translate_response(&input).unwrap();
-            let usage = result.get("usage").expect("usage");
-            assert_eq!(
-                usage.get("prompt_tokens").and_then(|v| v.as_u64()),
-                Some(100 + 80 + 5),
-                "prompt_tokens must be the full prompt (non-cached + cache_read + cache_creation)"
-            );
-            assert_eq!(
-                usage.get("completion_tokens").and_then(|v| v.as_u64()),
-                Some(20)
-            );
-            let cached = usage
-                .get("prompt_tokens_details")
-                .and_then(|d| d.get("cached_tokens"))
-                .and_then(|v| v.as_u64());
-            assert_eq!(
-                cached,
-                Some(80),
-                "cached_tokens must map from Anthropic cache_read_input_tokens"
-            );
-        }
-        #[test]
-        fn test_translate_response_no_cache_tokens_still_emits_details() {
-            // When the upstream reports no caching, cached_tokens must be 0 (not
-            // absent), and prompt_tokens falls back to input_tokens.
-            let input = json!({
-                "id": "msg_2",
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "text", "text": "hi"}],
-                "usage": {"input_tokens": 50, "output_tokens": 10}
-            });
-            let result = translate_response(&input).unwrap();
-            let usage = result.get("usage").expect("usage");
-            assert_eq!(
-                usage.get("prompt_tokens").and_then(|v| v.as_u64()),
-                Some(50)
-            );
-            let cached = usage
-                .get("prompt_tokens_details")
-                .and_then(|d| d.get("cached_tokens"))
-                .and_then(|v| v.as_u64());
-            assert_eq!(cached, Some(0));
-        }
-        #[test]
-        fn test_openai_to_anthropic_response_maps_cached_tokens() {
-            // OAI→Anth non-streaming: OpenAI cached_tokens must surface as
-            // Anthropic cache_read_input_tokens, with the invariant
-            // cache_read + cache_creation + input_tokens == prompt_tokens held
-            // (cache_creation = 0 since OpenAI has no creation concept).
-            let input = json!({
-                "id": "chatcmpl-x",
-                "object": "chat.completion",
-                "model": "gpt-4o",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "hi"},
-                    "finish_reason": "stop"
-                }],
-                "usage": {
-                    "prompt_tokens": 130,
-                    "completion_tokens": 8,
-                    "total_tokens": 138,
-                    "prompt_tokens_details": {"cached_tokens": 90}
-                }
-            });
-            let result = openai_to_anthropic_response(&input).unwrap();
-            let usage = result.get("usage").expect("usage");
-            let input_tokens = usage
-                .get("input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let cache_read = usage
-                .get("cache_read_input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let cache_creation = usage
-                .get("cache_creation_input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            assert_eq!(
-                cache_read, 90,
-                "cache_read_input_tokens maps from cached_tokens"
-            );
-            assert_eq!(
-                input_tokens, 40,
-                "input_tokens is the non-cached portion (130 - 90)"
-            );
-            assert_eq!(cache_creation, 0, "OpenAI has no cache-creation concept");
-            assert_eq!(
-                cache_read + cache_creation + input_tokens,
-                130,
-                "Anthropic input invariant must equal OpenAI prompt_tokens"
-            );
-        }
-        #[test]
-        fn test_text_content_blocks() {
-            let input = json!({
-                "id": "msg_1",
-                "type": "message",
-                "role": "assistant",
-                "model": "claude-sonnet-4-20250514",
-                "content": [
-                    {"type": "text", "text": "Hello "},
-                    {"type": "text", "text": "world"}
-                ],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 10, "output_tokens": 5}
-            });
-            let result = translate_response(&input).unwrap();
-            let msg = result.get("choices").unwrap()[0].get("message").unwrap();
-            assert_eq!(msg.get("content").unwrap().as_str().unwrap(), "Hello world");
-        }
-        #[test]
-        fn test_thinking_content() {
-            let input = json!({
-                "id": "msg_1",
-                "type": "message",
-                "role": "assistant",
-                "model": "claude-sonnet-4-20250514",
-                "content": [
-                    {"type": "thinking", "thinking": "Let me think..."},
-                    {"type": "text", "text": "Answer"}
-                ],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 10, "output_tokens": 5}
-            });
-            let result = translate_response(&input).unwrap();
-            let msg = result.get("choices").unwrap()[0].get("message").unwrap();
-            assert_eq!(
-                msg.get("reasoning_content").unwrap().as_str().unwrap(),
-                "Let me think..."
-            );
-            assert_eq!(msg.get("content").unwrap().as_str().unwrap(), "Answer");
-        }
-        #[test]
-        fn test_tool_use_blocks() {
-            let input = json!({
-                "id": "msg_1",
-                "type": "message",
-                "role": "assistant",
-                "model": "claude-sonnet-4-20250514",
-                "content": [
-                    {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "/src"}}
-                ],
-                "stop_reason": "tool_use",
-                "usage": {"input_tokens": 10, "output_tokens": 5}
-            });
-            let result = translate_response(&input).unwrap();
-            let msg = result.get("choices").unwrap()[0].get("message").unwrap();
-            let tool_calls = msg.get("tool_calls").unwrap().as_array().unwrap();
-            assert_eq!(tool_calls.len(), 1);
-            assert_eq!(
-                tool_calls[0].get("id").unwrap().as_str().unwrap(),
-                "toolu_1"
-            );
-            assert_eq!(
-                tool_calls[0]
-                    .get("function")
-                    .unwrap()
-                    .get("name")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "read_file"
-            );
-            let args: serde_json::Value = serde_json::from_str(
-                tool_calls[0]
-                    .get("function")
-                    .unwrap()
-                    .get("arguments")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-            )
-            .unwrap();
-            assert_eq!(args.get("path").unwrap().as_str().unwrap(), "/src");
-        }
-        #[test]
-        fn test_redacted_thinking_omitted() {
-            let input = json!({
-                "id": "msg_1",
-                "type": "message",
-                "role": "assistant",
-                "model": "claude-sonnet-4-20250514",
-                "content": [
-                    {"type": "redacted_thinking"},
-                    {"type": "text", "text": "Done"}
-                ],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 10, "output_tokens": 5}
-            });
-            let result = translate_response(&input).unwrap();
-            let msg = result.get("choices").unwrap()[0].get("message").unwrap();
-            assert!(msg.get("reasoning_content").is_none());
-            assert_eq!(msg.get("content").unwrap().as_str().unwrap(), "Done");
-        }
-        #[test]
-        fn test_stop_reason_mapping() {
-            fn check(anthropic: &str, expected_openai: &str) {
-                let input = json!({
-                    "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
-                    "content": [{"type": "text", "text": "x"}],
-                    "stop_reason": anthropic,
-                    "usage": {"input_tokens": 0, "output_tokens": 0}
-                });
-                let result = translate_response(&input).unwrap();
-                let fr = result.get("choices").unwrap()[0]
-                    .get("finish_reason")
-                    .unwrap()
-                    .as_str()
-                    .unwrap();
-                assert_eq!(
-                    fr, expected_openai,
-                    "stop_reason {anthropic} → {expected_openai}"
-                );
+    #[test]
+    fn test_translate_response_maps_cache_tokens_to_openai() {
+        // Anth→OAI non-streaming: Anthropic cache_read/cache_creation must
+        // surface as OpenAI prompt_tokens_details.cached_tokens, and
+        // prompt_tokens must be the FULL prompt (non-cached + cached) so
+        // OpenAI clients see an accurate total.
+        let input = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude",
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 80,
+                "cache_creation_input_tokens": 5
             }
-            check("end_turn", "stop");
-            check("max_tokens", "length");
-            check("tool_use", "tool_calls");
-            check("stop_sequence", "stop");
-        }
-        #[test]
-        fn test_usage_mapping() {
+        });
+        let result = translate_response(&input).unwrap();
+        let usage = result.get("usage").expect("usage");
+        assert_eq!(
+            usage.get("prompt_tokens").and_then(|v| v.as_u64()),
+            Some(100 + 80 + 5),
+            "prompt_tokens must be the full prompt (non-cached + cache_read + cache_creation)"
+        );
+        assert_eq!(
+            usage.get("completion_tokens").and_then(|v| v.as_u64()),
+            Some(20)
+        );
+        let cached = usage
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|v| v.as_u64());
+        assert_eq!(
+            cached,
+            Some(80),
+            "cached_tokens must map from Anthropic cache_read_input_tokens"
+        );
+    }
+    #[test]
+    fn test_translate_response_no_cache_tokens_still_emits_details() {
+        // When the upstream reports no caching, cached_tokens must be 0 (not
+        // absent), and prompt_tokens falls back to input_tokens.
+        let input = json!({
+            "id": "msg_2",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {"input_tokens": 50, "output_tokens": 10}
+        });
+        let result = translate_response(&input).unwrap();
+        let usage = result.get("usage").expect("usage");
+        assert_eq!(
+            usage.get("prompt_tokens").and_then(|v| v.as_u64()),
+            Some(50)
+        );
+        let cached = usage
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|v| v.as_u64());
+        assert_eq!(cached, Some(0));
+    }
+    #[test]
+    fn test_openai_to_anthropic_response_maps_cached_tokens() {
+        // OAI→Anth non-streaming: OpenAI cached_tokens must surface as
+        // Anthropic cache_read_input_tokens, with the invariant
+        // cache_read + cache_creation + input_tokens == prompt_tokens held
+        // (cache_creation = 0 since OpenAI has no creation concept).
+        let input = json!({
+            "id": "chatcmpl-x",
+            "object": "chat.completion",
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 130,
+                "completion_tokens": 8,
+                "total_tokens": 138,
+                "prompt_tokens_details": {"cached_tokens": 90}
+            }
+        });
+        let result = openai_to_anthropic_response(&input).unwrap();
+        let usage = result.get("usage").expect("usage");
+        let input_tokens = usage
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let cache_read = usage
+            .get("cache_read_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let cache_creation = usage
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert_eq!(
+            cache_read, 90,
+            "cache_read_input_tokens maps from cached_tokens"
+        );
+        assert_eq!(
+            input_tokens, 40,
+            "input_tokens is the non-cached portion (130 - 90)"
+        );
+        assert_eq!(cache_creation, 0, "OpenAI has no cache-creation concept");
+        assert_eq!(
+            cache_read + cache_creation + input_tokens,
+            130,
+            "Anthropic input invariant must equal OpenAI prompt_tokens"
+        );
+    }
+    #[test]
+    fn test_text_content_blocks() {
+        let input = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-20250514",
+            "content": [
+                {"type": "text", "text": "Hello "},
+                {"type": "text", "text": "world"}
+            ],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+        let result = translate_response(&input).unwrap();
+        let msg = result.get("choices").unwrap()[0].get("message").unwrap();
+        assert_eq!(msg.get("content").unwrap().as_str().unwrap(), "Hello world");
+    }
+    #[test]
+    fn test_thinking_content() {
+        let input = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-20250514",
+            "content": [
+                {"type": "thinking", "thinking": "Let me think..."},
+                {"type": "text", "text": "Answer"}
+            ],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+        let result = translate_response(&input).unwrap();
+        let msg = result.get("choices").unwrap()[0].get("message").unwrap();
+        assert_eq!(
+            msg.get("reasoning_content").unwrap().as_str().unwrap(),
+            "Let me think..."
+        );
+        assert_eq!(msg.get("content").unwrap().as_str().unwrap(), "Answer");
+    }
+    #[test]
+    fn test_tool_use_blocks() {
+        let input = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-20250514",
+            "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "/src"}}
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+        let result = translate_response(&input).unwrap();
+        let msg = result.get("choices").unwrap()[0].get("message").unwrap();
+        let tool_calls = msg.get("tool_calls").unwrap().as_array().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].get("id").unwrap().as_str().unwrap(),
+            "toolu_1"
+        );
+        assert_eq!(
+            tool_calls[0]
+                .get("function")
+                .unwrap()
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "read_file"
+        );
+        let args: serde_json::Value = serde_json::from_str(
+            tool_calls[0]
+                .get("function")
+                .unwrap()
+                .get("arguments")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args.get("path").unwrap().as_str().unwrap(), "/src");
+    }
+    #[test]
+    fn test_redacted_thinking_omitted() {
+        let input = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-20250514",
+            "content": [
+                {"type": "redacted_thinking"},
+                {"type": "text", "text": "Done"}
+            ],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+        let result = translate_response(&input).unwrap();
+        let msg = result.get("choices").unwrap()[0].get("message").unwrap();
+        assert!(msg.get("reasoning_content").is_none());
+        assert_eq!(msg.get("content").unwrap().as_str().unwrap(), "Done");
+    }
+    #[test]
+    fn test_stop_reason_mapping() {
+        fn check(anthropic: &str, expected_openai: &str) {
             let input = json!({
                 "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
                 "content": [{"type": "text", "text": "x"}],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 100, "output_tokens": 50}
+                "stop_reason": anthropic,
+                "usage": {"input_tokens": 0, "output_tokens": 0}
             });
             let result = translate_response(&input).unwrap();
-            let usage = result.get("usage").unwrap();
-            assert_eq!(usage.get("prompt_tokens").unwrap().as_u64().unwrap(), 100);
+            let fr = result.get("choices").unwrap()[0]
+                .get("finish_reason")
+                .unwrap()
+                .as_str()
+                .unwrap();
             assert_eq!(
-                usage.get("completion_tokens").unwrap().as_u64().unwrap(),
-                50
-            );
-            assert_eq!(usage.get("total_tokens").unwrap().as_u64().unwrap(), 150);
-        }
-        #[test]
-        fn test_error_translation() {
-            let input =
-                r#"{"type":"error","error":{"type":"overloaded_error","message":"Too many requests"}}"#;
-            let result = translate_error(input, 529);
-            let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-            assert_eq!(
-                parsed
-                    .get("error")
-                    .unwrap()
-                    .get("message")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "Too many requests"
-            );
-            assert_eq!(
-                parsed
-                    .get("error")
-                    .unwrap()
-                    .get("type")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "overloaded_error"
-            );
-            assert_eq!(
-                parsed
-                    .get("error")
-                    .unwrap()
-                    .get("code")
-                    .unwrap()
-                    .as_u64()
-                    .unwrap(),
-                529
+                fr, expected_openai,
+                "stop_reason {anthropic} → {expected_openai}"
             );
         }
-        #[test]
-        fn test_error_translation_malformed_body() {
-            let result = translate_error("not json", 500);
-            let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-            assert_eq!(
-                parsed
-                    .get("error")
-                    .unwrap()
-                    .get("message")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "not json"
-            );
-        }
-        #[test]
-        fn test_a2o_response_text() {
-            let input = json!({
-                "id": "chatcmpl-abc",
-                "object": "chat.completion",
-                "model": "gpt-4o",
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-            });
-            let result = openai_to_anthropic_response(&input).unwrap();
-            assert_eq!(result.get("id").unwrap().as_str().unwrap(), "abc");
-            assert_eq!(result.get("type").unwrap().as_str().unwrap(), "message");
-            let content = result.get("content").unwrap().as_array().unwrap();
-            assert_eq!(content[0].get("type").unwrap().as_str().unwrap(), "text");
-            assert_eq!(content[0].get("text").unwrap().as_str().unwrap(), "Hello");
-            assert_eq!(
-                result.get("stop_reason").unwrap().as_str().unwrap(),
-                "end_turn"
-            );
-        }
-        #[test]
-        fn test_a2o_response_with_tool_calls() {
-            let input = json!({
-                "id": "chatcmpl-abc",
-                "object": "chat.completion",
-                "model": "gpt-4o",
-                "choices": [{"index": 0, "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"/x\"}"}}]
-                }, "finish_reason": "tool_calls"}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-            });
-            let result = openai_to_anthropic_response(&input).unwrap();
-            let content = result.get("content").unwrap().as_array().unwrap();
-            assert_eq!(
-                content[0].get("type").unwrap().as_str().unwrap(),
-                "tool_use"
-            );
-            assert_eq!(content[0].get("id").unwrap().as_str().unwrap(), "call_1");
-            assert_eq!(
-                content[0]
-                    .get("input")
-                    .unwrap()
-                    .get("path")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "/x"
-            );
-            assert_eq!(
-                result.get("stop_reason").unwrap().as_str().unwrap(),
-                "tool_use"
-            );
-        }
-        #[test]
-        fn test_a2o_response_with_reasoning() {
-            let input = json!({
-                "id": "chatcmpl-abc",
-                "object": "chat.completion",
-                "model": "deepseek-r1",
-                "choices": [{"index": 0, "message": {
-                    "role": "assistant", "content": "Answer", "reasoning_content": "Thinking..."
-                }, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60}
-            });
-            let result = openai_to_anthropic_response(&input).unwrap();
-            let content = result.get("content").unwrap().as_array().unwrap();
-            assert_eq!(
-                content[0].get("type").unwrap().as_str().unwrap(),
-                "thinking"
-            );
-            assert_eq!(
-                content[0].get("thinking").unwrap().as_str().unwrap(),
-                "Thinking..."
-            );
-            assert_eq!(content[1].get("type").unwrap().as_str().unwrap(), "text");
-            assert_eq!(content[1].get("text").unwrap().as_str().unwrap(), "Answer");
-        }
-        #[test]
-        fn test_a2o_response_finish_reason_mapping() {
-            fn check(fr: &str, expected: &str) {
-                let input = json!({
-                    "id": "x", "object": "chat.completion", "model": "m",
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"}, "finish_reason": fr}],
-                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-                });
-                let r = openai_to_anthropic_response(&input).unwrap();
-                assert_eq!(
-                    r.get("stop_reason").unwrap().as_str().unwrap(),
-                    expected,
-                    "{fr} → {expected}"
-                );
-            }
-            check("stop", "end_turn");
-            check("length", "max_tokens");
-            check("tool_calls", "tool_use");
-            check("function_call", "tool_use");
-            check("content_filter", "end_turn");
-        }
-        #[test]
-        fn test_a2o_response_usage_mapping() {
+        check("end_turn", "stop");
+        check("max_tokens", "length");
+        check("tool_use", "tool_calls");
+        check("stop_sequence", "stop");
+    }
+    #[test]
+    fn test_usage_mapping() {
+        let input = json!({
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+            "content": [{"type": "text", "text": "x"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        });
+        let result = translate_response(&input).unwrap();
+        let usage = result.get("usage").unwrap();
+        assert_eq!(usage.get("prompt_tokens").unwrap().as_u64().unwrap(), 100);
+        assert_eq!(
+            usage.get("completion_tokens").unwrap().as_u64().unwrap(),
+            50
+        );
+        assert_eq!(usage.get("total_tokens").unwrap().as_u64().unwrap(), 150);
+    }
+    #[test]
+    fn test_error_translation() {
+        let input =
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Too many requests"}}"#;
+        let result = translate_error(input, 529);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed
+                .get("error")
+                .unwrap()
+                .get("message")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "Too many requests"
+        );
+        assert_eq!(
+            parsed
+                .get("error")
+                .unwrap()
+                .get("type")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "overloaded_error"
+        );
+        assert_eq!(
+            parsed
+                .get("error")
+                .unwrap()
+                .get("code")
+                .unwrap()
+                .as_u64()
+                .unwrap(),
+            529
+        );
+    }
+    #[test]
+    fn test_error_translation_malformed_body() {
+        let result = translate_error("not json", 500);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed
+                .get("error")
+                .unwrap()
+                .get("message")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "not json"
+        );
+    }
+    #[test]
+    fn test_a2o_response_text() {
+        let input = json!({
+            "id": "chatcmpl-abc",
+            "object": "chat.completion",
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        });
+        let result = openai_to_anthropic_response(&input).unwrap();
+        assert_eq!(result.get("id").unwrap().as_str().unwrap(), "abc");
+        assert_eq!(result.get("type").unwrap().as_str().unwrap(), "message");
+        let content = result.get("content").unwrap().as_array().unwrap();
+        assert_eq!(content[0].get("type").unwrap().as_str().unwrap(), "text");
+        assert_eq!(content[0].get("text").unwrap().as_str().unwrap(), "Hello");
+        assert_eq!(
+            result.get("stop_reason").unwrap().as_str().unwrap(),
+            "end_turn"
+        );
+    }
+    #[test]
+    fn test_a2o_response_with_tool_calls() {
+        let input = json!({
+            "id": "chatcmpl-abc",
+            "object": "chat.completion",
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"/x\"}"}}]
+            }, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        });
+        let result = openai_to_anthropic_response(&input).unwrap();
+        let content = result.get("content").unwrap().as_array().unwrap();
+        assert_eq!(
+            content[0].get("type").unwrap().as_str().unwrap(),
+            "tool_use"
+        );
+        assert_eq!(content[0].get("id").unwrap().as_str().unwrap(), "call_1");
+        assert_eq!(
+            content[0]
+                .get("input")
+                .unwrap()
+                .get("path")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "/x"
+        );
+        assert_eq!(
+            result.get("stop_reason").unwrap().as_str().unwrap(),
+            "tool_use"
+        );
+    }
+    #[test]
+    fn test_a2o_response_with_reasoning() {
+        let input = json!({
+            "id": "chatcmpl-abc",
+            "object": "chat.completion",
+            "model": "deepseek-r1",
+            "choices": [{"index": 0, "message": {
+                "role": "assistant", "content": "Answer", "reasoning_content": "Thinking..."
+            }, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60}
+        });
+        let result = openai_to_anthropic_response(&input).unwrap();
+        let content = result.get("content").unwrap().as_array().unwrap();
+        assert_eq!(
+            content[0].get("type").unwrap().as_str().unwrap(),
+            "thinking"
+        );
+        assert_eq!(
+            content[0].get("thinking").unwrap().as_str().unwrap(),
+            "Thinking..."
+        );
+        assert_eq!(content[1].get("type").unwrap().as_str().unwrap(), "text");
+        assert_eq!(content[1].get("text").unwrap().as_str().unwrap(), "Answer");
+    }
+    #[test]
+    fn test_a2o_response_finish_reason_mapping() {
+        fn check(fr: &str, expected: &str) {
             let input = json!({
                 "id": "x", "object": "chat.completion", "model": "m",
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"}, "finish_reason": fr}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             });
             let r = openai_to_anthropic_response(&input).unwrap();
-            let usage = r.get("usage").unwrap();
-            assert_eq!(usage.get("input_tokens").unwrap().as_u64().unwrap(), 100);
-            assert_eq!(usage.get("output_tokens").unwrap().as_u64().unwrap(), 50);
-            assert!(usage.get("total_tokens").is_none());
-        }
-        #[test]
-        fn test_a2o_error_valid_json() {
-            let input = r#"{"error":{"message":"Rate limit exceeded","type":"rate_limit","code":"rate_limit_exceeded"}}"#;
-            let result = openai_to_anthropic_error(input, 429);
-            let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-            assert_eq!(parsed.get("type").unwrap().as_str().unwrap(), "error");
-            let err = parsed.get("error").unwrap();
             assert_eq!(
-                err.get("message").unwrap().as_str().unwrap(),
-                "Rate limit exceeded"
-            );
-            assert_eq!(
-                err.get("type").unwrap().as_str().unwrap(),
-                "rate_limit_error"
+                r.get("stop_reason").unwrap().as_str().unwrap(),
+                expected,
+                "{fr} → {expected}"
             );
         }
-        #[test]
-        fn test_a2o_error_malformed() {
-            let result = openai_to_anthropic_error("not json", 500);
-            let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-            let err = parsed.get("error").unwrap();
-            assert_eq!(err.get("message").unwrap().as_str().unwrap(), "not json");
-            assert_eq!(err.get("type").unwrap().as_str().unwrap(), "api_error");
-        }
-        #[test]
-        fn test_a2o_error_status_mapping() {
-            let result = openai_to_anthropic_error(r#"{"error":{"message":"x"}}"#, 401);
-            let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-            assert_eq!(
-                parsed
-                    .get("error")
-                    .unwrap()
-                    .get("type")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "authentication_error"
-            );
-        }
+        check("stop", "end_turn");
+        check("length", "max_tokens");
+        check("tool_calls", "tool_use");
+        check("function_call", "tool_use");
+        check("content_filter", "end_turn");
+    }
+    #[test]
+    fn test_a2o_response_usage_mapping() {
+        let input = json!({
+            "id": "x", "object": "chat.completion", "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
+        });
+        let r = openai_to_anthropic_response(&input).unwrap();
+        let usage = r.get("usage").unwrap();
+        assert_eq!(usage.get("input_tokens").unwrap().as_u64().unwrap(), 100);
+        assert_eq!(usage.get("output_tokens").unwrap().as_u64().unwrap(), 50);
+        assert!(usage.get("total_tokens").is_none());
+    }
+    #[test]
+    fn test_a2o_error_valid_json() {
+        let input = r#"{"error":{"message":"Rate limit exceeded","type":"rate_limit","code":"rate_limit_exceeded"}}"#;
+        let result = openai_to_anthropic_error(input, 429);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed.get("type").unwrap().as_str().unwrap(), "error");
+        let err = parsed.get("error").unwrap();
+        assert_eq!(
+            err.get("message").unwrap().as_str().unwrap(),
+            "Rate limit exceeded"
+        );
+        assert_eq!(
+            err.get("type").unwrap().as_str().unwrap(),
+            "rate_limit_error"
+        );
+    }
+    #[test]
+    fn test_a2o_error_malformed() {
+        let result = openai_to_anthropic_error("not json", 500);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let err = parsed.get("error").unwrap();
+        assert_eq!(err.get("message").unwrap().as_str().unwrap(), "not json");
+        assert_eq!(err.get("type").unwrap().as_str().unwrap(), "api_error");
+    }
+    #[test]
+    fn test_a2o_error_status_mapping() {
+        let result = openai_to_anthropic_error(r#"{"error":{"message":"x"}}"#, 401);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed
+                .get("error")
+                .unwrap()
+                .get("type")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "authentication_error"
+        );
+    }
 }

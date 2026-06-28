@@ -7,13 +7,15 @@ pub mod loader;
 pub mod routing;
 pub mod types;
 
+pub(crate) use crate::classification::types::{
+    CategoryConfig, NegativePatternConfig, PatternEntry,
+};
 pub(crate) use routing::RouteEntry;
 pub(crate) use types::{
-    AuthProviderConfig, CacheConfig, ClassifiersConfig, CorsConfig, DashboardConfig, DatabaseConfig,
-    FewShotConfig, HttpConfig, LlmClassifierConfig, PersistenceSettings, RegexClassifierConfig,
-    ServerConfig,
+    AuthProviderConfig, CacheConfig, ClassifiersConfig, CorsConfig, DashboardConfig,
+    DatabaseConfig, FewShotConfig, HttpConfig, LlmClassifierConfig, PersistenceSettings,
+    RegexClassifierConfig, ServerConfig,
 };
-pub(crate) use crate::classification::types::{CategoryConfig, NegativePatternConfig, PatternEntry};
 
 /// Top-level configuration root that mirrors every section in `config.toml` (or
 /// `config.yaml`). Loaded once at startup by [`load_config_from_path`] and then
@@ -92,7 +94,10 @@ pub(crate) enum ConfigFormat {
 /// Infer the config file format from the file extension.
 /// `.yaml` / `.yml` → [`ConfigFormat::Yaml`]; anything else → [`ConfigFormat::Toml`].
 fn detect_format(path: &str) -> ConfigFormat {
-    match std::path::Path::new(path).extension().and_then(|s| s.to_str()) {
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+    {
         Some("yaml" | "yml") => ConfigFormat::Yaml,
         _ => ConfigFormat::Toml,
     }

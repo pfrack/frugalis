@@ -696,638 +696,637 @@ fn convert_anthropic_assistant_message(msg: &serde_json::Value) -> serde_json::V
     serde_json::Value::Object(result)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn test_basic_text_request() {
-            let input = json!({
-                "model": "gpt-4",
-                "messages": [
-                    {"role": "system", "content": "You are helpful."},
-                    {"role": "user", "content": "Hello"}
-                ]
-            });
-            let result = translate_request(&input).unwrap();
-            assert_eq!(
-                result.get("system").unwrap().as_str().unwrap(),
-                "You are helpful."
-            );
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            assert_eq!(msgs.len(), 1);
-            assert_eq!(msgs[0].get("role").unwrap().as_str().unwrap(), "user");
-            let content = msgs[0].get("content").unwrap().as_array().unwrap();
-            assert_eq!(content[0].get("text").unwrap().as_str().unwrap(), "Hello");
-        }
+        let input = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+        let result = translate_request(&input).unwrap();
+        assert_eq!(
+            result.get("system").unwrap().as_str().unwrap(),
+            "You are helpful."
+        );
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].get("role").unwrap().as_str().unwrap(), "user");
+        let content = msgs[0].get("content").unwrap().as_array().unwrap();
+        assert_eq!(content[0].get("text").unwrap().as_str().unwrap(), "Hello");
+    }
     #[test]
     fn test_translate_request_inserts_top_level_cache_control() {
-            // OpenAI client → Anthropic upstream: the translator must auto-insert
-            // a top-level ephemeral cache_control so Anthropic's automatic prompt
-            // caching activates with no per-block surgery and no beta header.
-            let input = json!({
-                "model": "gpt-4",
-                "messages": [{"role": "user", "content": "Hello"}]
-            });
-            let result = translate_request(&input).unwrap();
-            let cc = result
-                .get("cache_control")
-                .expect("cache_control must be inserted");
-            assert_eq!(
-                cc.get("type").and_then(|v| v.as_str()),
-                Some("ephemeral"),
-                "automatic caching uses an ephemeral top-level breakpoint"
-            );
-        }
+        // OpenAI client → Anthropic upstream: the translator must auto-insert
+        // a top-level ephemeral cache_control so Anthropic's automatic prompt
+        // caching activates with no per-block surgery and no beta header.
+        let input = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let result = translate_request(&input).unwrap();
+        let cc = result
+            .get("cache_control")
+            .expect("cache_control must be inserted");
+        assert_eq!(
+            cc.get("type").and_then(|v| v.as_str()),
+            Some("ephemeral"),
+            "automatic caching uses an ephemeral top-level breakpoint"
+        );
+    }
     #[test]
     fn test_anthropic_to_openai_request_strips_cache_control_and_signals() {
-            // Anthropic body WITH a cache_control breakpoint on a message block.
-            // The OpenAI body must NOT carry cache_control (no native equivalent),
-            // and the signal must report had_cache_control = true so logging can
-            // account for the requested cache.
-            let input = json!({
-                "model": "claude-3.5",
-                "max_tokens": 100,
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "cached turn", "cache_control": {"type": "ephemeral"}}
-                    ]
-                }]
-            });
-            let (translated, had_cc) = anthropic_to_openai_request_with_cache_signal(&input).unwrap();
-            assert!(
-                had_cc,
-                "had_cache_control must be true when a block carries it"
-            );
-            assert!(
-                translated.get("cache_control").is_none(),
-                "translated OpenAI body must not carry cache_control, got: {translated}"
-            );
-            // The translated body should still carry the message text.
-            let msgs = translated.get("messages").unwrap().as_array().unwrap();
-            assert!(!msgs.is_empty());
-        }
+        // Anthropic body WITH a cache_control breakpoint on a message block.
+        // The OpenAI body must NOT carry cache_control (no native equivalent),
+        // and the signal must report had_cache_control = true so logging can
+        // account for the requested cache.
+        let input = json!({
+            "model": "claude-3.5",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "cached turn", "cache_control": {"type": "ephemeral"}}
+                ]
+            }]
+        });
+        let (translated, had_cc) = anthropic_to_openai_request_with_cache_signal(&input).unwrap();
+        assert!(
+            had_cc,
+            "had_cache_control must be true when a block carries it"
+        );
+        assert!(
+            translated.get("cache_control").is_none(),
+            "translated OpenAI body must not carry cache_control, got: {translated}"
+        );
+        // The translated body should still carry the message text.
+        let msgs = translated.get("messages").unwrap().as_array().unwrap();
+        assert!(!msgs.is_empty());
+    }
     #[test]
     fn test_anthropic_to_openai_request_no_cache_control_signal_when_absent() {
-            // No breakpoint anywhere -> had_cache_control = false.
-            let input = json!({
-                "model": "claude-3.5",
-                "max_tokens": 100,
-                "messages": [{"role": "user", "content": "plain turn"}]
-            });
-            let (_translated, had_cc) = anthropic_to_openai_request_with_cache_signal(&input).unwrap();
-            assert!(
-                !had_cc,
-                "had_cache_control must be false when no breakpoint is present"
-            );
-        }
+        // No breakpoint anywhere -> had_cache_control = false.
+        let input = json!({
+            "model": "claude-3.5",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "plain turn"}]
+        });
+        let (_translated, had_cc) = anthropic_to_openai_request_with_cache_signal(&input).unwrap();
+        assert!(
+            !had_cc,
+            "had_cache_control must be false when no breakpoint is present"
+        );
+    }
 
-        #[test]
-        fn test_multiple_system_messages_joined() {
-            let input = json!({
-                "model": "gpt-4",
-                "messages": [
-                    {"role": "system", "content": "Part 1"},
-                    {"role": "system", "content": "Part 2"},
-                    {"role": "user", "content": "Hi"}
-                ]
-            });
-            let result = translate_request(&input).unwrap();
-            assert_eq!(
-                result.get("system").unwrap().as_str().unwrap(),
-                "Part 1\n\nPart 2"
-            );
-        }
+    #[test]
+    fn test_multiple_system_messages_joined() {
+        let input = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "system", "content": "Part 1"},
+                {"role": "system", "content": "Part 2"},
+                {"role": "user", "content": "Hi"}
+            ]
+        });
+        let result = translate_request(&input).unwrap();
+        assert_eq!(
+            result.get("system").unwrap().as_str().unwrap(),
+            "Part 1\n\nPart 2"
+        );
+    }
 
-        #[test]
-        fn test_user_image_url() {
-            let input = json!({
-                "model": "gpt-4",
-                "messages": [
-                    {"role": "user", "content": [
-                        {"type": "text", "text": "Look:"},
-                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc123"}}
-                    ]}
-                ]
-            });
-            let result = translate_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            let content = msgs[0].get("content").unwrap().as_array().unwrap();
-            assert_eq!(content.len(), 2);
-            assert_eq!(content[1].get("type").unwrap().as_str().unwrap(), "image");
-            assert_eq!(
-                content[1]
-                    .get("source")
-                    .unwrap()
-                    .get("media_type")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "image/png"
-            );
-            assert_eq!(
-                content[1]
-                    .get("source")
-                    .unwrap()
-                    .get("data")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "abc123"
-            );
-        }
-
-        #[test]
-        fn test_assistant_with_tool_calls() {
-            let input = json!({
-                "model": "gpt-4",
-                "messages": [
-                    {"role": "assistant", "content": null, "tool_calls": [
-                        {"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"/src\"}"}}
-                    ]}
-                ]
-            });
-            let result = translate_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            let content = msgs[0].get("content").unwrap().as_array().unwrap();
-            assert_eq!(content.len(), 1);
-            assert_eq!(
-                content[0].get("type").unwrap().as_str().unwrap(),
-                "tool_use"
-            );
-            assert_eq!(content[0].get("id").unwrap().as_str().unwrap(), "call_1");
-            assert_eq!(
-                content[0].get("name").unwrap().as_str().unwrap(),
-                "read_file"
-            );
-            assert_eq!(
-                content[0]
-                    .get("input")
-                    .unwrap()
-                    .get("path")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "/src"
-            );
-        }
-
-        #[test]
-        fn test_assistant_with_reasoning_content() {
-            let input = json!({
-                "model": "gpt-4",
-                "messages": [
-                    {"role": "assistant", "content": "Answer", "reasoning_content": "Thinking..."}
-                ]
-            });
-            let result = translate_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            let content = msgs[0].get("content").unwrap().as_array().unwrap();
-            assert_eq!(content.len(), 2);
-            assert_eq!(
-                content[0].get("type").unwrap().as_str().unwrap(),
-                "thinking"
-            );
-            assert_eq!(
-                content[0].get("thinking").unwrap().as_str().unwrap(),
-                "Thinking..."
-            );
-            assert_eq!(content[1].get("type").unwrap().as_str().unwrap(), "text");
-            assert_eq!(content[1].get("text").unwrap().as_str().unwrap(), "Answer");
-        }
-
-        #[test]
-        fn test_consecutive_tool_messages_merged() {
-            let input = json!({
-                "model": "gpt-4",
-                "messages": [
-                    {"role": "user", "content": "Hi"},
-                    {"role": "assistant", "content": null, "tool_calls": [
-                        {"id": "call_1", "type": "function", "function": {"name": "a", "arguments": "{}"}},
-                        {"id": "call_2", "type": "function", "function": {"name": "b", "arguments": "{}"}}
-                    ]},
-                    {"role": "tool", "tool_call_id": "call_1", "content": "result1"},
-                    {"role": "tool", "tool_call_id": "call_2", "content": "result2"}
-                ]
-            });
-            let result = translate_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            // Should be: user, assistant, user (merged tool results)
-            assert_eq!(msgs.len(), 3);
-            let last = &msgs[2];
-            assert_eq!(last.get("role").unwrap().as_str().unwrap(), "user");
-            let content = last.get("content").unwrap().as_array().unwrap();
-            assert_eq!(content.len(), 2);
-            assert_eq!(
-                content[0].get("type").unwrap().as_str().unwrap(),
-                "tool_result"
-            );
-            assert_eq!(
-                content[1].get("type").unwrap().as_str().unwrap(),
-                "tool_result"
-            );
-        }
-
-        #[test]
-        fn test_tool_definitions() {
-            let input = json!({
-                "model": "gpt-4",
-                "messages": [{"role": "user", "content": "Hi"}],
-                "tools": [{
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "description": "Get weather",
-                        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
-                    }
-                }]
-            });
-            let result = translate_request(&input).unwrap();
-            let tools = result.get("tools").unwrap().as_array().unwrap();
-            assert_eq!(tools.len(), 1);
-            assert_eq!(
-                tools[0].get("name").unwrap().as_str().unwrap(),
-                "get_weather"
-            );
-            assert_eq!(
-                tools[0].get("description").unwrap().as_str().unwrap(),
-                "Get weather"
-            );
-            assert!(tools[0].get("input_schema").is_some());
-        }
-
-        #[test]
-        fn test_tool_choice_mapping() {
-            // auto
-            let input = json!({"model": "gpt-4", "messages": [{"role":"user","content":"Hi"}], "tool_choice": "auto"});
-            let result = translate_request(&input).unwrap();
-            assert_eq!(
-                result
-                    .get("tool_choice")
-                    .unwrap()
-                    .get("type")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "auto"
-            );
-
-            // required → any
-            let input = json!({"model": "gpt-4", "messages": [{"role":"user","content":"Hi"}], "tool_choice": "required"});
-            let result = translate_request(&input).unwrap();
-            assert_eq!(
-                result
-                    .get("tool_choice")
-                    .unwrap()
-                    .get("type")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "any"
-            );
-
-            // none → omitted
-            let input = json!({"model": "gpt-4", "messages": [{"role":"user","content":"Hi"}], "tool_choice": "none"});
-            let result = translate_request(&input).unwrap();
-            assert!(result.get("tool_choice").is_none());
-
-            // specific function
-            let input = json!({"model": "gpt-4", "messages": [{"role":"user","content":"Hi"}], "tool_choice": {"type": "function", "function": {"name": "my_fn"}}});
-            let result = translate_request(&input).unwrap();
-            let tc = result.get("tool_choice").unwrap();
-            assert_eq!(tc.get("type").unwrap().as_str().unwrap(), "tool");
-            assert_eq!(tc.get("name").unwrap().as_str().unwrap(), "my_fn");
-        }
-
-        #[test]
-        fn test_max_tokens_default() {
-            let input = json!({"model": "gpt-4", "messages": [{"role":"user","content":"Hi"}]});
-            let result = translate_request(&input).unwrap();
-            assert_eq!(result.get("max_tokens").unwrap().as_u64().unwrap(), 4096);
-        }
-
-        #[test]
-        fn test_fields_dropped() {
-            let input = json!({
-                "model": "gpt-4",
-                "messages": [{"role":"user","content":"Hi"}],
-                "n": 2,
-                "frequency_penalty": 0.5,
-                "presence_penalty": 0.5,
-                "logprobs": true,
-                "logit_bias": {"1": 100},
-                "seed": 42,
-                "response_format": {"type": "json_object"},
-                "stream_options": {"include_usage": true}
-            });
-            let result = translate_request(&input).unwrap();
-            assert!(result.get("n").is_none());
-            assert!(result.get("frequency_penalty").is_none());
-            assert!(result.get("presence_penalty").is_none());
-            assert!(result.get("logprobs").is_none());
-            assert!(result.get("logit_bias").is_none());
-            assert!(result.get("seed").is_none());
-            assert!(result.get("response_format").is_none());
-            assert!(result.get("stream_options").is_none());
-        }
-
-        // ── Response translation tests ─────────────────────────────────────
-
-        #[test]
-        fn test_malformed_tool_arguments() {
-            let input = json!({
-                "model": "gpt-4",
-                "messages": [
-                    {"role": "assistant", "content": null, "tool_calls": [
-                        {"id": "call_1", "type": "function", "function": {"name": "fn", "arguments": "not-json"}}
-                    ]}
-                ]
-            });
-            let result = translate_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            let content = msgs[0].get("content").unwrap().as_array().unwrap();
-            let input_val = content[0].get("input").unwrap();
-            assert_eq!(input_val.get("raw").unwrap().as_str().unwrap(), "not-json");
-        }
-        #[test]
-        fn test_a2o_system_string() {
-            let input = json!({
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 1024,
-                "system": "You are helpful.",
-                "messages": [{"role": "user", "content": "Hi"}]
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            assert_eq!(msgs[0].get("role").unwrap().as_str().unwrap(), "system");
-            assert_eq!(
-                msgs[0].get("content").unwrap().as_str().unwrap(),
-                "You are helpful."
-            );
-        }
-        #[test]
-        fn test_a2o_system_block_array() {
-            let input = json!({
-                "model": "m",
-                "max_tokens": 1024,
-                "system": [{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2"}],
-                "messages": [{"role": "user", "content": "Hi"}]
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            assert_eq!(
-                msgs[0].get("content").unwrap().as_str().unwrap(),
-                "Part 1\n\nPart 2"
-            );
-        }
-        #[test]
-        fn test_a2o_user_text_string() {
-            let input = json!({
-                "model": "m", "max_tokens": 1024,
-                "messages": [{"role": "user", "content": "Hello"}]
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "Hello");
-        }
-        #[test]
-        fn test_a2o_user_text_blocks_joined() {
-            let input = json!({
-                "model": "m", "max_tokens": 1024,
-                "messages": [{"role": "user", "content": [
-                    {"type": "text", "text": "A"},
-                    {"type": "text", "text": "B"}
-                ]}]
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "A\n\nB");
-        }
-        #[test]
-        fn test_a2o_user_image_source() {
-            let input = json!({
-                "model": "m", "max_tokens": 1024,
-                "messages": [{"role": "user", "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc123"}}
-                ]}]
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            let content = msgs[0].get("content").unwrap().as_array().unwrap();
-            assert_eq!(
-                content[0].get("type").unwrap().as_str().unwrap(),
-                "image_url"
-            );
-            assert_eq!(
-                content[0]
-                    .get("image_url")
-                    .unwrap()
-                    .get("url")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "data:image/png;base64,abc123"
-            );
-        }
-        #[test]
-        fn test_a2o_user_tool_result() {
-            let input = json!({
-                "model": "m", "max_tokens": 1024,
-                "messages": [{"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "result data"}
-                ]}]
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            assert_eq!(msgs[0].get("role").unwrap().as_str().unwrap(), "tool");
-            assert_eq!(
-                msgs[0].get("tool_call_id").unwrap().as_str().unwrap(),
-                "toolu_1"
-            );
-            assert_eq!(
-                msgs[0].get("content").unwrap().as_str().unwrap(),
-                "result data"
-            );
-        }
-        #[test]
-        fn test_a2o_assistant_text() {
-            let input = json!({
-                "model": "m", "max_tokens": 1024,
-                "messages": [{"role": "assistant", "content": [
-                    {"type": "text", "text": "Hello"}
-                ]}]
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            assert_eq!(msgs[0].get("role").unwrap().as_str().unwrap(), "assistant");
-            assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "Hello");
-        }
-        #[test]
-        fn test_a2o_assistant_tool_use() {
-            let input = json!({
-                "model": "m", "max_tokens": 1024,
-                "messages": [{"role": "assistant", "content": [
-                    {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "/src"}}
-                ]}]
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            let tc = msgs[0].get("tool_calls").unwrap().as_array().unwrap();
-            assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "toolu_1");
-            assert_eq!(
-                tc[0]
-                    .get("function")
-                    .unwrap()
-                    .get("name")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "read_file"
-            );
-            let args: serde_json::Value = serde_json::from_str(
-                tc[0]
-                    .get("function")
-                    .unwrap()
-                    .get("arguments")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-            )
-            .unwrap();
-            assert_eq!(args.get("path").unwrap().as_str().unwrap(), "/src");
-        }
-        #[test]
-        fn test_a2o_assistant_thinking() {
-            let input = json!({
-                "model": "m", "max_tokens": 1024,
-                "messages": [{"role": "assistant", "content": [
-                    {"type": "thinking", "thinking": "Let me think"},
-                    {"type": "text", "text": "Answer"}
-                ]}]
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            assert_eq!(
-                msgs[0].get("reasoning_content").unwrap().as_str().unwrap(),
-                "Let me think"
-            );
-            assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "Answer");
-        }
-        #[test]
-        fn test_a2o_redacted_thinking_dropped() {
-            let input = json!({
-                "model": "m", "max_tokens": 1024,
-                "messages": [{"role": "assistant", "content": [
-                    {"type": "redacted_thinking", "data": "secret"},
-                    {"type": "text", "text": "Done"}
-                ]}]
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            assert!(msgs[0].get("reasoning_content").is_none());
-            assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "Done");
-        }
-        #[test]
-        fn test_a2o_tool_definitions() {
-            let input = json!({
-                "model": "m", "max_tokens": 1024,
-                "messages": [{"role": "user", "content": "Hi"}],
-                "tools": [{"name": "get_weather", "description": "Get weather", "input_schema": {"type": "object"}}]
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            let tools = result.get("tools").unwrap().as_array().unwrap();
-            assert_eq!(tools[0].get("type").unwrap().as_str().unwrap(), "function");
-            let func = tools[0].get("function").unwrap();
-            assert_eq!(func.get("name").unwrap().as_str().unwrap(), "get_weather");
-            assert_eq!(
-                func.get("parameters")
-                    .unwrap()
-                    .get("type")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "object"
-            );
-        }
-        #[test]
-        fn test_a2o_tool_choice_mapping() {
-            // auto
-            let input = json!({"model": "m", "max_tokens": 1024, "messages": [{"role":"user","content":"Hi"}], "tool_choice": {"type": "auto"}});
-            let r = anthropic_to_openai_request(&input).unwrap();
-            assert_eq!(r.get("tool_choice").unwrap().as_str().unwrap(), "auto");
-
-            // any → required
-            let input = json!({"model": "m", "max_tokens": 1024, "messages": [{"role":"user","content":"Hi"}], "tool_choice": {"type": "any"}});
-            let r = anthropic_to_openai_request(&input).unwrap();
-            assert_eq!(r.get("tool_choice").unwrap().as_str().unwrap(), "required");
-
-            // specific tool
-            let input = json!({"model": "m", "max_tokens": 1024, "messages": [{"role":"user","content":"Hi"}], "tool_choice": {"type": "tool", "name": "my_fn"}});
-            let r = anthropic_to_openai_request(&input).unwrap();
-            let tc = r.get("tool_choice").unwrap();
-            assert_eq!(tc.get("type").unwrap().as_str().unwrap(), "function");
-            assert_eq!(
-                tc.get("function")
-                    .unwrap()
-                    .get("name")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-                "my_fn"
-            );
-        }
-        #[test]
-        fn test_a2o_post_pass_reasoning_fix() {
-            let input = json!({
-                "model": "m", "max_tokens": 1024,
-                "messages": [
-                    {"role": "assistant", "content": [
-                        {"type": "thinking", "thinking": "hmm"},
-                        {"type": "text", "text": "yes"}
-                    ]},
-                    {"role": "user", "content": "ok"},
-                    {"role": "assistant", "content": [
-                        {"type": "tool_use", "id": "t1", "name": "fn", "input": {}}
-                    ]}
-                ]
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            let msgs = result.get("messages").unwrap().as_array().unwrap();
-            // Second assistant message should get reasoning_content: " "
-            assert_eq!(
-                msgs[2].get("reasoning_content").unwrap().as_str().unwrap(),
-                " "
-            );
-        }
-        #[test]
-        fn test_a2o_stream_options_set() {
-            let input = json!({
-                "model": "m", "max_tokens": 1024, "stream": true,
-                "messages": [{"role": "user", "content": "Hi"}]
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            assert!(result.get("stream").unwrap().as_bool().unwrap());
-            assert!(result
-                .get("stream_options")
+    #[test]
+    fn test_user_image_url() {
+        let input = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Look:"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc123"}}
+                ]}
+            ]
+        });
+        let result = translate_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        let content = msgs[0].get("content").unwrap().as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1].get("type").unwrap().as_str().unwrap(), "image");
+        assert_eq!(
+            content[1]
+                .get("source")
                 .unwrap()
-                .get("include_usage")
+                .get("media_type")
                 .unwrap()
-                .as_bool()
-                .unwrap());
-        }
-        #[test]
-        fn test_a2o_fields_dropped() {
-            let input = json!({
-                "model": "m", "max_tokens": 1024,
-                "messages": [{"role": "user", "content": "Hi"}],
-                "top_k": 50,
-                "metadata": {"user_id": "123"},
-                "thinking": {"type": "enabled", "budget_tokens": 5000}
-            });
-            let result = anthropic_to_openai_request(&input).unwrap();
-            assert!(result.get("top_k").is_none());
-            assert!(result.get("metadata").is_none());
-            assert!(result.get("thinking").is_none());
-        }
+                .as_str()
+                .unwrap(),
+            "image/png"
+        );
+        assert_eq!(
+            content[1]
+                .get("source")
+                .unwrap()
+                .get("data")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "abc123"
+        );
+    }
+
+    #[test]
+    fn test_assistant_with_tool_calls() {
+        let input = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"/src\"}"}}
+                ]}
+            ]
+        });
+        let result = translate_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        let content = msgs[0].get("content").unwrap().as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(
+            content[0].get("type").unwrap().as_str().unwrap(),
+            "tool_use"
+        );
+        assert_eq!(content[0].get("id").unwrap().as_str().unwrap(), "call_1");
+        assert_eq!(
+            content[0].get("name").unwrap().as_str().unwrap(),
+            "read_file"
+        );
+        assert_eq!(
+            content[0]
+                .get("input")
+                .unwrap()
+                .get("path")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "/src"
+        );
+    }
+
+    #[test]
+    fn test_assistant_with_reasoning_content() {
+        let input = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "assistant", "content": "Answer", "reasoning_content": "Thinking..."}
+            ]
+        });
+        let result = translate_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        let content = msgs[0].get("content").unwrap().as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(
+            content[0].get("type").unwrap().as_str().unwrap(),
+            "thinking"
+        );
+        assert_eq!(
+            content[0].get("thinking").unwrap().as_str().unwrap(),
+            "Thinking..."
+        );
+        assert_eq!(content[1].get("type").unwrap().as_str().unwrap(), "text");
+        assert_eq!(content[1].get("text").unwrap().as_str().unwrap(), "Answer");
+    }
+
+    #[test]
+    fn test_consecutive_tool_messages_merged() {
+        let input = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "a", "arguments": "{}"}},
+                    {"id": "call_2", "type": "function", "function": {"name": "b", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "result1"},
+                {"role": "tool", "tool_call_id": "call_2", "content": "result2"}
+            ]
+        });
+        let result = translate_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        // Should be: user, assistant, user (merged tool results)
+        assert_eq!(msgs.len(), 3);
+        let last = &msgs[2];
+        assert_eq!(last.get("role").unwrap().as_str().unwrap(), "user");
+        let content = last.get("content").unwrap().as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(
+            content[0].get("type").unwrap().as_str().unwrap(),
+            "tool_result"
+        );
+        assert_eq!(
+            content[1].get("type").unwrap().as_str().unwrap(),
+            "tool_result"
+        );
+    }
+
+    #[test]
+    fn test_tool_definitions() {
+        let input = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+                }
+            }]
+        });
+        let result = translate_request(&input).unwrap();
+        let tools = result.get("tools").unwrap().as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(
+            tools[0].get("name").unwrap().as_str().unwrap(),
+            "get_weather"
+        );
+        assert_eq!(
+            tools[0].get("description").unwrap().as_str().unwrap(),
+            "Get weather"
+        );
+        assert!(tools[0].get("input_schema").is_some());
+    }
+
+    #[test]
+    fn test_tool_choice_mapping() {
+        // auto
+        let input = json!({"model": "gpt-4", "messages": [{"role":"user","content":"Hi"}], "tool_choice": "auto"});
+        let result = translate_request(&input).unwrap();
+        assert_eq!(
+            result
+                .get("tool_choice")
+                .unwrap()
+                .get("type")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "auto"
+        );
+
+        // required → any
+        let input = json!({"model": "gpt-4", "messages": [{"role":"user","content":"Hi"}], "tool_choice": "required"});
+        let result = translate_request(&input).unwrap();
+        assert_eq!(
+            result
+                .get("tool_choice")
+                .unwrap()
+                .get("type")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "any"
+        );
+
+        // none → omitted
+        let input = json!({"model": "gpt-4", "messages": [{"role":"user","content":"Hi"}], "tool_choice": "none"});
+        let result = translate_request(&input).unwrap();
+        assert!(result.get("tool_choice").is_none());
+
+        // specific function
+        let input = json!({"model": "gpt-4", "messages": [{"role":"user","content":"Hi"}], "tool_choice": {"type": "function", "function": {"name": "my_fn"}}});
+        let result = translate_request(&input).unwrap();
+        let tc = result.get("tool_choice").unwrap();
+        assert_eq!(tc.get("type").unwrap().as_str().unwrap(), "tool");
+        assert_eq!(tc.get("name").unwrap().as_str().unwrap(), "my_fn");
+    }
+
+    #[test]
+    fn test_max_tokens_default() {
+        let input = json!({"model": "gpt-4", "messages": [{"role":"user","content":"Hi"}]});
+        let result = translate_request(&input).unwrap();
+        assert_eq!(result.get("max_tokens").unwrap().as_u64().unwrap(), 4096);
+    }
+
+    #[test]
+    fn test_fields_dropped() {
+        let input = json!({
+            "model": "gpt-4",
+            "messages": [{"role":"user","content":"Hi"}],
+            "n": 2,
+            "frequency_penalty": 0.5,
+            "presence_penalty": 0.5,
+            "logprobs": true,
+            "logit_bias": {"1": 100},
+            "seed": 42,
+            "response_format": {"type": "json_object"},
+            "stream_options": {"include_usage": true}
+        });
+        let result = translate_request(&input).unwrap();
+        assert!(result.get("n").is_none());
+        assert!(result.get("frequency_penalty").is_none());
+        assert!(result.get("presence_penalty").is_none());
+        assert!(result.get("logprobs").is_none());
+        assert!(result.get("logit_bias").is_none());
+        assert!(result.get("seed").is_none());
+        assert!(result.get("response_format").is_none());
+        assert!(result.get("stream_options").is_none());
+    }
+
+    // ── Response translation tests ─────────────────────────────────────
+
+    #[test]
+    fn test_malformed_tool_arguments() {
+        let input = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "fn", "arguments": "not-json"}}
+                ]}
+            ]
+        });
+        let result = translate_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        let content = msgs[0].get("content").unwrap().as_array().unwrap();
+        let input_val = content[0].get("input").unwrap();
+        assert_eq!(input_val.get("raw").unwrap().as_str().unwrap(), "not-json");
+    }
+    #[test]
+    fn test_a2o_system_string() {
+        let input = json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "system": "You are helpful.",
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(msgs[0].get("role").unwrap().as_str().unwrap(), "system");
+        assert_eq!(
+            msgs[0].get("content").unwrap().as_str().unwrap(),
+            "You are helpful."
+        );
+    }
+    #[test]
+    fn test_a2o_system_block_array() {
+        let input = json!({
+            "model": "m",
+            "max_tokens": 1024,
+            "system": [{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2"}],
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(
+            msgs[0].get("content").unwrap().as_str().unwrap(),
+            "Part 1\n\nPart 2"
+        );
+    }
+    #[test]
+    fn test_a2o_user_text_string() {
+        let input = json!({
+            "model": "m", "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "Hello");
+    }
+    #[test]
+    fn test_a2o_user_text_blocks_joined() {
+        let input = json!({
+            "model": "m", "max_tokens": 1024,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "A"},
+                {"type": "text", "text": "B"}
+            ]}]
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "A\n\nB");
+    }
+    #[test]
+    fn test_a2o_user_image_source() {
+        let input = json!({
+            "model": "m", "max_tokens": 1024,
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc123"}}
+            ]}]
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        let content = msgs[0].get("content").unwrap().as_array().unwrap();
+        assert_eq!(
+            content[0].get("type").unwrap().as_str().unwrap(),
+            "image_url"
+        );
+        assert_eq!(
+            content[0]
+                .get("image_url")
+                .unwrap()
+                .get("url")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "data:image/png;base64,abc123"
+        );
+    }
+    #[test]
+    fn test_a2o_user_tool_result() {
+        let input = json!({
+            "model": "m", "max_tokens": 1024,
+            "messages": [{"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "result data"}
+            ]}]
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(msgs[0].get("role").unwrap().as_str().unwrap(), "tool");
+        assert_eq!(
+            msgs[0].get("tool_call_id").unwrap().as_str().unwrap(),
+            "toolu_1"
+        );
+        assert_eq!(
+            msgs[0].get("content").unwrap().as_str().unwrap(),
+            "result data"
+        );
+    }
+    #[test]
+    fn test_a2o_assistant_text() {
+        let input = json!({
+            "model": "m", "max_tokens": 1024,
+            "messages": [{"role": "assistant", "content": [
+                {"type": "text", "text": "Hello"}
+            ]}]
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(msgs[0].get("role").unwrap().as_str().unwrap(), "assistant");
+        assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "Hello");
+    }
+    #[test]
+    fn test_a2o_assistant_tool_use() {
+        let input = json!({
+            "model": "m", "max_tokens": 1024,
+            "messages": [{"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "/src"}}
+            ]}]
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        let tc = msgs[0].get("tool_calls").unwrap().as_array().unwrap();
+        assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "toolu_1");
+        assert_eq!(
+            tc[0]
+                .get("function")
+                .unwrap()
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "read_file"
+        );
+        let args: serde_json::Value = serde_json::from_str(
+            tc[0]
+                .get("function")
+                .unwrap()
+                .get("arguments")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args.get("path").unwrap().as_str().unwrap(), "/src");
+    }
+    #[test]
+    fn test_a2o_assistant_thinking() {
+        let input = json!({
+            "model": "m", "max_tokens": 1024,
+            "messages": [{"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Let me think"},
+                {"type": "text", "text": "Answer"}
+            ]}]
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(
+            msgs[0].get("reasoning_content").unwrap().as_str().unwrap(),
+            "Let me think"
+        );
+        assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "Answer");
+    }
+    #[test]
+    fn test_a2o_redacted_thinking_dropped() {
+        let input = json!({
+            "model": "m", "max_tokens": 1024,
+            "messages": [{"role": "assistant", "content": [
+                {"type": "redacted_thinking", "data": "secret"},
+                {"type": "text", "text": "Done"}
+            ]}]
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        assert!(msgs[0].get("reasoning_content").is_none());
+        assert_eq!(msgs[0].get("content").unwrap().as_str().unwrap(), "Done");
+    }
+    #[test]
+    fn test_a2o_tool_definitions() {
+        let input = json!({
+            "model": "m", "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [{"name": "get_weather", "description": "Get weather", "input_schema": {"type": "object"}}]
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        let tools = result.get("tools").unwrap().as_array().unwrap();
+        assert_eq!(tools[0].get("type").unwrap().as_str().unwrap(), "function");
+        let func = tools[0].get("function").unwrap();
+        assert_eq!(func.get("name").unwrap().as_str().unwrap(), "get_weather");
+        assert_eq!(
+            func.get("parameters")
+                .unwrap()
+                .get("type")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "object"
+        );
+    }
+    #[test]
+    fn test_a2o_tool_choice_mapping() {
+        // auto
+        let input = json!({"model": "m", "max_tokens": 1024, "messages": [{"role":"user","content":"Hi"}], "tool_choice": {"type": "auto"}});
+        let r = anthropic_to_openai_request(&input).unwrap();
+        assert_eq!(r.get("tool_choice").unwrap().as_str().unwrap(), "auto");
+
+        // any → required
+        let input = json!({"model": "m", "max_tokens": 1024, "messages": [{"role":"user","content":"Hi"}], "tool_choice": {"type": "any"}});
+        let r = anthropic_to_openai_request(&input).unwrap();
+        assert_eq!(r.get("tool_choice").unwrap().as_str().unwrap(), "required");
+
+        // specific tool
+        let input = json!({"model": "m", "max_tokens": 1024, "messages": [{"role":"user","content":"Hi"}], "tool_choice": {"type": "tool", "name": "my_fn"}});
+        let r = anthropic_to_openai_request(&input).unwrap();
+        let tc = r.get("tool_choice").unwrap();
+        assert_eq!(tc.get("type").unwrap().as_str().unwrap(), "function");
+        assert_eq!(
+            tc.get("function")
+                .unwrap()
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "my_fn"
+        );
+    }
+    #[test]
+    fn test_a2o_post_pass_reasoning_fix() {
+        let input = json!({
+            "model": "m", "max_tokens": 1024,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "hmm"},
+                    {"type": "text", "text": "yes"}
+                ]},
+                {"role": "user", "content": "ok"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "fn", "input": {}}
+                ]}
+            ]
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        let msgs = result.get("messages").unwrap().as_array().unwrap();
+        // Second assistant message should get reasoning_content: " "
+        assert_eq!(
+            msgs[2].get("reasoning_content").unwrap().as_str().unwrap(),
+            " "
+        );
+    }
+    #[test]
+    fn test_a2o_stream_options_set() {
+        let input = json!({
+            "model": "m", "max_tokens": 1024, "stream": true,
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        assert!(result.get("stream").unwrap().as_bool().unwrap());
+        assert!(result
+            .get("stream_options")
+            .unwrap()
+            .get("include_usage")
+            .unwrap()
+            .as_bool()
+            .unwrap());
+    }
+    #[test]
+    fn test_a2o_fields_dropped() {
+        let input = json!({
+            "model": "m", "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "top_k": 50,
+            "metadata": {"user_id": "123"},
+            "thinking": {"type": "enabled", "budget_tokens": 5000}
+        });
+        let result = anthropic_to_openai_request(&input).unwrap();
+        assert!(result.get("top_k").is_none());
+        assert!(result.get("metadata").is_none());
+        assert!(result.get("thinking").is_none());
+    }
 }

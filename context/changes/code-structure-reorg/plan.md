@@ -428,3 +428,23 @@ No data migration. No config changes. No API changes. Downstream consumers (Dock
 - [x] 4.6 `cargo run -- --help` prints help — 0ef70aa
 - [x] 4.7 `cargo run -- --validate` validates config — 0ef70aa
 - [x] 4.8 Test count unchanged from before Phase 1 — 0ef70aa
+
+---
+
+## Addendum: Test Distribution Follow-up (Phases 5–6)
+
+Completed as part of `plan-tests.md` to distribute remaining tests from `src/tests.rs` into their domain modules.
+
+**Automated verification:**
+- `cargo build` — succeeds
+- `cargo build --features otel` — succeeds
+- `cargo test` — 365 passed (matches plan's 365-test target)
+- `cargo clippy --all-targets` — No issues found
+- `src/tests.rs` no longer exists
+- `use crate::*` not present in any src file
+
+**Manual verification:**
+- Each domain module has a `#[cfg(test)] mod tests` block — 24 modules
+- `cargo test proxy::handlers` runs handler tests — 43 tests
+- `cargo test proxy::streaming` runs streaming tests — 22 fast + 5 slow = 27 tests
+- `wc -l src/main.rs` — 516 → 512 lines (post-review fixes applied)
