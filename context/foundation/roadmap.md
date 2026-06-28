@@ -56,9 +56,9 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-13 | move-all-config-to-file | Config: eliminate all hardcoded values — 25 hardcoded Rust values + 19 env var reads moved to config.toml; env vars reduced to API_KEYS + auth creds + DATABASE_URL only; categories and regex patterns fully configurable | S-09a, **S-14** | FR-002, FR-003 | done |
 | S-14 | config-format-upgrade | Config: upgrade format to support YAML + external pattern files; add `--validate` and `--migrate-config` CLI tools | **S-13** | FR-002, FR-003 | done |
 | S-15 | translate-openai-to-anthropic | route existing `/v1/chat/completions` traffic to Anthropic-protocol upstreams (Claude API, DeepSeek, Kimi, Z.ai) with full body + streaming translation | S-01e | FR-003 | done |
-| S-16 | translate-anthropic-to-openai | new `/v1/messages` endpoint accepting Anthropic Messages protocol, translating to OpenAI Chat Completions for upstream routing | S-15 | FR-003 | done |
+| S-16 | translate-anthropic-to-openai | new `/v1/messages` endpoint accepting Anthropic Messages protocol, translating to OpenAI Chat Completions for upstream routing | S-15 | FR-003 | implemented |
 | S-17 | provider-fallback-cascade | when an upstream provider fails (5xx, timeout, rate-limit), automatically retry on the next configured provider in priority order | S-01e, S-01c | FR-003, NFR (resilience) | done |
-| S-18 | claude-code-compat | forward anthropic-beta/anthropic-version/x-claude-code-* headers + translate cache_control prompt-caching across all protocol crossings + Anthropic /v1/models shape | S-01e, S-15 | FR-003 | done |
+| S-18 | claude-code-compat | forward anthropic-beta/anthropic-version/x-claude-code-* headers + translate cache_control prompt-caching across all protocol crossings + Anthropic /v1/models shape | S-01e, S-15 | FR-003 | planned |
 | S-19 | add-response-cache | semantic + exact-match response caching to cut repeat-prompt cost | S-01e | FR-003, NFR (cost) | done |
 | S-20 | provider-retry-backoff | same-provider retries with exponential backoff + cooldowns on top of the S-17 cascade | S-17 | FR-003, NFR (resilience) | proposed |
 | S-21 | codex-responses-api | `/v1/responses` (OpenAI Responses API) shim so modern Codex CLI can use Frugalis | S-01e, S-15 | FR-003 | proposed |

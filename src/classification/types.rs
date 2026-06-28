@@ -1,7 +1,6 @@
 use crate::config::routing::{ProviderEntry, DEFAULT_MODEL};
 use serde::{Deserialize, Serialize};
 
-/// The output of any [`IntentClassify`] backend: resolved category, model, routing tier, and provider list.
 #[derive(Clone)]
 pub struct ClassificationResult {
     pub category: String,
@@ -10,7 +9,6 @@ pub struct ClassificationResult {
     pub providers: Vec<ProviderEntry>,
 }
 
-/// Which stage of the classifier pipeline produced this result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassificationTier {
     Regex,
@@ -18,13 +16,12 @@ pub enum ClassificationTier {
     Fallback,
 }
 
-/// Metadata attached to a compiled regex pattern: which category it belongs to and its match weight.
+/// A chain of classifiers that tries each in order until one returns a non-Fallback result.
 pub struct PatternMeta {
     pub category: String,
     pub weight: u8,
 }
 
-/// A labelled training example for the few-shot classifier, persisted to YAML.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FewShotExample {
     pub text: String,
