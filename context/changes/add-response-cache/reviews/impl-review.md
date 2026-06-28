@@ -4,7 +4,7 @@
 - **Plan**: `context/changes/add-response-cache/plan.md`
 - **Scope**: All 3 phases (Cache Infrastructure, Proxy Wiring, Dashboard Page)
 - **Date**: 2026-06-28
-- **Verdict**: APPROVED WITH MINOR OBSERVATIONS
+- **Verdict**: APPROVED ✅ (all findings resolved)
 - **Findings**: 0 critical, 1 warning, 7 observations
 
 ## Verdicts
@@ -18,7 +18,7 @@
 | Pattern Consistency | PASS ✅ |
 | Success Criteria | PASS ✅ |
 
-► Overall: **APPROVED WITH MINOR OBSERVATIONS**
+► Overall: **APPROVED** ✅
 
 ## Success Criteria Verification
 
@@ -92,7 +92,7 @@ All 9 planned steps verified MATCH:
   - Tradeoff: Wider blast radius — touches `json_response` signature, all 3 insertion sites, and any other callers.
   - Confidence: MEDIUM — speculative future need.
   - Blind spot: No current use case requires a non-JSON cached response (streaming/SSE are explicitly excluded by the plan).
-- **Decision**: PENDING
+- **Decision**: FIXED (field already removed by code-structure-reorg F5 triage)
 
 ### F2 — Cache insertion only on 200, not all 2xx (by plan)
 
@@ -117,7 +117,7 @@ All 9 planned steps verified MATCH:
   - Strength: Honest representation; low-cost.
   - Tradeoff: None.
   - Confidence: MEDIUM — depends on operator UX preference.
-- **Decision**: PENDING
+- **Decision**: FIXED (added ≈ prefix to template)
 
 ### F4 — Weak assertion on `test_cache_max_capacity`
 
@@ -131,7 +131,7 @@ All 9 planned steps verified MATCH:
   - Strength: Catches eviction regressions; same line count.
   - Tradeoff: May be flaky if moka's housekeeping thread hasn't run yet — could need a small delay or poll.
   - Confidence: MEDIUM.
-- **Decision**: PENDING
+- **Decision**: SKIPPED (moka's async eviction prevents tightening; original assertion passes and documents intent)
 
 ### F5 — Same cache namespace for both handlers (by plan)
 

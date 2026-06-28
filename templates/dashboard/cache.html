@@ -36,7 +36,7 @@
   <div class="stat-row" style="margin-top:1.5rem;">
     <div class="stat">
       <div class="stat-label">Current Entries</div>
-      <div class="stat-value">{{ entry_count }}</div>
+      <div class="stat-value">≈{{ entry_count }}</div>
     </div>
     <div class="stat">
       <div class="stat-label">Max Entries</div>
@@ -54,7 +54,7 @@
     <div style="height:8px;background:#f0f0f5;border-radius:4px;overflow:hidden;margin-top:4px;max-width:300px;">
       <div style="width:{{ (entry_count as f64 / max_entries as f64 * 100.0).min(100.0) }}%;height:100%;border-radius:4px;background:linear-gradient(90deg,#4a6cf7,#74b9ff);"></div>
     </div>
-    <span class="muted" style="font-size:11px;">{{ entry_count }} / {{ max_entries }}</span>
+    <span class="muted" style="font-size:11px;">≈{{ entry_count }} / {{ max_entries }}</span>
   </div>
   {% endif %}
 </div>
