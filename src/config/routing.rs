@@ -11,7 +11,6 @@ pub struct ProviderEntry {
     pub provider_type: String,
     pub api_key_env: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub timeout_ms: Option<u64>,
 }
 

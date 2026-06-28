@@ -14,6 +14,7 @@ mod app;
 mod auth;
 mod cache;
 mod classification;
+mod cli;
 mod config;
 mod dashboard;
 mod persistence;
@@ -25,167 +26,24 @@ mod quickstart;
 mod test_util;
 
 use app::{build_app, AppState};
+use cli::CliMode;
 
-/// Embedded init template loaded at compile time. Used by `--init` to
-/// produce a commented starter config the user can fill in.
-const INIT_TEMPLATE: &str = include_str!("../init_template.toml");
-
-/// Write the init template to the given path, or print it to stdout if no
-/// path is given. Refuses to overwrite an existing file unless `force` is
-/// true. Creates parent directories as needed. Returns an error suitable
-/// for `eprintln!` on failure (empty on success).
-fn run_init(path: Option<&str>, force: bool) -> Result<(), String> {
-    match path {
-        Some(p) => {
-            // Reject flag-shaped paths to avoid silently swallowing unknown
-            // flags (e.g. `frugalis --init --validate` would otherwise drop
-            // `--validate` and treat --init as having no path). The check is
-            // intentionally narrow — paths that happen to contain `--` in
-            // the middle are unaffected.
-            if p.starts_with('-') {
-                return Err(format!(
-                    "refusing path that starts with '-': {p} (looks like a flag, not a path)"
-                ));
-            }
-            let path = std::path::Path::new(p);
-            if let Some(parent) = path.parent() {
-                if !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent).map_err(|e| {
-                        format!("failed to create parent directory for {}: {}", p, e)
-                    })?;
-                }
-            }
-            // Atomic create-or-overwrite: avoids the TOCTOU race between
-            // `path.exists()` and `std::fs::write` (a symlink could be
-            // installed in the gap when --force is used). `create_new` and
-            // `truncate` are mutually exclusive — the combination enforces
-            // the same external behavior as the old exists/write pair.
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .create_new(!force)
-                .truncate(force)
-                .open(path)
-                .map_err(|e| {
-                    if e.kind() == std::io::ErrorKind::AlreadyExists {
-                        format!(
-                            "refusing to overwrite existing file: {p} (use --force to overwrite)"
-                        )
-                    } else {
-                        format!("failed to write {p}: {e}")
-                    }
-                })?;
-            std::io::Write::write_all(&mut file, INIT_TEMPLATE.as_bytes())
-                .map_err(|e| format!("failed to write {p}: {e}"))?;
-            eprintln!("Wrote starter config to {p}");
-        }
-        None => {
-            print!("{}", INIT_TEMPLATE);
-        }
-    }
-    Ok(())
-}
+// Re-export for tests that reference these directly via `use crate::*`
+#[cfg(test)]
+pub(crate) use cli::{run_init, INIT_TEMPLATE};
 
 #[tokio::main]
 async fn main() {
-    // Parse CLI arguments
-    enum CliMode {
-        Run,
-        Validate,
-        Help,
-        Init(Option<String>),
-        Quickstart,
-    }
-
-    let args: Vec<String> = std::env::args().collect();
-    let mut mode = CliMode::Run;
-    let mut force = false;
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--validate" => {
-                mode = CliMode::Validate;
-                i += 1;
-            }
-            "--help" => {
-                mode = CliMode::Help;
-                i += 1;
-            }
-            "--init" => {
-                let mut j = i + 1;
-                // --force may appear before or after the path; handle both.
-                if args.get(j).map(|a| a.as_str()) == Some("--force") {
-                    force = true;
-                    j += 1;
-                }
-                // Resolve the path arg. If the next arg starts with `--`, treat
-                // it as an unknown flag (don't silently drop it as we used to)
-                // so the user gets a clear error at the point of confusion
-                // and `run_init` is never called with `Init(None)` from a typo.
-                let path = match args.get(j) {
-                    Some(s) if s.starts_with("--") => {
-                        eprintln!("unknown argument: {s}");
-                        std::process::exit(2);
-                    }
-                    Some(s) => {
-                        j += 1;
-                        Some(s.clone())
-                    }
-                    None => None,
-                };
-                if args.get(j).map(|a| a.as_str()) == Some("--force") {
-                    force = true;
-                    j += 1;
-                }
-                i = j;
-                mode = CliMode::Init(path);
-            }
-            "--quickstart" => {
-                mode = CliMode::Quickstart;
-                i += 1;
-            }
-            "--force" => {
-                // Standalone --force (outside --init). Consumed for forward
-                // compatibility with other commands; ignored if no command
-                // acts on it.
-                force = true;
-                i += 1;
-            }
-            _ => {
-                eprintln!("unknown argument: {}", args[i]);
-                std::process::exit(2);
-            }
-        }
-    }
+    let cli::CliResult { mode, force } = cli::parse_args();
 
     // Early-exit commands (before config loading or tracing init)
     if let CliMode::Help = mode {
-        print!(
-            "\
-frugalis — intent-aware routing gateway
-
-USAGE:
-    frugalis [OPTIONS]
-
-OPTIONS:
-    --help         Show this help
-    --init [PATH]  Generate a starter config (default: stdout)
-    --force        With --init, overwrite an existing file at PATH
-    --quickstart   Interactive setup wizard
-    --validate     Validate configuration and exit
-
-ENVIRONMENT:
-    CONFIG_PATH              Path to config overlay (TOML or YAML)
-    PROXY_API_BEARER_TOKEN   Required for proxy routes
-    DASHBOARD_BASIC_USER     Required for dashboard access
-    DASHBOARD_BASIC_PASSWORD Required for dashboard access
-"
-        );
+        cli::print_help();
         std::process::exit(0);
     }
 
     if let CliMode::Init(path_opt) = &mode {
-        match run_init(path_opt.as_deref(), force) {
+        match cli::run_init(path_opt.as_deref(), force) {
             Ok(()) => std::process::exit(0),
             Err(e) => {
                 eprintln!("{}", e);
