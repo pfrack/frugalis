@@ -130,6 +130,37 @@ fn default_max_training_examples() -> usize {
     10000
 }
 
+/// Cache configuration loaded from [cache] section.
+/// When the section is absent or `max_entries == 0`, the cache is disabled.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CacheConfig {
+    #[serde(default = "default_cache_ttl_secs")]
+    pub ttl_secs: u64,
+    #[serde(default = "default_cache_max_entries")]
+    pub max_entries: u64,
+}
+
+fn default_cache_ttl_secs() -> u64 {
+    300
+}
+fn default_cache_max_entries() -> u64 {
+    1000
+}
+
+/// Load cache configuration from a parsed ConfigRoot.
+/// Returns `None` when the `[cache]` section is absent or `max_entries == 0`
+/// (cache disabled).
+pub(crate) fn load_cache_config_from_value(root: &ConfigRoot) -> Option<CacheConfig> {
+    match &root.cache {
+        Some(cfg) if cfg.max_entries > 0 => Some(cfg.clone()),
+        Some(_) => {
+            debug!("[cache] max_entries is 0; cache disabled");
+            None
+        }
+        None => None,
+    }
+}
+
 /// Load dashboard configuration from a parsed ConfigRoot.
 /// Returns defaults if section is absent.
 pub(crate) fn load_dashboard_config_from_value(root: &ConfigRoot) -> DashboardConfig {
@@ -934,6 +965,9 @@ pub(crate) fn merge_configs(base: &mut ConfigRoot, overlay: ConfigRoot) {
             base.dashboard = Some(s);
         }
     }
+    if let Some(s) = overlay.cache {
+        base.cache = Some(s);
+    }
     if let Some(v) = overlay.baseline_model {
         base.baseline_model = Some(v);
     }
@@ -1016,6 +1050,8 @@ pub(crate) struct ConfigRoot {
     pub classify_db_log: Option<bool>,
     #[serde(default)]
     pub dashboard: Option<DashboardConfig>,
+    #[serde(default)]
+    pub cache: Option<CacheConfig>,
 }
 
 /// Configuration for global classifier settings.
@@ -2472,5 +2508,91 @@ patterns_file = "nonexistent.patterns"
         let routing = root.routing.expect("routing section should be present");
         assert!(!routing.contains_key("FALLBACK"));
         assert!(routing.contains_key("DEFAULT"));
+    }
+
+    // ── Cache config tests ──
+
+    #[test]
+    fn cache_config_defaults() {
+        let toml = r#"
+[cache]
+[categories.CASUAL]
+description = "Simple"
+threshold = 1
+priority = 4
+"#;
+        let root: ConfigRoot = toml::from_str(toml).expect("valid TOML");
+        let cfg = load_cache_config_from_value(&root).expect("cache should be Some with defaults");
+        assert_eq!(cfg.ttl_secs, 300);
+        assert_eq!(cfg.max_entries, 1000);
+    }
+
+    #[test]
+    fn cache_config_custom_values() {
+        let toml = r#"
+[cache]
+ttl_secs = 120
+max_entries = 500
+[categories.CASUAL]
+description = "Simple"
+threshold = 1
+priority = 4
+"#;
+        let root: ConfigRoot = toml::from_str(toml).expect("valid TOML");
+        let cfg = load_cache_config_from_value(&root).expect("cache should load custom values");
+        assert_eq!(cfg.ttl_secs, 120);
+        assert_eq!(cfg.max_entries, 500);
+    }
+
+    #[test]
+    fn cache_config_disabled_when_absent() {
+        let toml = r#"
+[categories.CASUAL]
+description = "Simple"
+threshold = 1
+priority = 4
+"#;
+        let root: ConfigRoot = toml::from_str(toml).expect("valid TOML");
+        assert!(load_cache_config_from_value(&root).is_none());
+    }
+
+    #[test]
+    fn cache_config_disabled_when_max_entries_zero() {
+        let toml = r#"
+[cache]
+max_entries = 0
+[categories.CASUAL]
+description = "Simple"
+threshold = 1
+priority = 4
+"#;
+        let root: ConfigRoot = toml::from_str(toml).expect("valid TOML");
+        assert!(load_cache_config_from_value(&root).is_none());
+    }
+
+    #[test]
+    fn merge_configs_cache_override() {
+        let mut base: ConfigRoot = toml::from_str(
+            r#"
+[cache]
+ttl_secs = 300
+max_entries = 1000
+"#,
+        )
+        .expect("valid TOML");
+
+        let overlay: ConfigRoot = toml::from_str(
+            r#"
+[cache]
+ttl_secs = 60
+max_entries = 100
+"#,
+        )
+        .expect("valid TOML");
+
+        merge_configs(&mut base, overlay);
+        let cache = base.cache.expect("cache should be present after merge");
+        assert_eq!(cache.ttl_secs, 60);
+        assert_eq!(cache.max_entries, 100);
     }
 }

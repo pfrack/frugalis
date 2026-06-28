@@ -39,6 +39,7 @@ futures = "0.3"
 hmac = "0.12"
 sha2 = "0.10"
 dashmap = "6"
+moka = { version = "0.12", default-features = false, features = ["sync"] }
 getrandom = "0.2"
 
 opentelemetry = { version = "0.32", features = ["trace", "metrics", "logs"], optional = true }

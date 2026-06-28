@@ -66,6 +66,7 @@ impl Drop for RequestMetrics {
 }
 
 mod auth;
+mod cache;
 mod config;
 mod dashboard;
 mod fewshot_classifier;
@@ -100,6 +101,7 @@ pub struct AppState {
     dashboard_config: config::DashboardConfig,
     auth_providers: Arc<Vec<config::AuthProviderConfig>>,
     allowed_origins: Arc<RwLock<Vec<String>>>,
+    response_cache: Option<Arc<cache::ResponseCache>>,
     #[cfg(feature = "otel")]
     pub metrics: Option<telemetry::Metrics>,
 }
@@ -651,6 +653,15 @@ ENVIRONMENT:
     let cors_config = config::load_cors_config_from_value(&config_root);
     let allowed_origins = Arc::new(RwLock::new(cors_config.allowed_origins));
 
+    let response_cache: Option<Arc<cache::ResponseCache>> =
+        config::load_cache_config_from_value(&config_root).map(|cfg| {
+            info!(
+                "Response cache enabled: ttl={}s max_entries={}",
+                cfg.ttl_secs, cfg.max_entries
+            );
+            Arc::new(cache::ResponseCache::new(cfg.ttl_secs, cfg.max_entries))
+        });
+
     let app_state = Arc::new(AppState {
         persistence: persistence_state,
         classifier,
@@ -669,6 +680,7 @@ ENVIRONMENT:
         dashboard_config: config::load_dashboard_config_from_value(&config_root),
         auth_providers,
         allowed_origins,
+        response_cache,
         #[cfg(feature = "otel")]
         metrics: otel.as_ref().map(|(_, m)| m.clone()),
     });
@@ -3672,6 +3684,7 @@ mod tests {
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
+            response_cache: None,
             #[cfg(feature = "otel")]
             metrics: None,
         })
@@ -3703,6 +3716,7 @@ mod tests {
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
+            response_cache: None,
             #[cfg(feature = "otel")]
             metrics: None,
         });
@@ -5988,6 +6002,7 @@ mod tests {
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
+            response_cache: None,
             #[cfg(feature = "otel")]
             metrics: None,
         });
@@ -8152,6 +8167,7 @@ mod slow_tests {
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
+            response_cache: None,
             #[cfg(feature = "otel")]
             metrics: None,
         });
