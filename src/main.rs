@@ -66,6 +66,7 @@ impl Drop for RequestMetrics {
 }
 
 mod auth;
+mod cache;
 mod config;
 mod dashboard;
 mod fewshot_classifier;
@@ -100,6 +101,7 @@ pub struct AppState {
     dashboard_config: config::DashboardConfig,
     auth_providers: Arc<Vec<config::AuthProviderConfig>>,
     allowed_origins: Arc<RwLock<Vec<String>>>,
+    response_cache: Option<Arc<cache::ResponseCache>>,
     #[cfg(feature = "otel")]
     pub metrics: Option<telemetry::Metrics>,
 }
@@ -651,6 +653,15 @@ ENVIRONMENT:
     let cors_config = config::load_cors_config_from_value(&config_root);
     let allowed_origins = Arc::new(RwLock::new(cors_config.allowed_origins));
 
+    let response_cache: Option<Arc<cache::ResponseCache>> =
+        config::load_cache_config_from_value(&config_root).map(|cfg| {
+            info!(
+                "Response cache enabled: ttl={}s max_entries={}",
+                cfg.ttl_secs, cfg.max_entries
+            );
+            Arc::new(cache::ResponseCache::new(cfg.ttl_secs, cfg.max_entries))
+        });
+
     let app_state = Arc::new(AppState {
         persistence: persistence_state,
         classifier,
@@ -669,6 +680,7 @@ ENVIRONMENT:
         dashboard_config: config::load_dashboard_config_from_value(&config_root),
         auth_providers,
         allowed_origins,
+        response_cache,
         #[cfg(feature = "otel")]
         metrics: otel.as_ref().map(|(_, m)| m.clone()),
     });
@@ -2138,6 +2150,34 @@ async fn completion_handler(
         }
     }
 
+    // Cache check: after probe optimization, before classification.
+    // Bypass via X-Frugalis-No-Cache header for client freshness control.
+    let mut cache_key: Option<String> = None;
+    if let Some(cache) = &state.response_cache {
+        let no_cache = headers
+            .get("x-frugalis-no-cache")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        if no_cache {
+            debug!("Cache bypass via X-Frugalis-No-Cache header");
+        } else {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&body);
+            let key = format!("{:x}", hasher.finalize());
+            if let Some(entry) = cache.get(&key) {
+                debug!("Cache hit for completion request");
+                return json_response(
+                    StatusCode::from_u16(entry.status).unwrap_or(StatusCode::OK),
+                    entry.body,
+                );
+            }
+            debug!("Cache miss for completion request");
+            cache_key = Some(key);
+        }
+    }
+
     let x_category = headers
         .get("x-frugalis-category")
         .and_then(|v| v.to_str().ok())
@@ -2496,6 +2536,20 @@ async fn completion_handler(
                         );
                         #[cfg(feature = "otel")]
                         rm.set_status(status);
+                        if status == StatusCode::OK {
+                            if let Some(ref key) = cache_key {
+                                if let Some(ref cache) = state.response_cache {
+                                    cache.put(
+                                        key.clone(),
+                                        cache::CachedEntry {
+                                            body: response_body.clone(),
+                                            content_type: "application/json".to_string(),
+                                            status: 200,
+                                        },
+                                    );
+                                }
+                            }
+                        }
                         return json_response(status, response_body);
                     }
                     Err(e) => {
@@ -2717,6 +2771,20 @@ async fn completion_handler(
                     );
                     #[cfg(feature = "otel")]
                     rm.set_status(status);
+                    if status == StatusCode::OK {
+                        if let Some(ref key) = cache_key {
+                            if let Some(ref cache) = state.response_cache {
+                                cache.put(
+                                    key.clone(),
+                                    cache::CachedEntry {
+                                        body: resp_body.clone(),
+                                        content_type: "application/json".to_string(),
+                                        status: 200,
+                                    },
+                                );
+                            }
+                        }
+                    }
                     return json_response(status, resp_body);
                 }
                 Err(e) => {
@@ -2864,6 +2932,33 @@ async fn messages_handler(
     if headers.get("x-frugalis-category").is_none() && headers.get("x-frugalis-model").is_none() {
         if let Some(response) = try_optimize_request(&body, true) {
             return response;
+        }
+    }
+
+    // Cache check: after probe optimization, before classification.
+    let mut cache_key: Option<String> = None;
+    if let Some(cache) = &state.response_cache {
+        let no_cache = headers
+            .get("x-frugalis-no-cache")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        if no_cache {
+            debug!("Cache bypass via X-Frugalis-No-Cache header");
+        } else {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&body);
+            let key = format!("{:x}", hasher.finalize());
+            if let Some(entry) = cache.get(&key) {
+                debug!("Cache hit for messages request");
+                return json_response(
+                    StatusCode::from_u16(entry.status).unwrap_or(StatusCode::OK),
+                    entry.body,
+                );
+            }
+            debug!("Cache miss for messages request");
+            cache_key = Some(key);
         }
     }
 
@@ -3323,6 +3418,20 @@ async fn messages_handler(
                     );
                     #[cfg(feature = "otel")]
                     rm.set_status(status);
+                    if status == StatusCode::OK {
+                        if let Some(ref key) = cache_key {
+                            if let Some(ref cache) = state.response_cache {
+                                cache.put(
+                                    key.clone(),
+                                    cache::CachedEntry {
+                                        body: resp_body.clone(),
+                                        content_type: "application/json".to_string(),
+                                        status: 200,
+                                    },
+                                );
+                            }
+                        }
+                    }
                     return json_response(status, resp_body);
                 }
                 Err(e) => {
@@ -3672,6 +3781,7 @@ mod tests {
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
+            response_cache: None,
             #[cfg(feature = "otel")]
             metrics: None,
         })
@@ -3703,6 +3813,7 @@ mod tests {
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
+            response_cache: None,
             #[cfg(feature = "otel")]
             metrics: None,
         });
@@ -5988,6 +6099,7 @@ mod tests {
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
+            response_cache: None,
             #[cfg(feature = "otel")]
             metrics: None,
         });
@@ -8037,6 +8149,362 @@ mod tests {
             "Rate limit exceeded"
         );
     }
+
+    // ── Cache Integration Tests ──
+
+    fn test_app_with_cache(
+        ttl_secs: u64,
+        max_entries: u64,
+    ) -> (Router, httpmock::MockServer, Arc<cache::ResponseCache>) {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        use std::collections::HashMap;
+        let cats = test_categories();
+        let server = httpmock::MockServer::start();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("test reqwest client should build");
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let endpoint = server.url("/v1/chat/completions");
+        let env = "TEST_CACHE_PROXY";
+        // Note: callers must set this env var with EnvGuard.
+        let mut routing = HashMap::new();
+        routing.insert(
+            cats[1].name.clone(),
+            intent_classifier::RouteEntry {
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: endpoint.clone(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env.to_string()),
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        routing.insert(
+            cats[3].name.clone(),
+            intent_classifier::RouteEntry {
+                providers: vec![intent_classifier::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint,
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env.to_string()),
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        let fallback = intent_classifier::RouteEntry {
+            providers: vec![intent_classifier::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        };
+        let regex_classifier = intent_classifier::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
+        let classifier_chain =
+            intent_classifier::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
+        let classifier_arc = Some(Arc::new(classifier_chain));
+        let mut merged_routing = std::collections::HashMap::new();
+        if let Some(cls) = classifier_arc.as_ref() {
+            for backend in cls.backends().iter() {
+                if let Some(r) = backend.get_routing() {
+                    merged_routing.extend(r.clone());
+                }
+            }
+        }
+        let response_cache =
+            Arc::new(cache::ResponseCache::new(ttl_secs, max_entries));
+        let app_state = Arc::new(AppState {
+            persistence: None,
+            classifier: classifier_arc,
+            fewshot_classifier: None,
+            routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
+            model_costs: Arc::new(tokio::sync::RwLock::new(
+                intent_classifier::ModelCosts::empty(),
+            )),
+            baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
+            classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            http_client: Some(client),
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(10_485_760)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
+            request_body_limit_bytes: 10_485_760,
+            streaming_channel_capacity: 32,
+            dashboard_config: config::DashboardConfig::default(),
+            auth_providers: Arc::new(vec![]),
+            allowed_origins: Arc::new(RwLock::new(vec![])),
+            response_cache: Some(response_cache.clone()),
+            #[cfg(feature = "otel")]
+            metrics: None,
+        });
+        let app = build_app(auth_config, app_state);
+        (app, server, response_cache)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cache_hit_returns_cached_response() {
+        let _guard = EnvGuard("TEST_CACHE_PROXY");
+        std::env::set_var("TEST_CACHE_PROXY", "sk-test-cache");
+        let (app, server, _cache) = test_app_with_cache(60, 10);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":"test","choices":[{"message":{"content":"hello"}}]}"#);
+        });
+        let body = r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#;
+
+        let resp1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let body1 = axum::body::to_bytes(resp1.into_body(), usize::MAX)
+            .await
+            .expect("body readable");
+        assert_eq!(mock.hits(), 1);
+
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+            .await
+            .expect("body readable");
+        assert_eq!(body1, body2);
+        assert_eq!(mock.hits(), 1, "cache hit should not call upstream again");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cache_miss_proceeds_to_upstream() {
+        let _guard = EnvGuard("TEST_CACHE_PROXY");
+        std::env::set_var("TEST_CACHE_PROXY", "sk-test-cache");
+        let (app, server, _cache) = test_app_with_cache(60, 10);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":"test","choices":[{"message":{"content":"ok"}}]}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cache_bypass_header_skips_cache() {
+        let _guard = EnvGuard("TEST_CACHE_PROXY");
+        std::env::set_var("TEST_CACHE_PROXY", "sk-test-cache");
+        let (app, server, _cache) = test_app_with_cache(60, 10);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":"test","choices":[{"message":{"content":"ok"}}]}"#);
+        });
+        let body = r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#;
+
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(mock.hits(), 1);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-frugalis-no-cache", "true")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(mock.hits(), 2, "bypass header should force upstream call");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cache_streaming_not_cached() {
+        let _guard = EnvGuard("TEST_CACHE_PROXY");
+        std::env::set_var("TEST_CACHE_PROXY", "sk-test-cache");
+        let (app, server, cache) = test_app_with_cache(60, 10);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body("data: [DONE]\n\n");
+        });
+        let body = r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#;
+
+        for _ in 0..2 {
+            let _resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header(header::AUTHORIZATION, "Bearer proxy-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .expect("valid request"),
+                )
+                .await
+                .expect("request should succeed");
+        }
+        assert_eq!(mock.hits(), 2, "streaming should never be cached");
+        assert_eq!(cache.stats().entry_count, 0);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cache_error_not_cached() {
+        let _guard = EnvGuard("TEST_CACHE_PROXY");
+        std::env::set_var("TEST_CACHE_PROXY", "sk-test-cache");
+        let (app, server, cache) = test_app_with_cache(60, 10);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(500)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"internal"}"#);
+        });
+        let body = r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#;
+
+        for _ in 0..2 {
+            let _resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header(header::AUTHORIZATION, "Bearer proxy-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .expect("valid request"),
+                )
+                .await
+                .expect("request should succeed");
+        }
+        assert_eq!(mock.hits(), 2, "errors should never be cached");
+        assert_eq!(cache.stats().entry_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cache_disabled_when_no_config() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_cache_dashboard_requires_auth() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/cache")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_cache_dashboard_authenticated() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard/cache")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body readable");
+        let body_str = std::str::from_utf8(&body).expect("UTF-8");
+        assert!(
+            body_str.contains("not configured"),
+            "should show disabled message: {body_str}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -8152,6 +8620,7 @@ mod slow_tests {
             dashboard_config: config::DashboardConfig::default(),
             auth_providers: Arc::new(vec![]),
             allowed_origins: Arc::new(RwLock::new(vec![])),
+            response_cache: None,
             #[cfg(feature = "otel")]
             metrics: None,
         });

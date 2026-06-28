@@ -9,6 +9,7 @@ use axum::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use tower_http::services::ServeDir;
+use tracing::debug;
 
 use crate::{auth, persistence, AppState};
 use persistence::PersistenceBackend;
@@ -40,6 +41,7 @@ const ICON_DASHBOARD: &str = "<svg width='16' height='16' viewBox='0 0 24 24' fi
 const ICON_LIST: &str = "<svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><line x1='8' y1='6' x2='21' y2='6'/><line x1='8' y1='12' x2='21' y2='12'/><line x1='8' y1='18' x2='21' y2='18'/><line x1='3' y1='6' x2='3.01' y2='6'/><line x1='3' y1='12' x2='3.01' y2='12'/><line x1='3' y1='18' x2='3.01' y2='18'/></svg>";
 const ICON_CLOCK: &str = "<svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='10'/><polyline points='12 6 12 12 16 14'/></svg>";
 const ICON_DOLLAR: &str = "<svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><line x1='12' y1='1' x2='12' y2='23'/><path d='M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6'/></svg>";
+const ICON_CACHE: &str = "<svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M21 12a9 9 0 0 0-8.17-8.98'/><path d='M3 12a9 9 0 0 0 8.17 8.98'/><polyline points='15 7 21 7 21 1'/><polyline points='9 17 3 17 3 23'/></svg>";
 
 pub static PAGES: &[NavPage] = &[
     NavPage {
@@ -61,6 +63,11 @@ pub static PAGES: &[NavPage] = &[
         path: "savings",
         label: "Savings",
         icon: ICON_DOLLAR,
+    },
+    NavPage {
+        path: "cache",
+        label: "Cache",
+        icon: ICON_CACHE,
     },
 ];
 
@@ -130,6 +137,18 @@ dashboard_page! {
     struct SavingsTemplate for "dashboard/savings.html" {
         estimate: Option<persistence::SavingsEstimate>,
         baseline_model: String,
+    }
+}
+
+dashboard_page! {
+    struct CacheTemplate for "dashboard/cache.html" {
+        enabled: bool,
+        hit_count: u64,
+        miss_count: u64,
+        hit_rate: f64,
+        entry_count: u64,
+        max_entries: u64,
+        ttl_secs: u64,
     }
 }
 
@@ -344,12 +363,53 @@ async fn savings_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     }
 }
 
+async fn cache_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match &state.response_cache {
+        Some(cache) => {
+            let stats = cache.stats();
+            let total = stats.hit_count + stats.miss_count;
+            let hit_rate = if total > 0 {
+                stats.hit_count as f64 / total as f64
+            } else {
+                0.0
+            };
+            debug!(
+                "Cache stats: hits={} misses={} entries={}",
+                stats.hit_count, stats.miss_count, stats.entry_count
+            );
+            CacheTemplate {
+                nav: nav_for("cache"),
+                error: None,
+                enabled: true,
+                hit_count: stats.hit_count,
+                miss_count: stats.miss_count,
+                hit_rate,
+                entry_count: stats.entry_count,
+                max_entries: stats.max_entries,
+                ttl_secs: stats.ttl_secs,
+            }
+        }
+        None => CacheTemplate {
+            nav: nav_for("cache"),
+            error: None,
+            enabled: false,
+            hit_count: 0,
+            miss_count: 0,
+            hit_rate: 0.0,
+            entry_count: 0,
+            max_entries: 0,
+            ttl_secs: 0,
+        },
+    }
+}
+
 pub fn routes(auth_config: Arc<auth::AuthConfig>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(dashboard_handler))
         .route("/inferences", get(inferences_handler))
         .route("/latency", get(latency_handler))
         .route("/savings", get(savings_handler))
+        .route("/cache", get(cache_handler))
         .nest_service("/static", ServeDir::new("static"))
         .route_layer(auth::dashboard_auth_layer(auth_config))
 }
