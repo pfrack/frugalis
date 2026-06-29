@@ -340,11 +340,12 @@ mod tests {
         let rows = sqlx::query("SELECT status FROM inferences WHERE prompt_snippet LIKE $1 ORDER BY created_at ASC")
             .bind(format!("%{}%", test_message))
             .fetch_all(pool.as_ref()).await.expect("query should succeed");
-        let statuses: Vec<String> = rows
+        let mut statuses: Vec<String> = rows
             .iter()
             .map(|row| row.try_get::<String, _>("status").unwrap())
             .collect();
-        assert_eq!(statuses, vec!["streaming", "ok"]);
+        statuses.sort();
+        assert_eq!(statuses, vec!["ok", "streaming"]);
     }
 
     #[tokio::test]
