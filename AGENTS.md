@@ -24,7 +24,7 @@ Source files under `src/`:
 - `app/` — Composition root: `mod.rs` (AppState, build_app, build_classifiers, build_persistence), `cli.rs` (CLI arg parsing, init), `quickstart.rs` (interactive setup wizard), `test_helpers.rs` (test utility functions, cfg(test)-gated)
 - `routing/` — Request-pipeline co-location: `auth.rs` (`AuthConfig`, middleware layers `proxy_auth_layer`/`dashboard_auth_layer`, token + basic credential validation, utility helpers) and `routes.rs` (routing data model: `ProviderEntry`, `RouteEntry`, `ModelCosts`, `DEFAULT_MODEL*` constants). `mod.rs` re-exports both so `crate::routing::AuthConfig` and `crate::routing::RouteEntry` resolve.
 - `persistence.rs` — `PersistenceConfig` (pool + bounded task semaphore), `InferenceRecord`, async logging API (`log_inference`), snippet extraction. A separate module is justified: persistence is a distinct cross-cutting concern with its own lifecycle, retry policy, and DB driver dependency.
-- `dashboard/` — Dashboard sub-module: `nav.rs` (page registry `PAGES`, nav types, `nav_for()`), `templates.rs` (`dashboard_page!` macro, template structs), `handlers.rs` (handler functions, tests), `mod.rs` (`routes()` builder, re-exports)
+- `dashboard/` — Dashboard sub-module: `nav.rs` (page registry `PAGES`, nav types, `nav_for()`), `templates.rs` (`dashboard_page!` macro, template structs), `handlers.rs` (handler functions, tests), `mod.rs` (`routes()` builder)
 - `intent_classifier.rs` — Intent classification logic, regex patterns, model cost configuration
 
 Add new authentication schemes or routes to existing modules rather than creating separate files. Keep middleware functions near the config they read.
