@@ -268,7 +268,7 @@ All secret environment variables are marked `sync: false` in `render.yaml`, mean
 - Review `[http]` timeouts (`client_timeout_secs`, `client_connect_timeout_secs`) and body limits (`max_upstream_body_bytes`, `request_body_limit_bytes`) for your workload
 - Run behind a TLS-terminating reverse proxy (Render handles this automatically; for self-hosted deployments, use nginx, Caddy, or a similar proxy)
 - Monitor logs — the gateway uses structured logging with `RUST_LOG` for filtering
-- Test authentication and routing with `scripts/manual_tests.sh --basic`
+- Test authentication and routing with `scripts/test.sh --basic`
 
 ## CI/CD
 
@@ -298,10 +298,11 @@ Targeted test commands:
 | `cargo test slow_tests` | Tests with timing delays |
 | `cargo test persistence_integration` | PostgreSQL integration (requires `DATABASE_URL`) |
 
-A manual test harness is available at `scripts/manual_tests.sh` with three modes:
-- `--auto` — full automated scenario suite
+An integration test suite is available at `scripts/test.sh`:
+- Default — full automated scenario suite
 - `--basic` — quick smoke tests (health, auth, classification, graceful shutdown)
-- Default — interactive mode
+- `--cache` — cache-specific tests (TTL, bypass, streaming, dashboard)
+- `--interactive` — interactive mode (server must be running)
 
 ### Test Infrastructure
 

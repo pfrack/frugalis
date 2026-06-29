@@ -162,25 +162,25 @@ validate-config:
 
 # ── Manual / harness ─────────────────────────────────────────────────
 
-# Run manual test harness (interactive)
+# Run integration test harness (interactive)
 manual:
-    manual-test/run.sh
+    scripts/test.sh --interactive
 
-# Run basic manual tests
+# Run basic smoke tests
 manual-basic:
-    scripts/manual_tests.sh --basic
+    scripts/test.sh --basic
 
-# Run manual tests in auto mode
+# Run full automated integration suite
 manual-auto:
-    manual-test/run.sh --auto
+    scripts/test.sh
 
-# Run persistence manual tests (3-tier: memory/sqlite/postgres)
-manual-persistence:
-    manual-test/run.sh --persistence
+# Run cache integration tests
+manual-cache:
+    scripts/test.sh --cache
 
 # Run fewshot manual tests
 manual-fewshot:
-    manual-test/run.sh --fewshot
+    scripts/test.sh --fewshot
 
 # ── CI composite ─────────────────────────────────────────────────────
 
