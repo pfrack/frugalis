@@ -1,4 +1,4 @@
-pub(crate) const INIT_TEMPLATE: &str = include_str!("../init_template.toml");
+pub(crate) const INIT_TEMPLATE: &str = include_str!("../../init_template.toml");
 
 pub(crate) enum CliMode {
     Run,

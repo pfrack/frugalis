@@ -21,6 +21,7 @@ Tests are organized in two groups in `src/main.rs`: `mod tests` (fast unit/integ
 
 Source files under `src/`:
 - `main.rs` — Axum router setup, route definitions, health endpoint, proxy handlers, test harness
+- `app/` — Composition root: `mod.rs` (AppState, build_app, build_classifiers, build_persistence), `cli.rs` (CLI arg parsing, init), `quickstart.rs` (interactive setup wizard), `test_helpers.rs` (test utility functions, cfg(test)-gated)
 - `auth.rs` — `AuthConfig` struct, middleware implementations (`require_proxy_bearer`, `require_dashboard_basic`), token/credential validation, utility helpers
 - `persistence.rs` — `PersistenceConfig` (pool + bounded task semaphore), `InferenceRecord`, async logging API (`log_inference`), snippet extraction. A separate module is justified: persistence is a distinct cross-cutting concern with its own lifecycle, retry policy, and DB driver dependency.
 - `dashboard.rs` — Dashboard page registry (`PAGES`), `dashboard_page!` macro, template structs, handler functions, and `routes()` builder for the `/dashboard/*` sub-router
