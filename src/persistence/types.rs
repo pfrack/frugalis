@@ -4,7 +4,7 @@ use uuid::Uuid;
 /// Abstraction over a model-cost lookup table.
 ///
 /// Decouples the persistence layer from the config and classification modules:
-/// [`crate::config::routing::ModelCosts`] implements this trait, but tests can
+/// [`crate::routing::ModelCosts`] implements this trait, but tests can
 /// supply a simple `HashMap`-backed mock. Must be `Send + Sync` so it can be
 /// referenced across async task boundaries via `&dyn CostProvider`.
 pub trait CostProvider: Send + Sync {

@@ -2,7 +2,7 @@
 # Usage: CONFIG_PATH=this-file.toml frugalis
 # Requires OPENROUTER_API_KEY env var to be set.
 #
-# Cerebrum's merge semantics for [routing] are per-key additive — unmentioned
+# Frugalis's merge semantics for [routing] are per-key additive — unmentioned
 # routes inherit from the built-in defaults.
 
 [routing.FILE_READING]

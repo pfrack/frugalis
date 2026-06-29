@@ -60,7 +60,7 @@ pub fn log_inference(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{app, auth, classification, config};
+    use crate::{app, classification, config, routing};
 
     use std::sync::Arc;
 
@@ -89,7 +89,7 @@ mod tests {
                 .build()
                 .expect("test reqwest client should build")
         });
-        let auth_config = Arc::new(auth::AuthConfig::from_values(
+        let auth_config = Arc::new(routing::AuthConfig::from_values(
             "proxy-token",
             "user",
             "password",
@@ -98,8 +98,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            config::routing::RouteEntry {
-                providers: vec![config::routing::ProviderEntry {
+            routing::RouteEntry {
+                providers: vec![routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: endpoint.clone(),
                     provider_type: "openai_compatible".to_string(),
@@ -111,8 +111,8 @@ mod tests {
         );
         routing.insert(
             cats[3].name.clone(),
-            config::routing::RouteEntry {
-                providers: vec![config::routing::ProviderEntry {
+            routing::RouteEntry {
+                providers: vec![routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint,
                     provider_type: "openai_compatible".to_string(),
@@ -122,8 +122,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = config::routing::RouteEntry {
-            providers: vec![config::routing::ProviderEntry {
+        let fallback = routing::RouteEntry {
+            providers: vec![routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -159,7 +159,7 @@ mod tests {
             fewshot_classifier: None,
             routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
             model_costs: Arc::new(tokio::sync::RwLock::new(
-                config::routing::ModelCosts::empty(),
+                routing::ModelCosts::empty(),
             )),
             baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
             classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),

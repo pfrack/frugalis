@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::{debug, warn};
 
-use super::routing::*;
+use crate::routing::*;
 use super::types::*;
 use super::ConfigRoot;
 use crate::config::types::{CategoryConfig, NegativePatternConfig, PatternEntry};

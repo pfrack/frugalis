@@ -10,36 +10,34 @@ use tracing_subscriber::{fmt, layer::Layer, prelude::*, EnvFilter, Registry};
 mod telemetry;
 
 mod app;
-mod auth;
 mod cache;
 mod classification;
-mod cli;
 mod config;
 mod dashboard;
 mod persistence;
 mod protocol;
 mod proxy;
-mod quickstart;
+mod routing;
 
 #[cfg(test)]
 mod test_util;
 
 use app::{build_app, AppState};
-use cli::CliMode;
+use app::cli::CliMode;
 
 #[tokio::main]
 async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let cli::CliResult { mode, force } = cli::parse_args();
+    let app::cli::CliResult { mode, force } = app::cli::parse_args();
 
     // Early-exit commands (before config loading or tracing init)
     if let CliMode::Help = mode {
-        cli::print_help();
+        app::cli::print_help();
         std::process::exit(0);
     }
 
     if let CliMode::Init(path_opt) = &mode {
-        match cli::run_init(path_opt.as_deref(), force) {
+        match app::cli::run_init(path_opt.as_deref(), force) {
             Ok(()) => std::process::exit(0),
             Err(e) => {
                 eprintln!("{}", e);
@@ -49,7 +47,7 @@ async fn main() {
     }
 
     if let CliMode::Quickstart = mode {
-        match quickstart::run_quickstart() {
+        match app::quickstart::run_quickstart() {
             Ok(()) => std::process::exit(0),
             Err(e) => {
                 eprintln!("{}", e);
@@ -142,7 +140,7 @@ async fn main() {
         tracing::error!("Panic in Frugalis: {info}");
     }));
 
-    let auth_config = auth::AuthConfig::from_env().unwrap_or_else(|err| {
+    let auth_config = routing::AuthConfig::from_env().unwrap_or_else(|err| {
         panic!("Auth configuration error: {err}");
     });
     let auth_config = Arc::new(auth_config);

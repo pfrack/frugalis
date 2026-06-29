@@ -1,0 +1,41 @@
+# Multi-provider routing with fallback cascade.
+# Usage: CONFIG_PATH=this-file.toml frugalis
+# Requires ANTHROPIC_API_KEY, OPENAI_API_KEY, and NVIDIA_API_KEY env vars to be set.
+#
+# Frugalis's merge semantics for [routing] are per-key additive — unmentioned
+# routes inherit from the built-in defaults.
+#
+# The `providers` array defines a fallback cascade: the first entry is the
+# primary target, and subsequent entries are tried in order when the primary
+# is unreachable or returns a retriable error. Each provider entry supports
+# an optional `timeout_ms` field to override the default per-route timeout.
+
+[routing.FILE_READING]
+providers = [
+  { model = "claude-sonnet-4", endpoint = "https://api.anthropic.com/v1/messages", provider_type = "anthropic", api_key_env = "ANTHROPIC_API_KEY", timeout_ms = 30000 },
+  { model = "gpt-4o-mini", endpoint = "https://api.openai.com/v1/chat/completions", provider_type = "openai_compatible", api_key_env = "OPENAI_API_KEY" },
+]
+
+[routing.COMPLEX_REASONING]
+providers = [
+  { model = "claude-sonnet-4", endpoint = "https://api.anthropic.com/v1/messages", provider_type = "anthropic", api_key_env = "ANTHROPIC_API_KEY", timeout_ms = 60000 },
+  { model = "nvidia/llama-3.1-nemotron-70b-instruct", endpoint = "https://integrate.api.nvidia.com/v1/chat/completions", provider_type = "nvidia_nim", api_key_env = "NVIDIA_API_KEY" },
+]
+
+[routing.SYNTAX_FIX]
+model = "gpt-4o-mini"
+endpoint = "https://api.openai.com/v1/chat/completions"
+provider_type = "openai_compatible"
+api_key_env = "OPENAI_API_KEY"
+
+[routing.CASUAL]
+model = "meta/llama-3.1-8b-instruct"
+endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
+provider_type = "nvidia_nim"
+api_key_env = "NVIDIA_API_KEY"
+
+[routing.DEFAULT]
+providers = [
+  { model = "gpt-4o-mini", endpoint = "https://api.openai.com/v1/chat/completions", provider_type = "openai_compatible", api_key_env = "OPENAI_API_KEY", timeout_ms = 15000 },
+  { model = "nvidia/llama-3.1-nemotron-70b-instruct", endpoint = "https://integrate.api.nvidia.com/v1/chat/completions", provider_type = "nvidia_nim", api_key_env = "NVIDIA_API_KEY" },
+]

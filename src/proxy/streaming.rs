@@ -506,7 +506,7 @@ pub(crate) fn handle_translating_anthropic_stream(
 #[cfg(test)]
 mod tests {
     use crate::app::build_app;
-    use crate::{auth, classification, config};
+    use crate::{classification, routing};
     use std::sync::Arc;
 
     use crate::app::test_helpers::test_app_with_http_client;
@@ -936,8 +936,8 @@ mod tests {
         let mut routing = std::collections::HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            config::routing::RouteEntry {
-                providers: vec![config::routing::ProviderEntry {
+            routing::RouteEntry {
+                providers: vec![routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: url,
                     provider_type: "openai_compatible".to_string(),
@@ -947,8 +947,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = config::routing::RouteEntry {
-            providers: vec![config::routing::ProviderEntry {
+        let fallback = routing::RouteEntry {
+            providers: vec![routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -967,11 +967,11 @@ mod tests {
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
-            config::routing::ModelCosts::empty(),
+            routing::ModelCosts::empty(),
             String::new(),
             10_485_760,
         );
-        let auth_config = Arc::new(auth::AuthConfig::from_values(
+        let auth_config = Arc::new(routing::AuthConfig::from_values(
             "proxy-token",
             "user",
             "password",
@@ -1020,7 +1020,7 @@ mod tests {
         use crate::app::test_helpers::{test_categories, test_negative_patterns};
         use crate::app::{build_app, AppState};
         use crate::test_util::EnvGuard;
-        use crate::{auth, classification, config};
+        use crate::{classification, config, routing};
         use axum::{
             body::Body,
             http::{header, Request, StatusCode},
@@ -1064,8 +1064,8 @@ mod tests {
             let mut routing = std::collections::HashMap::new();
             routing.insert(
                 cats[1].name.clone(),
-                config::routing::RouteEntry {
-                    providers: vec![config::routing::ProviderEntry {
+                routing::RouteEntry {
+                    providers: vec![routing::ProviderEntry {
                         model: "sf-model".to_string(),
                         endpoint: url,
                         provider_type: "openai_compatible".to_string(),
@@ -1075,8 +1075,8 @@ mod tests {
                     cost_per_1m_input_tokens: None,
                 },
             );
-            let fallback = config::routing::RouteEntry {
-                providers: vec![config::routing::ProviderEntry {
+            let fallback = routing::RouteEntry {
+                providers: vec![routing::ProviderEntry {
                     model: "fallback-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -1092,7 +1092,7 @@ mod tests {
                 cats,
                 &test_negative_patterns(),
             );
-            let model_costs = config::routing::ModelCosts::empty();
+            let model_costs = routing::ModelCosts::empty();
             let baseline_model = String::new();
             let classifier_chain =
                 classification::chain::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
@@ -1105,7 +1105,7 @@ mod tests {
                     }
                 }
             }
-            let auth_config = Arc::new(auth::AuthConfig::from_values(
+            let auth_config = Arc::new(routing::AuthConfig::from_values(
                 "proxy-token",
                 "user",
                 "password",

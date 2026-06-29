@@ -883,7 +883,7 @@ mod tests {
         let model = format!("Z_SAV_SQL_{}", uuid::Uuid::new_v4());
         let mut costs = std::collections::HashMap::new();
         costs.insert(model.clone(), 0.15);
-        let mc = crate::config::routing::ModelCosts::from_costs(costs);
+        let mc = crate::routing::ModelCosts::from_costs(costs);
 
         pc.backend
             .insert_inference(&InferenceRecord {
@@ -918,7 +918,7 @@ mod tests {
     #[tokio::test]
     async fn test_sql_backend_savings_estimate_unknown_cost() {
         let pc = test_sql_backend_config().await;
-        let mc = crate::config::routing::ModelCosts::from_costs(std::collections::HashMap::new());
+        let mc = crate::routing::ModelCosts::from_costs(std::collections::HashMap::new());
 
         pc.backend
             .insert_inference(&InferenceRecord {

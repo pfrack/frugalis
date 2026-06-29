@@ -216,7 +216,7 @@ impl IntentClassify for LLMClassifier {
 
     fn get_routing(
         &self,
-    ) -> Option<&std::collections::HashMap<String, crate::config::routing::RouteEntry>> {
+    ) -> Option<&std::collections::HashMap<String, crate::routing::RouteEntry>> {
         None
     }
 }
