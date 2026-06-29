@@ -7,6 +7,8 @@
 # Debug symbols (Windows)
 *.pdb
 
+*.db
+
 # Rust compiler crash logs
 rustc-ice-*.txt
 
@@ -15,4 +17,4 @@ rustc-ice-*.txt
 .DS_Store
 
 # Training data
-data/fewshot_training.yaml
+data/fewshot_training.yamlsql_backend_test_*

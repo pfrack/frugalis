@@ -9,7 +9,7 @@ use axum::{
 };
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{auth, cache, classification, config, dashboard, persistence, proxy};
 
@@ -241,18 +241,23 @@ pub(crate) async fn build_persistence(
 
     let db_url = std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty());
 
-    if let Some(_url) = db_url {
-        let backend = persistence::postgres::PostgresBackend::from_env(&db_config).await;
-        match backend {
-            Ok(b) => {
-                info!("Persistence backend: postgres (via DATABASE_URL)");
+    if let Some(url) = db_url {
+        match persistence::sql_backend::SqlBackend::connect(&url, &db_config).await {
+            Ok(backend) => {
+                info!("Persistence backend: sql (unified, via DATABASE_URL)");
                 Some(persistence::PersistenceConfig {
-                    backend: Arc::new(persistence::DbBackend::Postgres(b)),
+                    backend: Arc::new(persistence::DbBackend::Sql(backend)),
                     task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
                 })
             }
             Err(e) => {
-                panic!("{e}");
+                error!("DATABASE_URL backend failed ({}); falling back to memory", e);
+                let backend = persistence::memory::MemoryBackend::new();
+                info!("Persistence backend: memory (DATABASE_URL fallback)");
+                Some(persistence::PersistenceConfig {
+                    backend: Arc::new(persistence::DbBackend::Memory(backend)),
+                    task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
+                })
             }
         }
     } else {
@@ -267,18 +272,15 @@ pub(crate) async fn build_persistence(
                 })
             }
             "sqlite" => {
-                match persistence::sqlite::SqliteBackend::from_path(
-                    &persistence_settings.sqlite_path,
-                )
-                .await
-                {
+                let sqlite_url = format!("sqlite:{}?mode=rwc", persistence_settings.sqlite_path);
+                match persistence::sql_backend::SqlBackend::connect(&sqlite_url, &db_config).await {
                     Ok(backend) => {
                         info!(
-                            "Persistence backend: sqlite (path={})",
+                            "Persistence backend: sql (sqlite, path={})",
                             persistence_settings.sqlite_path
                         );
                         Some(persistence::PersistenceConfig {
-                            backend: Arc::new(persistence::DbBackend::Sqlite(backend)),
+                            backend: Arc::new(persistence::DbBackend::Sql(backend)),
                             task_semaphore: Arc::new(tokio::sync::Semaphore::new(
                                 semaphore_limit,
                             )),

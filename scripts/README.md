@@ -1,6 +1,6 @@
 # scripts/
 
-Integration test suite for Frugalis.
+Single-file integration test suite for Frugalis. Tests the running server from the outside via HTTP.
 
 ## Usage
 
@@ -13,20 +13,12 @@ Integration test suite for Frugalis.
 ./scripts/test.sh --fewshot    # few-shot classifier interactive
 ```
 
-## Files
-
-| File | Purpose |
-|------|---------|
-| `test.sh` | Unified test runner (all modes) |
-| `lib.sh` | Shared infrastructure: server lifecycle, colors, `classify` helper |
-| `TEST_SCENARIOS.md` | Detailed documentation of each test scenario |
-
 ## Prerequisites
 
 - Rust toolchain (`cargo build --release`)
 - Python 3 (JSON parsing in mock servers)
 - `curl`
-- Port 10000 available
+- Port 10000 available (or set `HOST=host:port`)
 
 ## Environment
 
@@ -38,10 +30,25 @@ Integration test suite for Frugalis.
 
 ## What's Tested
 
-- **Classification** — hardcoded defaults, config overrides, partial categories, negative suppression
-- **Config formats** — TOML, YAML, external pattern files
-- **Validation CLI** — `--validate` detects invalid regex, schema errors, unknown flags
-- **Anthropic pass-through** — `/v1/messages` auth, content-type, format acceptance
-- **OpenAI→Anthropic translation** — non-streaming, streaming SSE, error forwarding
-- **Claude Code compat** — `/v1/models` unauthenticated, header forwarding, cache_control passthrough
-- **Response cache** — enable/disable, hit/miss, TTL expiry, bypass header, streaming exclusion
+- **classify:** hardcoded defaults, threshold override, partial categories, combined config, negative suppression, embedded config
+- **config:** YAML loading + validation, external pattern files, invalid pattern detection
+- **validate:** valid config, invalid regex, schema errors, unknown flags, informative errors
+- **anthropic:** format acceptance, array-of-text-blocks, auth gate, content-type gate, error envelope, OpenAPI spec
+- **models:** unauthenticated access, Anthropic shape (display_name, type=model)
+- **translate:** OAI→Anthropic non-streaming, streaming SSE, error forwarding
+- **headers:** anthropic-beta/version/x-claude-code-session-id forwarding
+- **cache_control:** Anthropic→Anthropic passthrough, OAI→Anthropic auto-insertion
+- **cache:** enable/disable, hit/miss, TTL expiry, bypass header, streaming exclusion
+
+## How It Works
+
+1. Builds the binary once (`cargo build --release`)
+2. For each test: writes a temp config → starts server → sends requests → validates → stops server
+3. Mock Python HTTP servers simulate Anthropic upstream for translation tests
+4. Prints pass/fail summary; exit 0 on all-pass
+
+## Troubleshooting
+
+- Port in use: `lsof -i :10000`
+- Server logs: `/tmp/frugalis-test-*.log`
+- Manual cleanup: `pkill -f frugalis; rm -f /tmp/frugalis-config-* /tmp/frugalis-test-*`

@@ -53,8 +53,8 @@ pub struct InferenceLog {
 
 /// Per-category latency statistics produced by `fetch_latency_summary`.
 ///
-/// `p99_duration_ms` is computed in the database (Postgres `PERCENTILE_CONT`)
-/// or in Rust (memory / SQLite `percentile_99`).
+/// `p99_duration_ms` is computed in the database (Postgres `PERCENTILE_CONT`
+/// or SQLite window functions) or in Rust (`percentile_99` for MemoryBackend).
 #[derive(Debug, Clone)]
 pub struct LatencySummaryRow {
     pub category: String,

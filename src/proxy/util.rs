@@ -7,7 +7,7 @@ use crate::app::AppState;
 use crate::classification::chain::IntentClassify;
 
 #[cfg(feature = "otel")]
-use crate::proxy::RequestMetrics;
+use crate::proxy::handlers::RequestMetrics;
 
 #[cfg(feature = "otel")]
 use opentelemetry::KeyValue;

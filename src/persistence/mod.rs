@@ -4,8 +4,7 @@ use tokio::sync::Semaphore;
 
 pub(crate) mod backend;
 pub(crate) mod memory;
-pub(crate) mod postgres;
-pub(crate) mod sqlite;
+pub(crate) mod sql_backend;
 pub(crate) mod types;
 
 pub(crate) use backend::{DbBackend, PersistenceBackend};
@@ -63,7 +62,6 @@ mod tests {
     use super::*;
     use crate::{app, auth, classification, config};
 
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use crate::app::test_helpers::{test_categories, test_negative_patterns};
@@ -74,7 +72,6 @@ mod tests {
         Router,
     };
     use serial_test::serial;
-    use sqlx::Row;
     use tower::util::ServiceExt;
 
     pub(crate) fn build_app_with_persistence_backend(
@@ -83,6 +80,7 @@ mod tests {
         http_client: Option<reqwest::Client>,
     ) -> (Router, httpmock::MockServer) {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        use std::collections::HashMap;
         let cats = test_categories();
         let server = httpmock::MockServer::start();
         let client = http_client.unwrap_or_else(|| {
@@ -181,237 +179,7 @@ mod tests {
         (app, server)
     }
 
-    pub(crate) fn build_app_with_persistence(
-        pool: Arc<sqlx::PgPool>,
-        semaphore: Arc<tokio::sync::Semaphore>,
-        http_client: Option<reqwest::Client>,
-    ) -> (Router, httpmock::MockServer) {
-        let pg_backend = postgres::PostgresBackend {
-            pool: (*pool).clone(),
-        };
-        let backend = Arc::new(DbBackend::Postgres(pg_backend));
-        build_app_with_persistence_backend(backend, semaphore, http_client)
-    }
-
-    #[tokio::test]
-    async fn persistence_integration_prompt_char_count_column_exists() {
-        let pool = match backend::test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP: DATABASE_URL not set");
-                return;
-            }
-        };
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query("SELECT data_type FROM information_schema.COLUMNS WHERE table_name = 'inferences' AND column_name = 'prompt_char_count'")
-            .fetch_optional(pool.as_ref()).await.expect("schema query should succeed");
-        let row = row.expect("prompt_char_count column should exist");
-        let data_type: String = row.try_get("data_type").unwrap();
-        assert_eq!(data_type, "integer");
-    }
-
-    #[tokio::test]
-    async fn persistence_integration_insert_and_read_back() {
-        let pool = match backend::test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP: DATABASE_URL not set");
-                return;
-            }
-        };
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
-        let pg = postgres::PostgresBackend {
-            pool: (*pool).clone(),
-        };
-        let db_backend = Arc::new(DbBackend::Postgres(pg));
-        let request_id = uuid::Uuid::new_v4();
-        let record = InferenceRecord {
-            request_id,
-            status: "ok".to_string(),
-            category: Some("chat".to_string()),
-            upstream_model: Some("test-model".to_string()),
-            duration_ms: Some(10),
-            prompt_snippet: "integration test snippet".to_string(),
-            prompt_char_count: Some(25),
-            created_at: chrono::Utc::now(),
-            provider_attempts: 1,
-            final_provider: "test-model".to_string(),
-            input_tokens: Some(100),
-            output_tokens: Some(20),
-            cache_read_tokens: Some(80),
-            cache_creation_tokens: Some(5),
-            client_session_id: Some("sess-integration".to_string()),
-        };
-        let handle = log_inference(db_backend, semaphore, record);
-        handle.await.expect("logging task should complete");
-        let row = sqlx::query("SELECT status, prompt_snippet, prompt_char_count, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, client_session_id FROM inferences WHERE request_id = $1")
-            .bind(request_id).fetch_optional(pool.as_ref()).await.expect("read-back query should succeed");
-        let row = row.expect("inserted row should be present");
-        assert_eq!(row.try_get::<String, _>("status").unwrap(), "ok");
-        assert_eq!(
-            row.try_get::<Option<String>, _>("prompt_snippet")
-                .unwrap()
-                .as_deref(),
-            Some("integration test snippet")
-        );
-        assert_eq!(
-            row.try_get::<Option<i32>, _>("prompt_char_count").unwrap(),
-            Some(25)
-        );
-        assert_eq!(
-            row.try_get::<Option<i32>, _>("input_tokens").unwrap(),
-            Some(100)
-        );
-        assert_eq!(
-            row.try_get::<Option<i32>, _>("output_tokens").unwrap(),
-            Some(20)
-        );
-        assert_eq!(
-            row.try_get::<Option<i32>, _>("cache_read_tokens").unwrap(),
-            Some(80)
-        );
-        assert_eq!(
-            row.try_get::<Option<i32>, _>("cache_creation_tokens")
-                .unwrap(),
-            Some(5)
-        );
-        assert_eq!(
-            row.try_get::<Option<String>, _>("client_session_id")
-                .unwrap()
-                .as_deref(),
-            Some("sess-integration")
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn persistence_integration_sse_streaming_success() {
-        let pool = match backend::test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP: DATABASE_URL not set");
-                return;
-            }
-        };
-        let _mock_api_key_guard = EnvGuard("MOCK_API_KEY");
-        std::env::set_var("MOCK_API_KEY", "sk-test");
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
-        let (app, server) = build_app_with_persistence(pool.clone(), semaphore.clone(), None);
-        let unique_id = uuid::Uuid::new_v4().to_string();
-        let test_message = format!("fix this bug {}", unique_id);
-        let mock = server.mock(|when, then| {
-            when.method("POST").path("/v1/chat/completions");
-            then.status(200)
-                .header("content-type", "text/event-stream")
-                .body("data: hello\n\n");
-        });
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/chat/completions")
-                    .header(header::AUTHORIZATION, "Bearer proxy-token")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"messages":[{{"role":"user","content":"{}"}}],"stream":true}}"#,
-                        test_message
-                    )))
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should succeed");
-        assert_eq!(response.status(), StatusCode::OK);
-        mock.assert();
-        let poll_start = std::time::Instant::now();
-        let poll_timeout = std::time::Duration::from_secs(3);
-        loop {
-            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inferences WHERE prompt_snippet LIKE $1")
-                .bind(format!("%{}%", test_message))
-                .fetch_one(pool.as_ref())
-                .await
-                .expect("count query should succeed");
-            if count >= 2 {
-                break;
-            }
-            if poll_start.elapsed() >= poll_timeout {
-                panic!("inference streaming rows did not appear within 3s");
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        let rows = sqlx::query("SELECT status FROM inferences WHERE prompt_snippet LIKE $1 ORDER BY created_at ASC")
-            .bind(format!("%{}%", test_message))
-            .fetch_all(pool.as_ref()).await.expect("query should succeed");
-        let mut statuses: Vec<String> = rows
-            .iter()
-            .map(|row| row.try_get::<String, _>("status").unwrap())
-            .collect();
-        statuses.sort();
-        assert_eq!(statuses, vec!["ok", "streaming"]);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn persistence_integration_sse_streaming_error() {
-        let pool = match backend::test_pool().await {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP: DATABASE_URL not set");
-                return;
-            }
-        };
-        let _mock_api_key_guard = EnvGuard("MOCK_API_KEY");
-        std::env::set_var("MOCK_API_KEY", "sk-test");
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
-        let (app, server) = build_app_with_persistence(pool.clone(), semaphore.clone(), None);
-        let unique_id = uuid::Uuid::new_v4().to_string();
-        let test_message = format!("fix this error {}", unique_id);
-        let mock = server.mock(|when, then| {
-            when.method("POST").path("/v1/chat/completions");
-            then.status(503)
-                .header("content-type", "application/json")
-                .body(r#"{"error":"service unavailable"}"#);
-        });
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/chat/completions")
-                    .header(header::AUTHORIZATION, "Bearer proxy-token")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"messages":[{{"role":"user","content":"{}"}}],"stream":true}}"#,
-                        test_message
-                    )))
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("request should succeed");
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        mock.assert();
-        let poll_start = std::time::Instant::now();
-        let poll_timeout = std::time::Duration::from_secs(3);
-        loop {
-            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inferences WHERE prompt_snippet LIKE $1")
-                .bind(format!("%{}%", test_message))
-                .fetch_one(pool.as_ref())
-                .await
-                .expect("count query should succeed");
-            if count >= 1 {
-                break;
-            }
-            if poll_start.elapsed() >= poll_timeout {
-                panic!("inference error row did not appear within 3s");
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        let rows = sqlx::query("SELECT status FROM inferences WHERE prompt_snippet LIKE $1 ORDER BY created_at ASC")
-            .bind(format!("%{}%", test_message))
-            .fetch_all(pool.as_ref()).await.expect("query should succeed");
-        let statuses: Vec<String> = rows
-            .iter()
-            .map(|row| row.try_get::<String, _>("status").unwrap())
-            .collect();
-        assert_eq!(statuses, vec!["upstream_error"]);
-    }
+    // ── Snippet truncation tests (MemoryBackend) ─────────────────────────
 
     #[tokio::test]
     #[serial]

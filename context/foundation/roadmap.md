@@ -4,7 +4,7 @@ project: frugalis
 version: 1
 status: draft
 created: 2026-05-26
-updated: 2026-06-28
+updated: 2026-06-26
 prd_version: 1
 main_goal: speed
 top_blocker: time
@@ -499,10 +499,10 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **PRD refs:** FR-003, NFR (cost)
 - **Prerequisites:** S-01e
 - **Parallel with:** S-18, S-20, S-21
-- **Status:** done
 - **Blockers:** —
 - **Unknowns:** Cache backend choice (in-memory vs Redis vs SQLite) — owner: planning. Block: yes.
 - **Risk:** Medium — adds a cache-lookup layer in both handlers; streaming cache semantics (replay vs re-stream) need care. Semantic cache needs an embedding model dependency.
+- **Status:** proposed
 
 ### S-20: Provider retries + backoff + cooldowns
 
@@ -658,7 +658,6 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Parallel with:** Any feature work (but not concurrently modifying the same files)
 - **Blockers:** Should not overlap with in-flight changes touching `main.rs` handlers
 - **Unknowns:** —
-- **Status:** done
 - **Risk:** Low-medium — pure structural refactoring with no behavior changes. 4-phase plan ordered by coupling risk ensures compilation at each step. ~105 existing tests serve as regression guard.
 - **Status:** planned
 
@@ -728,12 +727,10 @@ All roadmap items are active or completed; no currently parked items.
 
 - **F-04: (foundation) Add structured logging statements to all critical code paths and support configurable logging level via RUST_LOG: authentication middleware, proxy classification, routing, streaming, and error handling. Uses `tracing` crate with appropriate levels (info, error) and includes request identifiers for correlation.** — Archived 2026-06-06 → `context/archive/2026-06-06-critical-logging/`. Lesson: —.
 - **S-02: user can view a table in the dashboard showing recent inference records, each row displaying: prompt snippet (minimized, no full body), assigned intent category, upstream model selected, and request duration.** — Archived 2026-06-07 → `context/archive/2026-06-01-inference-log-inspection/`. Lesson: —.
-- **S-19: Repeat (and near-repeat) prompts return cached responses, cutting cost/latency. Supports exact-match and semantic (embedding similarity) caches with TTL controls. Universal across all surveyed gateways; Frugalis is the only one with zero caching today.** — Archived 2026-06-28 → `context/archive/2026-06-28-add-response-cache/`. Lesson: —.
- 
+
 - **S-07a: Generic configuration leaking from `RegexClassifier::from_env()` is lifted to `main()` so it's available to all classifier backends. After extraction, `RegexClassifier` receives only classifier-specific data (patterns, weights, thresholds, `CategoryConfig`).** — Archived 2026-06-07 → `context/archive/2026-06-07-extract-generic-classifier-config/`. Lesson: —.
 
 - **S-07b: A `CategoryConfig` struct is defined with `name`, `description`, `regex_threshold`, and `priority` fields. A static `CATEGORIES: &[CategoryConfig]` array serves as the single source of truth for all four intent categories. `RegexClassifier` consumes `CategoryConfig` at construction time (replacing scattered `CAT_*` constants, thresholds, and hardcoded priority ordering). The same `CategoryConfig` array feeds `LLMClassifier`'s prompt template generation (iterating `.description` fields) so both classifiers operate on the same category set without drift.** — Archived 2026-06-08 → `context/archive/2026-06-07-shared-category-config/`. Lesson: —.
-- **T-01: (tech debt) `src/` reorganized from 13 flat files into 6 domain directories (`proxy/`, `classification/`, `protocol/`, `config/`, `persistence/`, `dashboard/`). `main.rs` shrinks from 8,460 to ~250 lines. Tests co-located with their code. Dead code removed.** — Archived 2026-06-28 → `context/archive/2026-06-28-code-structure-reorg/`. Lesson: —.
 
 - **S-09: An `LLMClassifier` struct implements `IntentClassify`, sending the user prompt to a small/cheap classification model (e.g., `gpt-4o-mini`) and parsing the intent category from the response. Its config carries: model name, endpoint, `UPSTREAM_API_KEY` env var, and a classification prompt template that instructs the model to output one of the known categories. The `AppState` can hold either `RegexClassifier` or `LLMClassifier` behind the same `Arc<dyn IntentClassify>`.** — Archived 2026-06-08 → `context/archive/2026-06-07-llm-classifier/`. Lesson: —.
 
