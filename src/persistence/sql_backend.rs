@@ -701,7 +701,7 @@ mod tests {
                 status: "ok".to_string(),
                 category: Some(format!("CAT_{}", i)),
                 upstream_model: Some("model".to_string()),
-                duration_ms: Some(10 * i as i32),
+                duration_ms: Some(10 * i),
                 prompt_snippet: format!("snippet {}", i),
                 prompt_char_count: Some(50),
                 created_at: chrono::Utc::now(),
