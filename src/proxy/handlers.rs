@@ -7,53 +7,13 @@ use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
+use sha2::{Digest, Sha256};
+
+#[cfg(feature = "otel")]
+use crate::proxy::RequestMetrics;
+
 #[cfg(feature = "otel")]
 use opentelemetry::KeyValue;
-
-#[cfg(feature = "otel")]
-pub(crate) struct RequestMetrics {
-    metrics: Option<crate::telemetry::Metrics>,
-    method: &'static str,
-    route: &'static str,
-    start: std::time::Instant,
-    status: StatusCode,
-}
-
-#[cfg(feature = "otel")]
-impl RequestMetrics {
-    pub(crate) fn new(
-        metrics: Option<crate::telemetry::Metrics>,
-        method: &'static str,
-        route: &'static str,
-    ) -> Self {
-        Self {
-            metrics,
-            method,
-            route,
-            start: std::time::Instant::now(),
-            status: StatusCode::OK,
-        }
-    }
-    pub(crate) fn set_status(&mut self, status: StatusCode) {
-        self.status = status;
-    }
-}
-
-#[cfg(feature = "otel")]
-impl Drop for RequestMetrics {
-    fn drop(&mut self) {
-        if let Some(ref m) = self.metrics {
-            let attrs = [
-                KeyValue::new("method", self.method),
-                KeyValue::new("route", self.route),
-                KeyValue::new("status", self.status.as_u16().to_string()),
-            ];
-            m.requests_total.add(1, &attrs);
-            m.request_duration_seconds
-                .record(self.start.elapsed().as_secs_f64(), &attrs);
-        }
-    }
-}
 
 pub(crate) async fn health() -> (StatusCode, &'static str) {
     debug!("Health check request received");
@@ -215,7 +175,6 @@ pub(crate) async fn completion_handler(
         if no_cache {
             debug!("Cache bypass via X-Frugalis-No-Cache header");
         } else {
-            use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(&body);
             let key = format!("{:x}", hasher.finalize());
@@ -1027,7 +986,6 @@ pub(crate) async fn messages_handler(
         if no_cache {
             debug!("Cache bypass via X-Frugalis-No-Cache header");
         } else {
-            use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(&body);
             let key = format!("{:x}", hasher.finalize());
@@ -1712,6 +1670,7 @@ mod tests {
         Router,
     };
     use serial_test::serial;
+    use std::collections::HashMap;
     use tower::util::ServiceExt;
 
     #[tokio::test]
@@ -1861,7 +1820,6 @@ mod tests {
         api_key_env_val: Option<&str>,
     ) -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        use std::collections::HashMap;
         let cats = test_categories();
         let auth_config = Arc::new(auth::AuthConfig::from_values(
             "proxy-token",
@@ -2232,7 +2190,6 @@ mod tests {
 
     fn test_app_with_dead_endpoint(env_var_name: &str) -> Router {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        use std::collections::HashMap;
         let cats = test_categories();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(1))
@@ -3000,7 +2957,6 @@ mod tests {
 
     fn test_app_with_openai_translation(env_var_name: &str) -> (Router, httpmock::MockServer) {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        use std::collections::HashMap;
         let cats = test_categories();
         let server = httpmock::MockServer::start();
         let client = reqwest::Client::builder()

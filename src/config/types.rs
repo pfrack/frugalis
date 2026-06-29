@@ -421,7 +421,7 @@ pub(crate) struct FewShotConfig {
     pub max_training_examples: usize,
 }
 
-// ── Classification config types (moved from classification::types) ──
+// ── Classification config types ──
 
 fn default_weight() -> u8 {
     1

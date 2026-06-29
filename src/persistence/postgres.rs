@@ -1,7 +1,8 @@
+use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
 use sqlx::Row;
 use tracing::{error, info, warn};
@@ -45,9 +46,6 @@ impl PostgresBackend {
     pub async fn from_env(db_config: &DatabaseConfig) -> Result<Self, String> {
         let url = std::env::var("DATABASE_URL")
             .map_err(|_| "DATABASE_URL environment variable is required".to_string())?;
-
-        use sqlx::postgres::PgConnectOptions;
-        use std::str::FromStr;
 
         let options = PgConnectOptions::from_str(&url)
             .map_err(|e| format!("DB connection string parse error: {e}"))?;

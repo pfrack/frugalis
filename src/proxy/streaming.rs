@@ -108,11 +108,11 @@ pub(crate) fn handle_streaming_response(
 
 /// Convert a non-2xx upstream response into an SSE error event for the client.
 ///
-/// 5 invariants protect this code path (the prior-review-fix lessons in
-/// `context/foundation/lessons.md`, specifically "Re-run review after a
-/// follow-up change touches the same handler" — the F1–F4 review fixes
-/// were lost twice across follow-up commits; this function is the
-/// regression guard that catches any future re-loss):
+/// 5 invariants protect this code path. The lesson
+/// "Re-run review after a follow-up change touches the same handler"
+/// records that review fixes in this proxy were lost twice across
+/// follow-up commits; this function is the regression guard that catches
+/// any future re-loss:
 /// 1. **Body cap (2 KB)** — upstream error bodies are bounded to 2 KB.
 ///    Large upstream bodies would amplify latency and memory pressure
 ///    on the proxy, and SSE clients don't need the full body to surface

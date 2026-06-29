@@ -395,6 +395,7 @@ pub(crate) fn merge_configs(base: &mut ConfigRoot, overlay: ConfigRoot) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::path::PathBuf;
 
     #[test]
@@ -555,7 +556,6 @@ priority = 4
 
     #[test]
     fn validate_external_pattern_file_not_found() {
-        use std::io::Write;
         let tmp_dir = std::env::temp_dir();
         let config_path = tmp_dir.join("test_validate_missing_patterns.toml");
         let mut file = std::fs::File::create(&config_path).unwrap();
@@ -747,7 +747,6 @@ categories:
 
     #[test]
     fn load_config_from_path_toml() {
-        use std::io::Write;
         let temp_dir = std::env::temp_dir();
         let file_path = temp_dir.join("test_load_config.toml");
         let mut file = std::fs::File::create(&file_path).expect("create temp file");
@@ -766,7 +765,6 @@ categories:
 
     #[test]
     fn load_config_from_path_yaml() {
-        use std::io::Write;
         let temp_dir = std::env::temp_dir();
         let file_path = temp_dir.join("test_load_config.yaml");
         let mut file = std::fs::File::create(&file_path).expect("create temp file");
@@ -785,7 +783,6 @@ categories:
 
     #[test]
     fn load_config_from_path_unknown_extension_defaults_to_toml() {
-        use std::io::Write;
         let temp_dir = std::env::temp_dir();
         let file_path = temp_dir.join("test_load_config.conf");
         let mut file = std::fs::File::create(&file_path).expect("create temp file");

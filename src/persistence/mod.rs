@@ -63,6 +63,7 @@ mod tests {
     use super::*;
     use crate::{app, auth, classification, config};
 
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use crate::app::test_helpers::{test_categories, test_negative_patterns};
@@ -73,6 +74,7 @@ mod tests {
         Router,
     };
     use serial_test::serial;
+    use sqlx::Row;
     use tower::util::ServiceExt;
 
     pub(crate) fn build_app_with_persistence_backend(
@@ -81,7 +83,6 @@ mod tests {
         http_client: Option<reqwest::Client>,
     ) -> (Router, httpmock::MockServer) {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        use std::collections::HashMap;
         let cats = test_categories();
         let server = httpmock::MockServer::start();
         let client = http_client.unwrap_or_else(|| {
@@ -204,7 +205,6 @@ mod tests {
         let row: Option<sqlx::postgres::PgRow> = sqlx::query("SELECT data_type FROM information_schema.COLUMNS WHERE table_name = 'inferences' AND column_name = 'prompt_char_count'")
             .fetch_optional(pool.as_ref()).await.expect("schema query should succeed");
         let row = row.expect("prompt_char_count column should exist");
-        use sqlx::Row;
         let data_type: String = row.try_get("data_type").unwrap();
         assert_eq!(data_type, "integer");
     }
@@ -246,7 +246,6 @@ mod tests {
         let row = sqlx::query("SELECT status, prompt_snippet, prompt_char_count, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, client_session_id FROM inferences WHERE request_id = $1")
             .bind(request_id).fetch_optional(pool.as_ref()).await.expect("read-back query should succeed");
         let row = row.expect("inserted row should be present");
-        use sqlx::Row;
         assert_eq!(row.try_get::<String, _>("status").unwrap(), "ok");
         assert_eq!(
             row.try_get::<Option<String>, _>("prompt_snippet")
@@ -341,7 +340,6 @@ mod tests {
         let rows = sqlx::query("SELECT status FROM inferences WHERE prompt_snippet LIKE ? ORDER BY created_at ASC")
             .bind(format!("%{}%", test_message))
             .fetch_all(pool.as_ref()).await.expect("query should succeed");
-        use sqlx::Row;
         let statuses: Vec<String> = rows
             .iter()
             .map(|row| row.try_get::<String, _>("status").unwrap())
@@ -407,7 +405,6 @@ mod tests {
         let rows = sqlx::query("SELECT status FROM inferences WHERE prompt_snippet LIKE ? ORDER BY created_at ASC")
             .bind(format!("%{}%", test_message))
             .fetch_all(pool.as_ref()).await.expect("query should succeed");
-        use sqlx::Row;
         let statuses: Vec<String> = rows
             .iter()
             .map(|row| row.try_get::<String, _>("status").unwrap())
