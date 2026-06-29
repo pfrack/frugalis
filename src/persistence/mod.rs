@@ -324,7 +324,7 @@ mod tests {
         let poll_start = std::time::Instant::now();
         let poll_timeout = std::time::Duration::from_secs(3);
         loop {
-            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inferences WHERE prompt_snippet LIKE ?")
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inferences WHERE prompt_snippet LIKE $1")
                 .bind(format!("%{}%", test_message))
                 .fetch_one(pool.as_ref())
                 .await
@@ -337,7 +337,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        let rows = sqlx::query("SELECT status FROM inferences WHERE prompt_snippet LIKE ? ORDER BY created_at ASC")
+        let rows = sqlx::query("SELECT status FROM inferences WHERE prompt_snippet LIKE $1 ORDER BY created_at ASC")
             .bind(format!("%{}%", test_message))
             .fetch_all(pool.as_ref()).await.expect("query should succeed");
         let statuses: Vec<String> = rows
@@ -389,7 +389,7 @@ mod tests {
         let poll_start = std::time::Instant::now();
         let poll_timeout = std::time::Duration::from_secs(3);
         loop {
-            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inferences WHERE prompt_snippet LIKE ?")
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inferences WHERE prompt_snippet LIKE $1")
                 .bind(format!("%{}%", test_message))
                 .fetch_one(pool.as_ref())
                 .await
@@ -402,7 +402,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        let rows = sqlx::query("SELECT status FROM inferences WHERE prompt_snippet LIKE ? ORDER BY created_at ASC")
+        let rows = sqlx::query("SELECT status FROM inferences WHERE prompt_snippet LIKE $1 ORDER BY created_at ASC")
             .bind(format!("%{}%", test_message))
             .fetch_all(pool.as_ref()).await.expect("query should succeed");
         let statuses: Vec<String> = rows
