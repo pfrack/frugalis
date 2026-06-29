@@ -247,10 +247,10 @@ impl PersistenceBackend for SqlBackend {
             let mut q = Query::select();
             q.expr(Expr::cust("COUNT(*)")).from(Inferences::Table);
             if let Some(cat) = filter_category {
-                q.and_where(Expr::col(Inferences::Category).equals(cat.to_string()));
+                q.and_where(Expr::col(Inferences::Category).eq(Expr::val(cat)));
             }
             if let Some(model) = filter_model {
-                q.and_where(Expr::col(Inferences::UpstreamModel).equals(model.to_string()));
+                q.and_where(Expr::col(Inferences::UpstreamModel).eq(Expr::val(model)));
             }
             match self.dialect {
                 Dialect::Postgres => q.to_string(PostgresQueryBuilder),
@@ -273,10 +273,10 @@ impl PersistenceBackend for SqlBackend {
             .limit(limit as u64)
             .offset(offset as u64);
             if let Some(cat) = filter_category {
-                q.and_where(Expr::col(Inferences::Category).equals(cat.to_string()));
+                q.and_where(Expr::col(Inferences::Category).eq(Expr::val(cat)));
             }
             if let Some(model) = filter_model {
-                q.and_where(Expr::col(Inferences::UpstreamModel).equals(model.to_string()));
+                q.and_where(Expr::col(Inferences::UpstreamModel).eq(Expr::val(model)));
             }
             match self.dialect {
                 Dialect::Postgres => q.to_string(PostgresQueryBuilder),

@@ -375,9 +375,9 @@ Convert migration files to refinery format, remove `sqlite.rs` and `postgres.rs`
 
 - [x] 4.1 `cargo build` succeeds (no references to deleted files) — 8381978
 - [x] 4.2 All persistence tests pass with new SqlBackend — 8381978
-- [x] 4.3 `cargo clippy` clean — 8381978
-- [x] 4.4 `cargo test` full suite passes — 8381978
-- [x] 4.5 No dead code warnings from removed modules — 8381978
+- [x] 4.3 `cargo clippy` clean — 423469f
+- [x] 4.4 `cargo test` full suite passes — 423469f
+- [x] 4.5 No dead code warnings from removed modules — 423469f
 
 #### Manual
 
