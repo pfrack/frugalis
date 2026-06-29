@@ -11,9 +11,7 @@ use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
 use tracing::{error, info, warn};
 
-use crate::{
-    cache, classification, config, dashboard, persistence, proxy, routing,
-};
+use crate::{auth, cache, classification, config, dashboard, persistence, proxy};
 
 /// Shared application state injected into handlers via Axum's `State` extractor.
 /// `persistence` is `None` when `DATABASE_URL` is absent (persistence gracefully disabled).
@@ -23,8 +21,8 @@ pub(crate) struct AppState {
     pub classifier: Option<Arc<classification::chain::ClassifierChain>>,
     pub fewshot_classifier: Option<Arc<classification::fewshot::FewShotClassifier>>,
     pub routing:
-        Arc<tokio::sync::RwLock<std::collections::HashMap<String, routing::RouteEntry>>>,
-    pub model_costs: Arc<tokio::sync::RwLock<routing::ModelCosts>>,
+        Arc<tokio::sync::RwLock<std::collections::HashMap<String, config::routing::RouteEntry>>>,
+    pub model_costs: Arc<tokio::sync::RwLock<config::routing::ModelCosts>>,
     pub baseline_model: Arc<tokio::sync::RwLock<String>>,
     pub classify_db_log: Arc<std::sync::atomic::AtomicBool>,
     pub http_client: Option<reqwest::Client>,
@@ -42,8 +40,8 @@ pub(crate) struct AppState {
 
 pub(crate) struct ClassifierBuildResult {
     pub classifier: Option<Arc<classification::chain::ClassifierChain>>,
-    pub routing: HashMap<String, routing::RouteEntry>,
-    pub model_costs: routing::ModelCosts,
+    pub routing: HashMap<String, config::routing::RouteEntry>,
+    pub model_costs: config::routing::ModelCosts,
     pub baseline_model: String,
     pub fewshot_classifier: Option<Arc<classification::fewshot::FewShotClassifier>>,
 }
@@ -129,7 +127,7 @@ pub(crate) fn build_classifiers(
     let baseline_model = config_root
         .baseline_model
         .clone()
-        .unwrap_or_else(|| routing::DEFAULT_MODEL_COMPLEX.to_string());
+        .unwrap_or_else(|| config::routing::DEFAULT_MODEL_COMPLEX.to_string());
     let mut fewshot_classifier: Option<Arc<classification::fewshot::FewShotClassifier>> = None;
 
     if !classifiers_config.enabled {
@@ -312,7 +310,7 @@ pub(crate) async fn build_persistence(
     }
 }
 
-pub(crate) fn build_app(auth_config: Arc<routing::AuthConfig>, app_state: Arc<AppState>) -> Router {
+pub(crate) fn build_app(auth_config: Arc<auth::AuthConfig>, app_state: Arc<AppState>) -> Router {
     let unauth_v1_routes = Router::new().route("/models", get(proxy::handlers::models_handler));
 
     let proxy_routes = Router::new()
@@ -327,7 +325,7 @@ pub(crate) fn build_app(auth_config: Arc<routing::AuthConfig>, app_state: Arc<Ap
         )
         .route("/classify", post(proxy::handlers::classify_handler))
         .route("/feedback", post(proxy::handlers::feedback_handler))
-        .route_layer(routing::proxy_auth_layer(auth_config.clone()))
+        .route_layer(auth::proxy_auth_layer(auth_config.clone()))
         .merge(unauth_v1_routes);
 
     let dashboard_routes = dashboard::routes(auth_config);

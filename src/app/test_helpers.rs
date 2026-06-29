@@ -1,7 +1,7 @@
 use crate::app::{build_app, AppState};
+use crate::auth;
 use crate::classification;
 use crate::config;
-use crate::routing;
 use axum::Router;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -74,7 +74,7 @@ pub fn test_negative_patterns() -> Vec<config::types::NegativePatternConfig> {
 pub fn make_test_app_state(
     classifier: classification::regex::RegexClassifier,
     http_client: Option<reqwest::Client>,
-    model_costs: routing::ModelCosts,
+    model_costs: config::routing::ModelCosts,
     baseline_model: String,
     max_upstream_body_bytes: usize,
 ) -> Arc<AppState> {
@@ -123,7 +123,7 @@ pub fn test_app_with_http_client(
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .expect("test reqwest client should build");
-    let auth_config = Arc::new(routing::AuthConfig::from_values(
+    let auth_config = Arc::new(auth::AuthConfig::from_values(
         "proxy-token",
         "user",
         "password",
@@ -132,8 +132,8 @@ pub fn test_app_with_http_client(
     let mut routing = HashMap::new();
     routing.insert(
         cats[1].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
+        config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "sf-model".to_string(),
                 endpoint: endpoint.clone(),
                 provider_type: "openai_compatible".to_string(),
@@ -145,8 +145,8 @@ pub fn test_app_with_http_client(
     );
     routing.insert(
         cats[3].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
+        config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "ca-model".to_string(),
                 endpoint,
                 provider_type: "openai_compatible".to_string(),
@@ -156,8 +156,8 @@ pub fn test_app_with_http_client(
             cost_per_1m_input_tokens: None,
         },
     );
-    let fallback = routing::RouteEntry {
-        providers: vec![routing::ProviderEntry {
+    let fallback = config::routing::RouteEntry {
+        providers: vec![config::routing::ProviderEntry {
             model: "fallback-model".to_string(),
             endpoint: String::new(),
             provider_type: String::new(),
@@ -176,7 +176,7 @@ pub fn test_app_with_http_client(
     let app_state = make_test_app_state(
         regex_classifier,
         Some(client),
-        routing::ModelCosts::empty(),
+        config::routing::ModelCosts::empty(),
         String::new(),
         max_upstream_body_bytes,
     );
@@ -196,7 +196,7 @@ pub fn test_app_with_anthropic_http_client(
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .expect("test reqwest client should build");
-    let auth_config = Arc::new(routing::AuthConfig::from_values(
+    let auth_config = Arc::new(auth::AuthConfig::from_values(
         "proxy-token",
         "user",
         "password",
@@ -205,8 +205,8 @@ pub fn test_app_with_anthropic_http_client(
     let mut routing = HashMap::new();
     routing.insert(
         cats[1].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
+        config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "sf-model".to_string(),
                 endpoint: endpoint.clone(),
                 provider_type: "anthropic".to_string(),
@@ -218,8 +218,8 @@ pub fn test_app_with_anthropic_http_client(
     );
     routing.insert(
         cats[3].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
+        config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "ca-model".to_string(),
                 endpoint,
                 provider_type: "anthropic".to_string(),
@@ -229,8 +229,8 @@ pub fn test_app_with_anthropic_http_client(
             cost_per_1m_input_tokens: None,
         },
     );
-    let fallback = routing::RouteEntry {
-        providers: vec![routing::ProviderEntry {
+    let fallback = config::routing::RouteEntry {
+        providers: vec![config::routing::ProviderEntry {
             model: "fallback-model".to_string(),
             endpoint: String::new(),
             provider_type: String::new(),
@@ -249,7 +249,7 @@ pub fn test_app_with_anthropic_http_client(
     let app_state = make_test_app_state(
         regex_classifier,
         Some(client),
-        routing::ModelCosts::empty(),
+        config::routing::ModelCosts::empty(),
         String::new(),
         max_upstream_body_bytes,
     );
@@ -259,7 +259,7 @@ pub fn test_app_with_anthropic_http_client(
 
 pub fn test_app() -> Router {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-    let auth_config = Arc::new(routing::AuthConfig::from_values(
+    let auth_config = Arc::new(auth::AuthConfig::from_values(
         "proxy-token",
         "user",
         "password",
@@ -270,7 +270,7 @@ pub fn test_app() -> Router {
         fewshot_classifier: None,
         routing: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_costs: Arc::new(tokio::sync::RwLock::new(
-            routing::ModelCosts::empty(),
+            config::routing::ModelCosts::empty(),
         )),
         baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
         classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -293,7 +293,7 @@ pub fn test_app_with_classifier() -> Router {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     use std::collections::HashMap;
     let cats = test_categories();
-    let auth_config = Arc::new(routing::AuthConfig::from_values(
+    let auth_config = Arc::new(auth::AuthConfig::from_values(
         "proxy-token",
         "user",
         "password",
@@ -301,8 +301,8 @@ pub fn test_app_with_classifier() -> Router {
     let mut routing = HashMap::new();
     routing.insert(
         cats[1].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
+        config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "sf-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -314,8 +314,8 @@ pub fn test_app_with_classifier() -> Router {
     );
     routing.insert(
         cats[3].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
+        config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "ca-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -325,8 +325,8 @@ pub fn test_app_with_classifier() -> Router {
             cost_per_1m_input_tokens: None,
         },
     );
-    let fallback = routing::RouteEntry {
-        providers: vec![routing::ProviderEntry {
+    let fallback = config::routing::RouteEntry {
+        providers: vec![config::routing::ProviderEntry {
             model: "fallback-model".to_string(),
             endpoint: String::new(),
             provider_type: String::new(),
@@ -345,7 +345,7 @@ pub fn test_app_with_classifier() -> Router {
     let app_state = make_test_app_state(
         regex_classifier,
         None,
-        routing::ModelCosts::empty(),
+        config::routing::ModelCosts::empty(),
         String::new(),
         10_485_760,
     );
@@ -364,7 +364,7 @@ pub fn test_app_with_cache(
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .expect("test reqwest client should build");
-    let auth_config = Arc::new(routing::AuthConfig::from_values(
+    let auth_config = Arc::new(auth::AuthConfig::from_values(
         "proxy-token",
         "user",
         "password",
@@ -373,8 +373,8 @@ pub fn test_app_with_cache(
     let mut routing = std::collections::HashMap::new();
     routing.insert(
         cats[1].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
+        config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "sf-model".to_string(),
                 endpoint: endpoint.clone(),
                 provider_type: "openai_compatible".to_string(),
@@ -386,8 +386,8 @@ pub fn test_app_with_cache(
     );
     routing.insert(
         cats[3].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
+        config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
                 model: "ca-model".to_string(),
                 endpoint,
                 provider_type: "openai_compatible".to_string(),
@@ -397,8 +397,8 @@ pub fn test_app_with_cache(
             cost_per_1m_input_tokens: None,
         },
     );
-    let fallback = routing::RouteEntry {
-        providers: vec![routing::ProviderEntry {
+    let fallback = config::routing::RouteEntry {
+        providers: vec![config::routing::ProviderEntry {
             model: "fallback-model".to_string(),
             endpoint: String::new(),
             provider_type: String::new(),
@@ -432,7 +432,7 @@ pub fn test_app_with_cache(
         fewshot_classifier: None,
         routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
         model_costs: Arc::new(tokio::sync::RwLock::new(
-            routing::ModelCosts::empty(),
+            config::routing::ModelCosts::empty(),
         )),
         baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
         classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),

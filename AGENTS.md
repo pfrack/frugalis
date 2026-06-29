@@ -22,20 +22,20 @@ Tests are organized in two groups in `src/main.rs`: `mod tests` (fast unit/integ
 Source files under `src/`:
 - `main.rs` — Axum router setup, route definitions, health endpoint, proxy handlers, test harness
 - `app/` — Composition root: `mod.rs` (AppState, build_app, build_classifiers, build_persistence), `cli.rs` (CLI arg parsing, init), `quickstart.rs` (interactive setup wizard), `test_helpers.rs` (test utility functions, cfg(test)-gated)
-- `routing/` — Request-pipeline co-location: `auth.rs` (`AuthConfig`, middleware layers `proxy_auth_layer`/`dashboard_auth_layer`, token + basic credential validation, utility helpers) and `routes.rs` (routing data model: `ProviderEntry`, `RouteEntry`, `ModelCosts`, `DEFAULT_MODEL*` constants). `mod.rs` re-exports both so `crate::routing::AuthConfig` and `crate::routing::RouteEntry` resolve.
+- `auth.rs` — `AuthConfig` struct, middleware implementations (`require_proxy_bearer`, `require_dashboard_basic`), token/credential validation, utility helpers
 - `persistence.rs` — `PersistenceConfig` (pool + bounded task semaphore), `InferenceRecord`, async logging API (`log_inference`), snippet extraction. A separate module is justified: persistence is a distinct cross-cutting concern with its own lifecycle, retry policy, and DB driver dependency.
-- `dashboard/` — Dashboard sub-module: `nav.rs` (page registry `PAGES`, nav types, `nav_for()`), `templates.rs` (`dashboard_page!` macro, template structs), `handlers.rs` (handler functions, tests), `mod.rs` (`routes()` builder)
+- `dashboard.rs` — Dashboard page registry (`PAGES`), `dashboard_page!` macro, template structs, handler functions, and `routes()` builder for the `/dashboard/*` sub-router
 - `intent_classifier.rs` — Intent classification logic, regex patterns, model cost configuration
 
 Add new authentication schemes or routes to existing modules rather than creating separate files. Keep middleware functions near the config they read.
 
 ### Dashboard Pages & Auto-Nav
 
-Dashboard pages are registered in `src/dashboard/nav.rs` via a static registry and a macro.
+Dashboard pages are registered in `src/dashboard.rs` via a static registry and a macro.
 
-**`PAGES`** (`src/dashboard/nav.rs`) — the single source of truth for the sidebar navigation. Each entry has `path`, `label`, and inline SVG `icon`. To add a page, add one `NavPage` entry here.
+**`PAGES`** (`src/dashboard.rs:37-42`) — the single source of truth for the sidebar navigation. Each entry has `path`, `label`, and inline SVG `icon`. To add a page, add one `NavPage` entry here.
 
-**`dashboard_page!` macro** (`src/dashboard/templates.rs`) — generates the Askama template struct with `nav: NavContext` and `error: Option<String>` pre-populated. Usage:
+**`dashboard_page!` macro** (`src/dashboard.rs:55-68`) — generates the Askama template struct with `nav: NavContext` and `error: Option<String>` pre-populated. Usage:
 ```rust
 dashboard_page! {
     struct MyPageTemplate for "dashboard/my-page.html" {
@@ -50,16 +50,16 @@ The generated struct has `#[derive(Template, WebTemplate)]` and the correct `#[t
 
 **Adding a new dashboard page requires:**
 1. Create `templates/dashboard/{name}.html` (extends `base.html`, only `{% block content %}`)
-2. Add a `NavPage` entry to `PAGES` in `src/dashboard/nav.rs`
-3. Define template struct with `dashboard_page!` macro in `src/dashboard/templates.rs`
-4. Write the handler function in `src/dashboard/handlers.rs` (query DB, build struct with `nav_for("name")`)
-5. Add `.route("/name", get(name_handler))` in the `routes()` function in `src/dashboard/mod.rs`
+2. Add a `NavPage` entry to `PAGES` in `src/dashboard.rs`
+3. Define template struct with `dashboard_page!` macro
+4. Write the handler function (query DB, build struct with `nav_for("name")`)
+5. Add `.route("/name", get(name_handler))` in the `routes()` function
 
-Template structs live in `dashboard/templates.rs`, handlers in `dashboard/handlers.rs`, nav registry in `dashboard/nav.rs`, `routes()` builder in `dashboard/mod.rs` — not in `main.rs`.
+Template structs and handlers live in `dashboard.rs`, not in `main.rs`.
 
 ## Coding Conventions
 
-- Use **constant-time comparison** for all security-sensitive string matching (imported from `subtle` crate; see `constant_time_eq_str` in [src/routing/auth.rs](src/routing/auth.rs))
+- Use **constant-time comparison** for all security-sensitive string matching (imported from `subtle` crate; see `constant_time_eq_str` in [src/auth.rs](src/auth.rs))
 - Pass `Arc<AuthConfig>` via Axum state to middleware; never hardcode secrets
 - Middleware receives `State(config): State<Arc<AuthConfig>>`, `headers: HeaderMap`, `request: Request<Body>`, and `next: Next`
 - Tests construct `AuthConfig::from_values()` with plaintext test credentials; production uses `AuthConfig::from_env()`
