@@ -7,7 +7,7 @@ use tokio::fs;
 
 use crate::classification::chain::IntentClassify;
 use crate::classification::types::{ClassificationResult, ClassificationTier, FewShotExample};
-use crate::config::routing::{RouteEntry, DEFAULT_MODEL};
+use crate::routing::{RouteEntry, DEFAULT_MODEL};
 use crate::config::types::FewShotConfig;
 
 pub struct FewShotClassifier {
@@ -376,7 +376,7 @@ impl IntentClassify for FewShotClassifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::routing::ProviderEntry;
+    use crate::routing::ProviderEntry;
 
     fn make_config() -> FewShotConfig {
         let nanos = std::time::SystemTime::now()

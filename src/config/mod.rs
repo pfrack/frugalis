@@ -4,10 +4,9 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 pub(crate) mod loader;
-pub(crate) mod routing;
 pub(crate) mod types;
 
-pub(crate) use routing::RouteEntry;
+pub(crate) use crate::routing::RouteEntry;
 pub(crate) use types::{
     AuthProviderConfig, CacheConfig, CategoryConfig, ClassifiersConfig, CorsConfig,
     DashboardConfig, DatabaseConfig, FewShotConfig, HttpConfig, LlmClassifierConfig,

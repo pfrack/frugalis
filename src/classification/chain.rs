@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::classification::types::ClassificationResult;
-use crate::config::routing::RouteEntry;
+use crate::routing::RouteEntry;
 
 /// Trait for intent classification backends.
 #[async_trait]
@@ -369,8 +369,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            crate::config::routing::RouteEntry {
-                providers: vec![crate::config::routing::ProviderEntry {
+            crate::routing::RouteEntry {
+                providers: vec![crate::routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -382,8 +382,8 @@ mod tests {
         );
         routing.insert(
             cats[3].name.clone(),
-            crate::config::routing::RouteEntry {
-                providers: vec![crate::config::routing::ProviderEntry {
+            crate::routing::RouteEntry {
+                providers: vec![crate::routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -393,8 +393,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = crate::config::routing::RouteEntry {
-            providers: vec![crate::config::routing::ProviderEntry {
+        let fallback = crate::routing::RouteEntry {
+            providers: vec![crate::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -429,8 +429,8 @@ mod tests {
         let fewshot = crate::classification::fewshot::FewShotClassifier::new(
             fewshot_config,
             HashMap::new(),
-            crate::config::routing::RouteEntry {
-                providers: vec![crate::config::routing::ProviderEntry {
+            crate::routing::RouteEntry {
+                providers: vec![crate::routing::ProviderEntry {
                     model: "fallback-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -478,8 +478,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             "SYNTAX_FIX".to_string(),
-            crate::config::routing::RouteEntry {
-                providers: vec![crate::config::routing::ProviderEntry {
+            crate::routing::RouteEntry {
+                providers: vec![crate::routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -491,8 +491,8 @@ mod tests {
         );
         routing.insert(
             "CASUAL".to_string(),
-            crate::config::routing::RouteEntry {
-                providers: vec![crate::config::routing::ProviderEntry {
+            crate::routing::RouteEntry {
+                providers: vec![crate::routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -502,8 +502,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = crate::config::routing::RouteEntry {
-            providers: vec![crate::config::routing::ProviderEntry {
+        let fallback = crate::routing::RouteEntry {
+            providers: vec![crate::routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),

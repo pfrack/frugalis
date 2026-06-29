@@ -1,4 +1,4 @@
-use crate::config::routing::{ProviderEntry, DEFAULT_MODEL};
+use crate::routing::{ProviderEntry, DEFAULT_MODEL};
 use serde::{Deserialize, Serialize};
 
 /// The output of any [`IntentClassify`] backend: resolved category, model, routing tier, and provider list.

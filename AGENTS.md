@@ -22,7 +22,7 @@ Tests are organized in two groups in `src/main.rs`: `mod tests` (fast unit/integ
 Source files under `src/`:
 - `main.rs` — Axum router setup, route definitions, health endpoint, proxy handlers, test harness
 - `app/` — Composition root: `mod.rs` (AppState, build_app, build_classifiers, build_persistence), `cli.rs` (CLI arg parsing, init), `quickstart.rs` (interactive setup wizard), `test_helpers.rs` (test utility functions, cfg(test)-gated)
-- `auth.rs` — `AuthConfig` struct, middleware implementations (`require_proxy_bearer`, `require_dashboard_basic`), token/credential validation, utility helpers
+- `routing/` — Request-pipeline co-location: `auth.rs` (`AuthConfig`, middleware layers `proxy_auth_layer`/`dashboard_auth_layer`, token + basic credential validation, utility helpers) and `routes.rs` (routing data model: `ProviderEntry`, `RouteEntry`, `ModelCosts`, `DEFAULT_MODEL*` constants). `mod.rs` re-exports both so `crate::routing::AuthConfig` and `crate::routing::RouteEntry` resolve.
 - `persistence.rs` — `PersistenceConfig` (pool + bounded task semaphore), `InferenceRecord`, async logging API (`log_inference`), snippet extraction. A separate module is justified: persistence is a distinct cross-cutting concern with its own lifecycle, retry policy, and DB driver dependency.
 - `dashboard/` — Dashboard sub-module: `nav.rs` (page registry `PAGES`, nav types, `nav_for()`), `templates.rs` (`dashboard_page!` macro, template structs), `handlers.rs` (handler functions, tests), `mod.rs` (`routes()` builder, re-exports)
 - `intent_classifier.rs` — Intent classification logic, regex patterns, model cost configuration
@@ -59,7 +59,7 @@ Template structs live in `dashboard/templates.rs`, handlers in `dashboard/handle
 
 ## Coding Conventions
 
-- Use **constant-time comparison** for all security-sensitive string matching (imported from `subtle` crate; see `constant_time_eq_str` in [src/auth.rs](src/auth.rs))
+- Use **constant-time comparison** for all security-sensitive string matching (imported from `subtle` crate; see `constant_time_eq_str` in [src/routing/auth.rs](src/routing/auth.rs))
 - Pass `Arc<AuthConfig>` via Axum state to middleware; never hardcode secrets
 - Middleware receives `State(config): State<Arc<AuthConfig>>`, `headers: HeaderMap`, `request: Request<Body>`, and `next: Next`
 - Tests construct `AuthConfig::from_values()` with plaintext test credentials; production uses `AuthConfig::from_env()`

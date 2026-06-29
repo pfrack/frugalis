@@ -10,7 +10,7 @@ use crate::config::types::{CategoryConfig, NegativePatternConfig};
 
 #[cfg(test)]
 use crate::config::types::{DualThreshold, PatternEntry};
-use crate::config::routing::RouteEntry;
+use crate::routing::RouteEntry;
 
 pub struct RegexClassifier {
     pub set: RegexSet,
@@ -247,7 +247,7 @@ impl RegexClassifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::routing::{ProviderEntry, RouteEntry};
+    use crate::routing::{ProviderEntry, RouteEntry};
 
     fn test_categories() -> Vec<CategoryConfig> {
         vec![

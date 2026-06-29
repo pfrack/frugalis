@@ -1705,7 +1705,7 @@ mod tests {
         test_negative_patterns,
     };
     use crate::test_util::EnvGuard;
-    use crate::{auth, classification, config};
+    use crate::{classification, routing};
     use axum::{
         body::Body,
         http::{header, Request, StatusCode},
@@ -1863,7 +1863,7 @@ mod tests {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
         let cats = test_categories();
-        let auth_config = Arc::new(auth::AuthConfig::from_values(
+        let auth_config = Arc::new(routing::AuthConfig::from_values(
             "proxy-token",
             "user",
             "password",
@@ -1871,8 +1871,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            config::routing::RouteEntry {
-                providers: vec![config::routing::ProviderEntry {
+            routing::RouteEntry {
+                providers: vec![routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: "https://test.endpoint".to_string(),
                     provider_type: provider_type_val.to_string(),
@@ -1884,8 +1884,8 @@ mod tests {
         );
         routing.insert(
             cats[3].name.clone(),
-            config::routing::RouteEntry {
-                providers: vec![config::routing::ProviderEntry {
+            routing::RouteEntry {
+                providers: vec![routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint: String::new(),
                     provider_type: String::new(),
@@ -1895,8 +1895,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = config::routing::RouteEntry {
-            providers: vec![config::routing::ProviderEntry {
+        let fallback = routing::RouteEntry {
+            providers: vec![routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -1915,7 +1915,7 @@ mod tests {
         let app_state = make_test_app_state(
             regex_classifier,
             None,
-            config::routing::ModelCosts::empty(),
+            routing::ModelCosts::empty(),
             String::new(),
             10_485_760,
         );
@@ -2238,7 +2238,7 @@ mod tests {
             .timeout(std::time::Duration::from_secs(1))
             .build()
             .expect("test reqwest client should build");
-        let auth_config = Arc::new(auth::AuthConfig::from_values(
+        let auth_config = Arc::new(routing::AuthConfig::from_values(
             "proxy-token",
             "user",
             "password",
@@ -2246,8 +2246,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            config::routing::RouteEntry {
-                providers: vec![config::routing::ProviderEntry {
+            routing::RouteEntry {
+                providers: vec![routing::ProviderEntry {
                     model: "sf-model".to_string(),
                     endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
                     provider_type: "openai_compatible".to_string(),
@@ -2259,8 +2259,8 @@ mod tests {
         );
         routing.insert(
             cats[3].name.clone(),
-            config::routing::RouteEntry {
-                providers: vec![config::routing::ProviderEntry {
+            routing::RouteEntry {
+                providers: vec![routing::ProviderEntry {
                     model: "ca-model".to_string(),
                     endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
                     provider_type: "openai_compatible".to_string(),
@@ -2270,8 +2270,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = config::routing::RouteEntry {
-            providers: vec![config::routing::ProviderEntry {
+        let fallback = routing::RouteEntry {
+            providers: vec![routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -2290,7 +2290,7 @@ mod tests {
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
-            config::routing::ModelCosts::empty(),
+            routing::ModelCosts::empty(),
             String::new(),
             10_485_760,
         );
@@ -3007,7 +3007,7 @@ mod tests {
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .expect("test reqwest client should build");
-        let auth_config = Arc::new(auth::AuthConfig::from_values(
+        let auth_config = Arc::new(routing::AuthConfig::from_values(
             "proxy-token",
             "user",
             "password",
@@ -3016,8 +3016,8 @@ mod tests {
         let mut routing = HashMap::new();
         routing.insert(
             cats[1].name.clone(),
-            config::routing::RouteEntry {
-                providers: vec![config::routing::ProviderEntry {
+            routing::RouteEntry {
+                providers: vec![routing::ProviderEntry {
                     model: "gpt-4o".to_string(),
                     endpoint: endpoint.clone(),
                     provider_type: "openai_compatible".to_string(),
@@ -3027,8 +3027,8 @@ mod tests {
                 cost_per_1m_input_tokens: None,
             },
         );
-        let fallback = config::routing::RouteEntry {
-            providers: vec![config::routing::ProviderEntry {
+        let fallback = routing::RouteEntry {
+            providers: vec![routing::ProviderEntry {
                 model: "fallback-model".to_string(),
                 endpoint: String::new(),
                 provider_type: String::new(),
@@ -3047,7 +3047,7 @@ mod tests {
         let app_state = make_test_app_state(
             regex_classifier,
             Some(client),
-            config::routing::ModelCosts::empty(),
+            routing::ModelCosts::empty(),
             String::new(),
             10_485_760,
         );

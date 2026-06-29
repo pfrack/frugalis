@@ -4,7 +4,7 @@ use tracing::warn;
 
 pub(crate) fn build_upstream_request(
     client: &reqwest::Client,
-    provider: &crate::config::routing::ProviderEntry,
+    provider: &crate::routing::ProviderEntry,
     body: &Bytes,
     api_key: &str,
     auth_providers: &[crate::config::types::AuthProviderConfig],
