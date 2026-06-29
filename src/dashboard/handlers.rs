@@ -1,158 +1,18 @@
-use askama::Template;
-use askama_web::WebTemplate;
-use axum::{
-    extract::{Query, State},
-    response::IntoResponse,
-    routing::get,
-    Router,
-};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tower_http::services::ServeDir;
+
+use axum::extract::{Query, State};
+use axum::response::IntoResponse;
 use tracing::debug;
 
-use crate::{app::AppState, auth, persistence};
-use persistence::PersistenceBackend;
+use crate::app::AppState;
+use crate::persistence::PersistenceBackend;
+use super::nav::nav_for;
+use super::templates::{
+    CacheTemplate, DashboardTemplate, InferencesTemplate, LatencyTemplate, SavingsTemplate,
+};
 
-/// Navigation page entry registered in `PAGES`.
-///
-/// # Safety
-/// The `icon` field must contain a trusted SVG string (compile-time constant).
-/// It is rendered with `|safe` in `base.html` — bypassing HTML escaping.
-/// Never source `icon` from user input, a database, or any untrusted origin.
-pub struct NavPage {
-    pub path: &'static str,
-    pub label: &'static str,
-    pub icon: &'static str,
-}
-
-pub struct NavItem {
-    pub path: &'static str,
-    pub label: &'static str,
-    pub icon: &'static str,
-    pub active: bool,
-}
-
-pub struct NavContext {
-    pub pages: Vec<NavItem>,
-}
-
-const ICON_DASHBOARD: &str = "<svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='3' width='7' height='7'/><rect x='14' y='3' width='7' height='7'/><rect x='3' y='14' width='7' height='7'/><rect x='14' y='14' width='7' height='7'/></svg>";
-const ICON_LIST: &str = "<svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><line x1='8' y1='6' x2='21' y2='6'/><line x1='8' y1='12' x2='21' y2='12'/><line x1='8' y1='18' x2='21' y2='18'/><line x1='3' y1='6' x2='3.01' y2='6'/><line x1='3' y1='12' x2='3.01' y2='12'/><line x1='3' y1='18' x2='3.01' y2='18'/></svg>";
-const ICON_CLOCK: &str = "<svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='10'/><polyline points='12 6 12 12 16 14'/></svg>";
-const ICON_DOLLAR: &str = "<svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><line x1='12' y1='1' x2='12' y2='23'/><path d='M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6'/></svg>";
-const ICON_CACHE: &str = "<svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M21 12a9 9 0 0 0-8.17-8.98'/><path d='M3 12a9 9 0 0 0 8.17 8.98'/><polyline points='15 7 21 7 21 1'/><polyline points='9 17 3 17 3 23'/></svg>";
-
-pub static PAGES: &[NavPage] = &[
-    NavPage {
-        path: "",
-        label: "Dashboard",
-        icon: ICON_DASHBOARD,
-    },
-    NavPage {
-        path: "inferences",
-        label: "Inference Logs",
-        icon: ICON_LIST,
-    },
-    NavPage {
-        path: "latency",
-        label: "Latency",
-        icon: ICON_CLOCK,
-    },
-    NavPage {
-        path: "savings",
-        label: "Savings",
-        icon: ICON_DOLLAR,
-    },
-    NavPage {
-        path: "cache",
-        label: "Cache",
-        icon: ICON_CACHE,
-    },
-];
-
-pub fn nav_for(current: &str) -> NavContext {
-    NavContext {
-        pages: PAGES
-            .iter()
-            .map(|p| NavItem {
-                path: p.path,
-                label: p.label,
-                icon: p.icon,
-                active: p.path == current,
-            })
-            .collect(),
-    }
-}
-
-macro_rules! dashboard_page {
-    (
-        $(#[$attr:meta])*
-        struct $name:ident for $path:literal {
-            $($field:ident: $ty:ty),* $(,)?
-        }
-    ) => {
-        $(#[$attr])*
-        #[derive(Template, WebTemplate)]
-        #[template(path = $path)]
-        pub struct $name {
-            pub nav: NavContext,
-            pub error: Option<String>,
-            $(
-                pub $field: $ty,
-            )*
-        }
-    };
-}
-
-dashboard_page! {
-    struct DashboardTemplate for "dashboard/index.html" {
-        summary: Option<persistence::LatencySummary>,
-        savings: Option<persistence::SavingsEstimate>,
-        recent: Vec<persistence::InferenceLog>,
-        db_connected: bool,
-        classifier_active: bool,
-        baseline_model: String,
-    }
-}
-
-dashboard_page! {
-    struct InferencesTemplate for "dashboard/inferences.html" {
-        records: Vec<persistence::InferenceLog>,
-        page: u32,
-        total_pages: u32,
-        filter_category: Option<String>,
-        filter_model: Option<String>,
-    }
-}
-
-dashboard_page! {
-    struct LatencyTemplate for "dashboard/latency.html" {
-        summary: Option<persistence::LatencySummary>,
-        hours: u32,
-    }
-}
-
-dashboard_page! {
-    struct SavingsTemplate for "dashboard/savings.html" {
-        estimate: Option<persistence::SavingsEstimate>,
-        baseline_model: String,
-    }
-}
-
-dashboard_page! {
-    struct CacheTemplate for "dashboard/cache.html" {
-        enabled: bool,
-        hit_count: u64,
-        miss_count: u64,
-        hit_rate: f64,
-        entry_count: u64,
-        max_entries: u64,
-        ttl_secs: u64,
-    }
-}
-
-async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub(super) async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let db_connected = state.persistence.is_some();
     let classifier_active = state.classifier.is_some();
     let model_costs = state.model_costs.read().await.clone();
@@ -212,7 +72,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }
 }
 
-async fn inferences_handler(
+pub(super) async fn inferences_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -280,7 +140,7 @@ async fn inferences_handler(
     }
 }
 
-async fn latency_handler(
+pub(super) async fn latency_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -323,7 +183,7 @@ async fn latency_handler(
     }
 }
 
-async fn savings_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub(super) async fn savings_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let persistence = match &state.persistence {
         Some(p) => p,
         None => {
@@ -363,7 +223,7 @@ async fn savings_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     }
 }
 
-async fn cache_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub(super) async fn cache_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match &state.response_cache {
         Some(cache) => {
             let stats = cache.stats();
@@ -401,17 +261,6 @@ async fn cache_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse 
             ttl_secs: 0,
         },
     }
-}
-
-pub fn routes(auth_config: Arc<auth::AuthConfig>) -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/", get(dashboard_handler))
-        .route("/inferences", get(inferences_handler))
-        .route("/latency", get(latency_handler))
-        .route("/savings", get(savings_handler))
-        .route("/cache", get(cache_handler))
-        .nest_service("/static", ServeDir::new("static"))
-        .route_layer(auth::dashboard_auth_layer(auth_config))
 }
 
 #[cfg(test)]
