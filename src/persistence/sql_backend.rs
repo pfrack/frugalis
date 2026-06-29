@@ -57,6 +57,7 @@ pub struct SqlBackend {
 
 impl SqlBackend {
     /// Create a SQLite in-memory backend for testing.
+    #[cfg(test)]
     pub async fn new_sqlite_in_memory() -> Result<Self, String> {
         let uri = format!("sqlite:file:sql_backend_test_{}?mode=memory&cache=shared", uuid::Uuid::new_v4());
         Self::connect(&uri).await
@@ -89,15 +90,6 @@ impl SqlBackend {
                 dialect: Dialect::Postgres,
             })
         } else if url.starts_with("sqlite:") {
-            // Run refinery migrations for file-based SQLite databases.
-            if let Some(path) = Self::sqlite_path_from_url(url) {
-                let mut conn = rusqlite::Connection::open(&path)
-                    .map_err(|e| format!("failed to open SQLite DB: {e}"))?;
-                embedded::migrations::runner()
-                    .run(&mut conn)
-                    .map_err(|e| format!("SQLite migration failed: {e}"))?;
-            }
-
             let pool = sqlx::SqlitePool::connect(url)
                 .await
                 .map_err(|e| format!("failed to create SQLite pool: {e}"))?;
@@ -106,32 +98,12 @@ impl SqlBackend {
                 dialect: Dialect::Sqlite,
             };
 
-            // For in-memory databases (cannot use rusqlite migrations), init schema directly.
-            if !Self::is_file_based_sqlite(url) {
-                backend.init_sqlite_schema().await?;
-            }
+            backend.init_sqlite_schema().await?;
 
             Ok(backend)
         } else {
             Err(format!("unsupported database URL scheme: {}", url))
         }
-    }
-
-    /// Extract the file path from a sqlite URL, or None for in-memory.
-    fn sqlite_path_from_url(url: &str) -> Option<String> {
-        let stripped = url.strip_prefix("sqlite:")?;
-        let (before_query, query) = stripped.split_once('?').unwrap_or((stripped, ""));
-        let path = before_query.strip_prefix("file:").unwrap_or(before_query);
-        if path.is_empty() || path.contains("memory") || query.contains("mode=memory") {
-            None
-        } else {
-            Some(path.to_string())
-        }
-    }
-
-    /// Returns true if the SQLite URL refers to a file-backed database.
-    fn is_file_based_sqlite(url: &str) -> bool {
-        Self::sqlite_path_from_url(url).is_some()
     }
 
     /// Initialize SQLite schema (CREATE TABLE IF NOT EXISTS + migrations).

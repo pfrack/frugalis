@@ -340,7 +340,7 @@ Convert migration files to refinery format, remove `sqlite.rs` and `postgres.rs`
 
 #### Manual
 
-- [ ] 1.4 Verify dependency tree is clean via `cargo tree -d`
+- [x] 1.4 Verify dependency tree is clean via `cargo tree -d`
 
 ### Phase 2: Create Unified SqlBackend — INSERT + fetch_inferences
 
@@ -353,7 +353,7 @@ Convert migration files to refinery format, remove `sqlite.rs` and `postgres.rs`
 
 #### Manual
 
-- [ ] 2.5 App starts with SqlBackend (SQLite), insert works via dashboard
+- [x] 2.5 App starts with SqlBackend (SQLite), insert works via dashboard
 
 ### Phase 3: Migrate Aggregation Queries
 
