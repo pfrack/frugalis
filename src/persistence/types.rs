@@ -1,14 +1,21 @@
 use tracing::warn;
 use uuid::Uuid;
 
-/// Trait for looking up model costs by name.
-/// Allows persistence to query costs without depending on the classification module directly.
-/// Must be Send + Sync so it can be passed as `&dyn CostProvider` across async task boundaries.
+/// Abstraction over a model-cost lookup table.
+///
+/// Decouples the persistence layer from the config and classification modules:
+/// [`crate::config::routing::ModelCosts`] implements this trait, but tests can
+/// supply a simple `HashMap`-backed mock. Must be `Send + Sync` so it can be
+/// referenced across async task boundaries via `&dyn CostProvider`.
 pub trait CostProvider: Send + Sync {
     fn get_cost(&self, model: &str) -> Option<f64>;
 }
 
-/// Custom error type for inference query failures.
+/// Typed error for dashboard query failures.
+///
+/// Wraps a `String` message. Implements `From<sqlx::Error>` so both the
+/// SQLite and Postgres backends can propagate query errors with `?` without
+/// losing the original message.
 #[derive(Debug, Clone)]
 pub struct QueryError(pub String);
 
@@ -26,7 +33,11 @@ impl From<sqlx::Error> for QueryError {
     }
 }
 
-/// One row from the `inferences` table, pre-formatted for dashboard display.
+/// A single row from the `inferences` table, pre-formatted for dashboard templates.
+///
+/// Timestamps are pre-rendered as `"YYYY-MM-DD HH:MM:SS UTC"` strings so
+/// templates don't need date-formatting logic. Numeric fields are `Option` to
+/// remain compatible with legacy rows that pre-date certain schema migrations.
 #[derive(Debug, Clone)]
 pub struct InferenceLog {
     pub timestamp: String,
@@ -40,7 +51,10 @@ pub struct InferenceLog {
     pub final_provider: Option<String>,
 }
 
-/// One row from the latency aggregation query — a single category's summary.
+/// Per-category latency statistics produced by `fetch_latency_summary`.
+///
+/// `p99_duration_ms` is computed in the database (Postgres `PERCENTILE_CONT`)
+/// or in Rust (memory / SQLite `percentile_99`).
 #[derive(Debug, Clone)]
 pub struct LatencySummaryRow {
     pub category: String,
@@ -49,7 +63,12 @@ pub struct LatencySummaryRow {
     pub p99_duration_ms: Option<i32>,
 }
 
-/// Result of a cost-savings estimate computation for the dashboard.
+/// Cost-savings estimate for the dashboard savings page.
+///
+/// Computed by comparing actual routing costs (each request priced at its
+/// routed model's rate) against a counterfactual where every request was
+/// served by `baseline_model`. A positive `savings_usd` means routing saved
+/// money relative to sending everything to the baseline model.
 #[derive(Debug, Clone)]
 pub struct SavingsEstimate {
     pub savings_usd: f64,
@@ -61,7 +80,11 @@ pub struct SavingsEstimate {
     pub baseline_model_unknown: bool,
 }
 
-/// Container for the full latency aggregation result.
+/// Full result of a latency aggregation pass across a time window.
+///
+/// Returned by `fetch_latency_summary`. Requests with `category IS NULL`
+/// are counted separately in `unclassified_count` rather than mixed into
+/// the per-category rows.
 #[derive(Debug, Clone)]
 pub struct LatencySummary {
     pub rows: Vec<LatencySummaryRow>,
@@ -69,12 +92,17 @@ pub struct LatencySummary {
     pub total_classified_count: i64,
 }
 
-/// Finalized inference metadata payload ready for background persistence.
+/// Complete metadata for one proxied inference request, ready for background persistence.
 ///
-/// `Default` is derived so test fixtures and the streaming open-path can omit
-/// the optional token/attribution fields via `..Default::default()`; the
-/// production builder (`enqueue_inference_record` in main.rs) sets every field
-/// explicitly, so deriving Default does not relax production invariants.
+/// Constructed by the proxy handler once the upstream response is complete and
+/// passed to [`crate::persistence::log_inference`]. `Default` is derived so
+/// tests can use `..Default::default()` to omit fields that are not relevant
+/// to the test scenario — the production builder sets every field explicitly,
+/// so the derived default does not weaken production invariants.
+///
+/// Token usage and Claude Code attribution fields are all `Option` so that:
+/// - Existing database rows without token data remain valid after migrations.
+/// - The memory backend and in-process tests work without faking usage data.
 #[derive(Clone, Default)]
 pub struct InferenceRecord {
     pub request_id: Uuid,
@@ -105,15 +133,18 @@ pub struct InferenceRecord {
     pub client_session_id: Option<String>,
 }
 
-/// Extract the full last user message from an OpenAI-compatible request body.
+/// Extract the last user message from an OpenAI-compatible `{"messages":[...]}` body.
 ///
-/// Parses `body` as `{"messages": [...]}`, finds the last message whose `role`
-/// is `"user"`, and returns its `content` string capped at 10,000 characters.
-/// On any parse failure or missing user message, returns `""` and emits a WARN
-/// log. Never panics.
+/// Returns the `content` string of the last `{"role": "user"}` message, capped
+/// at 10,000 characters. Returns `""` on any parse failure or when no user
+/// message is present, and emits a `WARN` log so the omission is observable.
 ///
-/// This is the shared utility used by both snippet extraction (`extract_snippet`)
-/// and the intent classifier for full-text intent analysis.
+/// **DoS protection:** messages arrays longer than 1,000 entries are rejected
+/// (returns `""` with a warning) to prevent memory exhaustion from crafted
+/// payloads.
+///
+/// Used by both snippet extraction (for the dashboard) and the intent
+/// classifier (for full-text classification). Never panics.
 pub fn extract_last_user_message(body: &str) -> String {
     let result: Option<String> = (|| {
         let v: serde_json::Value = serde_json::from_str(body).ok()?;
@@ -205,9 +236,15 @@ pub fn extract_last_user_message_anthropic(body: &str) -> String {
     }
 }
 
-/// Convert character count to estimated dollar cost.
+/// Estimate USD cost from prompt character count using a 4-chars-per-token heuristic.
 ///
-/// Uses a simple 4-characters-to-1-token heuristic. Rounds to 6 decimal places.
+/// ```text
+/// tokens = char_count / 4
+/// cost   = tokens × cost_per_1m_input_tokens / 1_000_000
+/// ```
+///
+/// Result is rounded to 6 decimal places to avoid floating-point noise in
+/// aggregation sums. Used by all three backends for the savings-estimate query.
 pub fn prompt_chars_to_cost(char_count: i32, cost_per_1m_input_tokens: f64) -> f64 {
     let tokens = char_count as f64 / 4.0;
     let cost = tokens * cost_per_1m_input_tokens / 1_000_000.0;

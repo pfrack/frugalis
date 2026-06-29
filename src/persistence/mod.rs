@@ -14,25 +14,29 @@ pub(crate) use types::{
     InferenceRecord, LatencySummary, SavingsEstimate,
 };
 
-/// Shared persistence configuration injected into the app router.
-/// Wraps an `Arc<DbBackend>` and a semaphore for bounding concurrent logging tasks.
+/// Shared persistence handle injected into the Axum router state.
+///
+/// Cheaply cloned per-request (both fields are `Arc`). The `task_semaphore`
+/// bounds the number of in-flight background log tasks so a slow database
+/// cannot cause unbounded memory growth under burst traffic.
 #[derive(Clone)]
 pub struct PersistenceConfig {
     pub backend: Arc<DbBackend>,
-    /// Bounds the number of concurrent background logging tasks to prevent
-    /// unbounded memory growth under high throughput.
+    /// Semaphore whose capacity equals `[database].log_concurrency_limit`.
+    /// Tasks block on `acquire()` rather than spawning unboundedly when the
+    /// database cannot keep up with insert throughput.
     pub task_semaphore: Arc<Semaphore>,
 }
 
-/// Enqueue an inference record for async persistence.
+/// Enqueue one [`InferenceRecord`] for asynchronous background persistence.
 ///
-/// Spawns a detached background task that inserts the record via the backend.
-/// Final failure is logged with the `request_id`. The caller returns immediately;
-/// DB latency is never on the synchronous response path.
+/// Returns immediately — the caller is never blocked by database latency.
+/// Internally, a detached `tokio::spawn` task:
+/// 1. Acquires one permit from `semaphore` (blocks if the pool is exhausted).
+/// 2. Calls `backend.insert_inference(&record)`.
+/// 3. On failure, logs `tracing::error!` with the `request_id` for observability.
 ///
-/// Uses a semaphore to bound concurrent tasks; if the limit is reached, the
-/// task waits before executing. This prevents unbounded memory growth
-/// under sustained high throughput.
+/// The returned `JoinHandle` can be awaited in tests; production code discards it.
 pub fn log_inference(
     backend: Arc<DbBackend>,
     semaphore: Arc<Semaphore>,

@@ -8,6 +8,7 @@ use crate::config::routing::RouteEntry;
 /// Trait for intent classification backends.
 #[async_trait]
 pub trait IntentClassify: Send + Sync + 'static {
+    /// Classify a prompt string and return the best matching [`ClassificationResult`].
     async fn classify(&self, prompt: &str) -> ClassificationResult;
 
     /// Returns a reference to this backend's routing table, if it has one.
@@ -23,6 +24,8 @@ pub struct ClassifierChain {
 }
 
 impl ClassifierChain {
+    /// Create a new chain from an ordered list of classifier backends.
+    /// Backends are tried left-to-right; the first non-Fallback result wins.
     pub fn new(backends: Vec<Arc<dyn IntentClassify + Send + Sync>>) -> Self {
         Self { backends }
     }

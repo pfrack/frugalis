@@ -13,8 +13,15 @@ use super::types::{
     CostProvider, InferenceLog, InferenceRecord, LatencySummary, QueryError, SavingsEstimate,
 };
 
-/// Shared trait that all persistence backends must implement.
-/// Backends are Send + Sync so they can be wrapped in Arc and shared across tasks.
+/// Uniform interface that all storage backends must implement.
+///
+/// `Send + Sync` so implementations can be stored in `Arc<DbBackend>` and
+/// shared safely across Tokio tasks. The four methods cover the full read/write
+/// surface used by the proxy and dashboard:
+/// - `insert_inference` — write path (hot, called on every proxied request)
+/// - `fetch_inferences` — paginated log table for the dashboard
+/// - `fetch_latency_summary` — per-category p50/p99 aggregation
+/// - `fetch_savings_estimate` — cost-delta computation for the savings page
 #[async_trait]
 pub trait PersistenceBackend: Send + Sync {
     async fn insert_inference(&self, record: &InferenceRecord) -> Result<(), String>;
@@ -34,7 +41,12 @@ pub trait PersistenceBackend: Send + Sync {
     ) -> Result<SavingsEstimate, QueryError>;
 }
 
-/// Dispatch enum wrapping the three backend variants.
+/// Enum dispatch over the three concrete backend implementations.
+///
+/// Preferred over `Box<dyn PersistenceBackend>` on the insert hot-path to
+/// avoid vtable indirection. Adding a new backend requires: (1) a new variant
+/// here, (2) a match arm in each `PersistenceBackend` implementation below,
+/// and (3) a new struct in its own module.
 pub enum DbBackend {
     Memory(MemoryBackend),
     Sqlite(SqliteBackend),
@@ -105,8 +117,14 @@ impl PersistenceBackend for DbBackend {
     }
 }
 
-/// Compute the 99th percentile from a sorted slice of durations.
-/// Returns the value at the 99th percentile index. Returns `None` for empty input.
+/// Compute the 99th percentile of a duration slice.
+///
+/// Sorts a copy of the input, then returns the value at index
+/// `ceil(0.99 × n) − 1`. Returns `None` for an empty slice.
+///
+/// Used by [`super::memory::MemoryBackend`] and [`super::sqlite::SqliteBackend`]
+/// since neither has a native `PERCENTILE_CONT` function. The Postgres backend
+/// delegates p99 to the database directly.
 pub(crate) fn percentile_99(durations: &[i32]) -> Option<i32> {
     if durations.is_empty() {
         return None;
@@ -117,8 +135,12 @@ pub(crate) fn percentile_99(durations: &[i32]) -> Option<i32> {
     Some(sorted[idx])
 }
 
-/// Retry an async operation exactly once.
-/// Logs a warning on the first failure and returns the second error if both fail.
+/// Execute an async operation; on first failure, log a warning and retry once.
+///
+/// Returns the successful value on either attempt. Returns the error from the
+/// second attempt if both fail. Used by [`super::sqlite::SqliteBackend`] and
+/// [`super::postgres::PostgresBackend`] to recover silently from transient
+/// connection errors without a full retry loop.
 pub(crate) async fn retry_once<F, Fut, T, E>(f: F) -> Result<T, E>
 where
     F: Fn() -> Fut,

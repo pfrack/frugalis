@@ -10,16 +10,29 @@ use super::types::{
     LatencySummaryRow, QueryError, SavingsEstimate,
 };
 
-/// SQLite persistence backend backed by `sqlx::SqlitePool`.
-/// File-backed (`./frugalis.db`) or in-memory via shared-cache URI.
-/// Schema is created via `CREATE TABLE IF NOT EXISTS` on construction.
+/// File-backed (or in-memory) SQLite persistence backend via `sqlx::SqlitePool`.
+///
+/// The schema is created idempotently on construction via
+/// `CREATE TABLE IF NOT EXISTS`. Missing columns from later migrations are
+/// detected with `PRAGMA table_info` and added via `ALTER TABLE … ADD COLUMN`
+/// so existing databases are upgraded automatically without a separate
+/// migration tool.
+///
+/// **p99 latency** is computed in Rust via [`percentile_99`] because SQLite
+/// does not have a native `PERCENTILE_CONT` function.
 pub struct SqliteBackend {
     pub pool: SqlitePool,
 }
 
 impl SqliteBackend {
-    /// Create a new SQLite backend from a file path.
-    /// For `:memory:`, uses a shared-cache in-memory URI.
+    /// Create a `SqliteBackend` from a file path.
+    ///
+    /// The string `":memory:"` is treated specially: instead of a plain
+    /// in-memory database (which would be invisible to other connections),
+    /// it maps to a **shared-cache** URI
+    /// (`sqlite:file:frugalis?mode=memory&cache=shared`) so that multiple pool
+    /// connections within the same process share the same data — important for
+    /// tests that open the backend and then query it through a separate pool.
     pub async fn from_path(path: &str) -> Result<Self, String> {
         let uri = if path == ":memory:" {
             "sqlite:file:frugalis?mode=memory&cache=shared".to_string()
@@ -29,8 +42,11 @@ impl SqliteBackend {
         Self::from_uri(&uri).await
     }
 
-    /// Create a new SQLite backend from an arbitrary URI.
-    /// Initializes the schema on construction.
+    /// Create a `SqliteBackend` from an arbitrary SQLite URI.
+    ///
+    /// Opens the pool (max 1 connection, min 1 to keep the file alive), then
+    /// calls `init_schema()` to create the table and run column migrations.
+    /// Returns `Err` if the pool cannot be opened or any DDL statement fails.
     pub async fn from_uri(uri: &str) -> Result<Self, String> {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)

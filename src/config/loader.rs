@@ -12,9 +12,10 @@ pub(crate) const CONFIG_DEFAULT: &str = "config.toml";
 #[cfg(test)]
 pub(crate) const ROUTING_CONFIG_LEGACY: &str = "routing.toml";
 
-/// Load cache configuration from a parsed ConfigRoot.
-/// Returns `None` when the `[cache]` section is absent or `max_entries == 0`
-/// (cache disabled).
+/// Extract cache configuration from an already-parsed [`ConfigRoot`].
+///
+/// Returns `None` — disabling the cache — when the `[cache]` section is
+/// absent **or** when `max_entries` is explicitly set to `0`.
 pub(crate) fn load_cache_config_from_value(root: &ConfigRoot) -> Option<CacheConfig> {
     match &root.cache {
         Some(cfg) if cfg.max_entries > 0 => Some(cfg.clone()),
@@ -26,8 +27,9 @@ pub(crate) fn load_cache_config_from_value(root: &ConfigRoot) -> Option<CacheCon
     }
 }
 
-/// Load dashboard configuration from a parsed ConfigRoot.
-/// Returns defaults if section is absent.
+/// Extract dashboard configuration from an already-parsed [`ConfigRoot`].
+/// Falls back to [`DashboardConfig::default`] when the `[dashboard]` section
+/// is absent.
 pub(crate) fn load_dashboard_config_from_value(root: &ConfigRoot) -> DashboardConfig {
     root.dashboard.clone().unwrap_or_else(|| {
         debug!("[dashboard] section not found; using defaults");
@@ -35,8 +37,9 @@ pub(crate) fn load_dashboard_config_from_value(root: &ConfigRoot) -> DashboardCo
     })
 }
 
-/// Load server configuration from a parsed ConfigRoot.
-/// Returns defaults if section is absent.
+/// Extract server configuration from an already-parsed [`ConfigRoot`].
+/// Falls back to [`ServerConfig::default`] (port 10000, info/compact) when the
+/// `[server]` section is absent.
 pub(crate) fn load_server_config_from_value(root: &ConfigRoot) -> ServerConfig {
     root.server.clone().unwrap_or_else(|| {
         debug!("[server] section not found; using defaults");
@@ -44,8 +47,8 @@ pub(crate) fn load_server_config_from_value(root: &ConfigRoot) -> ServerConfig {
     })
 }
 
-/// Load HTTP configuration from a parsed ConfigRoot.
-/// Returns defaults if section is absent.
+/// Extract HTTP layer configuration from an already-parsed [`ConfigRoot`].
+/// Falls back to [`HttpConfig::default`] when the `[http]` section is absent.
 pub(crate) fn load_http_config_from_value(root: &ConfigRoot) -> HttpConfig {
     root.http.clone().unwrap_or_else(|| {
         debug!("[http] section not found; using defaults");
@@ -53,8 +56,9 @@ pub(crate) fn load_http_config_from_value(root: &ConfigRoot) -> HttpConfig {
     })
 }
 
-/// Load database configuration from a parsed ConfigRoot.
-/// Returns defaults if section is absent.
+/// Extract database pool configuration from an already-parsed [`ConfigRoot`].
+/// Falls back to [`DatabaseConfig::default`] when the `[database]` section
+/// is absent.
 pub(crate) fn load_database_config_from_value(root: &ConfigRoot) -> DatabaseConfig {
     root.database.clone().unwrap_or_else(|| {
         debug!("[database] section not found; using defaults");
@@ -62,8 +66,9 @@ pub(crate) fn load_database_config_from_value(root: &ConfigRoot) -> DatabaseConf
     })
 }
 
-/// Load auth providers from a parsed ConfigRoot.
-/// Returns empty vec if section is absent.
+/// Extract upstream auth provider configs from an already-parsed [`ConfigRoot`].
+/// Returns an empty `Vec` when the `[[auth_provider]]` array is absent, meaning
+/// no automatic credential injection will occur.
 pub(crate) fn load_auth_providers_from_value(root: &ConfigRoot) -> Vec<AuthProviderConfig> {
     root.auth_providers.clone().unwrap_or_else(|| {
         debug!("[auth_provider] section not found; no auth providers configured");
@@ -71,8 +76,9 @@ pub(crate) fn load_auth_providers_from_value(root: &ConfigRoot) -> Vec<AuthProvi
     })
 }
 
-/// Load CORS configuration from a parsed ConfigRoot.
-/// Returns defaults if section is absent.
+/// Extract CORS configuration from an already-parsed [`ConfigRoot`].
+/// Falls back to [`CorsConfig::default`] (empty allowed-origins, CORS
+/// disabled) when the `[cors]` section is absent.
 pub(crate) fn load_cors_config_from_value(root: &ConfigRoot) -> CorsConfig {
     root.cors.clone().unwrap_or_else(|| {
         debug!("[cors] section not found; using defaults (empty allowed_origins)");
@@ -80,8 +86,9 @@ pub(crate) fn load_cors_config_from_value(root: &ConfigRoot) -> CorsConfig {
     })
 }
 
-/// Load persistence configuration from a parsed ConfigRoot.
-/// Returns defaults if section is absent.
+/// Extract persistence backend configuration from an already-parsed
+/// [`ConfigRoot`]. Falls back to [`PersistenceSettings::default`] (in-memory
+/// backend) when the `[persistence]` section is absent.
 pub(crate) fn load_persistence_config_from_value(root: &ConfigRoot) -> PersistenceSettings {
     root.persistence.clone().unwrap_or_else(|| {
         debug!("[persistence] section not found; using defaults (memory backend)");
@@ -89,9 +96,12 @@ pub(crate) fn load_persistence_config_from_value(root: &ConfigRoot) -> Persisten
     })
 }
 
-/// Parse an integer environment variable with optional min/max validation.
-/// Returns `default` if the variable is unset, empty, invalid, or out of range.
-/// Logs a warning on invalid or out-of-range values.
+/// Parse an integer from an environment variable with optional range clamping.
+///
+/// Returns `default` when the variable is unset, empty, non-numeric, or
+/// outside `[min, max]`. Emits a `warn!` log for invalid or out-of-range
+/// values so misconfigurations are visible in logs without crashing the
+/// server.
 #[cfg(test)]
 pub(crate) fn parse_env_int(var: &str, default: i32, min: Option<i32>, max: Option<i32>) -> i32 {
     let val_str = match std::env::var(var) {
@@ -132,6 +142,13 @@ pub(crate) fn parse_env_int(var: &str, default: i32, min: Option<i32>, max: Opti
     val
 }
 
+/// Build an emergency routing table from hardcoded Ollama defaults.
+///
+/// Used as a last resort when no config file is found on disk. Every
+/// provided `categories` entry is wired to `llama3.1` on
+/// `http://localhost:11434` (the default Ollama endpoint), and the same
+/// model is used as the fallback entry. This lets a fresh local install work
+/// without any API key or config file.
 pub(crate) fn hardcoded_routing(
     categories: &[CategoryConfig],
 ) -> (HashMap<String, RouteEntry>, RouteEntry) {
@@ -263,8 +280,16 @@ pub(crate) fn load_routing() -> (HashMap<String, RouteEntry>, RouteEntry) {
     (routing, fallback_entry)
 }
 
-/// Build routing map and fallback entry from a parsed ConfigRoot.
-/// Reads from the `[routing]` section. Returns (routing map, fallback entry).
+/// Build the routing dispatch table from an already-parsed [`ConfigRoot`].
+///
+/// Reads the `[routing]` section and returns `(routing_map, fallback)` where:
+/// - All route keys are uppercased before insertion.
+/// - The `DEFAULT` key, if present, is removed from the map and returned as
+///   the fallback [`RouteEntry`].
+/// - Missing `model`, `provider_type`, or `api_key_env` are warned about but
+///   do not cause an error.
+///
+/// Returns an empty map + `DEFAULT_MODEL` fallback when `[routing]` is absent.
 pub(crate) fn routing_from_value(
     config_root: &ConfigRoot,
 ) -> Result<(HashMap<String, RouteEntry>, RouteEntry), String> {
@@ -328,8 +353,13 @@ pub(crate) fn routing_from_value(
     Ok((routing, fallback))
 }
 
-/// Load categories from a parsed ConfigRoot.
-/// Reads categories from the `[categories]` table where each key is a category name.
+/// Extract and sort intent categories from an already-parsed [`ConfigRoot`].
+///
+/// Reads the `[categories]` table, assigns each map key as the category
+/// `name`, and sorts the resulting `Vec` by `priority` (ascending) so the
+/// classifier evaluates higher-priority categories first.
+///
+/// Returns `Err` when the `[categories]` section is absent or empty.
 pub(crate) fn load_categories_from_value(
     config_root: &ConfigRoot,
 ) -> Result<Vec<CategoryConfig>, String> {
@@ -355,8 +385,10 @@ pub(crate) fn load_categories_from_value(
     Ok(categories)
 }
 
-/// Load negative suppression patterns from a parsed ConfigRoot.
-/// Returns empty vec if section is absent.
+/// Extract negative suppression patterns from an already-parsed [`ConfigRoot`].
+/// Returns an empty `Vec` when the `[negative_patterns]` section is absent.
+/// Negative patterns are applied after scoring to veto false-positive
+/// category matches.
 pub(crate) fn load_negative_patterns_from_value(root: &ConfigRoot) -> Vec<NegativePatternConfig> {
     root.negative_patterns.clone().unwrap_or_else(|| {
         debug!("[negative_patterns] section not found; no negative patterns configured");
@@ -364,6 +396,14 @@ pub(crate) fn load_negative_patterns_from_value(root: &ConfigRoot) -> Vec<Negati
     })
 }
 
+/// Build a [`ModelCosts`] lookup table from config and routing data.
+///
+/// Merges two sources with the following priority (higher-priority wins):
+/// 1. Top-level `[model_costs]` table entries.
+/// 2. Per-route `cost_per_1m_input_tokens` fields — these override the global
+///    table for the model used by that route.
+///
+/// Call this after [`routing_from_value`] so the routing map is available.
 pub(crate) fn build_model_costs(
     config_root: &ConfigRoot,
     routing: &HashMap<String, RouteEntry>,
@@ -401,9 +441,22 @@ pub(crate) fn detect_format(path: &str) -> ConfigFormat {
     }
 }
 
-/// Load patterns from an external pattern file.
-/// Lines starting with `#` are comments; empty lines are skipped.
-/// Each non-comment line must match: `<weight> | <regex>`
+/// Load weighted regex patterns from an external pattern file.
+///
+/// The file format is one entry per line:
+/// ```text
+/// <weight (u8)> | <regex>
+/// ```
+/// Lines starting with `#` and blank lines are ignored. Both `weight` and
+/// `regex` are required on every data line.
+///
+/// # Security
+/// Path traversal is guarded: `path` is resolved relative to `base_dir` and
+/// the resolved path must remain inside `base_dir`. Attempts to escape via
+/// `../` are rejected with an error rather than silently reading an arbitrary
+/// file.
+///
+/// Returns `Err` with file:line context on any format, regex, or IO error.
 pub(crate) fn load_patterns_from_file(
     path: &str,
     base_dir: &Path,
@@ -446,8 +499,9 @@ pub(crate) fn load_patterns_from_file(
     Ok(entries)
 }
 
-/// Load classifiers config from a parsed ConfigRoot.
-/// Returns default if section is absent.
+/// Extract the global classifier pipeline config from an already-parsed
+/// [`ConfigRoot`]. Falls back to [`ClassifiersConfig::default`] (enabled,
+/// order: regex → fewshot → llm) when the `[classifiers]` section is absent.
 pub(crate) fn load_classifiers_config_from_value(root: &ConfigRoot) -> ClassifiersConfig {
     root.classifiers.clone().unwrap_or_else(|| {
         tracing::debug!("No [classifiers] section in config; using defaults");
@@ -476,6 +530,9 @@ pub(crate) fn load_regex_classifier_config(path: &str) -> RegexClassifierConfig 
     load_regex_classifier_config_from_value(&root)
 }
 
+/// Extract regex classifier configuration from an already-parsed [`ConfigRoot`].
+/// Falls back to [`RegexClassifierConfig::default`] (enabled, short_prompt_len
+/// = 30) when the `[regex_classifier]` section is absent.
 pub(crate) fn load_regex_classifier_config_from_value(root: &ConfigRoot) -> RegexClassifierConfig {
     root.regex_classifier.clone().unwrap_or_else(|| {
         debug!("[regex_classifier] section not found; using defaults (enabled)");
@@ -504,8 +561,10 @@ pub(crate) fn load_llm_classifier_config(path: &str) -> Option<LlmClassifierConf
     load_llm_classifier_config_from_value(&root)
 }
 
-/// Load few-shot classifier config from a parsed ConfigRoot.
-/// Returns None if section is absent or enabled = false.
+/// Extract few-shot classifier configuration from an already-parsed [`ConfigRoot`].
+/// Returns `None` when the `[fewshot_classifier]` section is absent **or**
+/// when `enabled = false`, so callers can skip construction of the classifier
+/// with a single `?` or `if let Some`.
 pub(crate) fn load_fewshot_config_from_value(root: &ConfigRoot) -> Option<FewShotConfig> {
     let cfg = root.fewshot_classifier.as_ref()?;
     if !cfg.enabled {
@@ -514,8 +573,10 @@ pub(crate) fn load_fewshot_config_from_value(root: &ConfigRoot) -> Option<FewSho
     Some(cfg.clone())
 }
 
-/// Load LLM classifier config from a parsed ConfigRoot.
-/// Returns None if section is absent or enabled = false.
+/// Extract LLM classifier configuration from an already-parsed [`ConfigRoot`].
+/// Returns `None` when the `[llm_classifier]` section is absent **or** when
+/// `enabled = false`, so callers can skip LLM classifier construction with a
+/// single `?` or `if let Some`.
 pub(crate) fn load_llm_classifier_config_from_value(
     root: &ConfigRoot,
 ) -> Option<LlmClassifierConfig> {

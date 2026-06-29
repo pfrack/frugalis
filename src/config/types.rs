@@ -125,8 +125,11 @@ fn default_cache_max_entries() -> u64 {
     1000
 }
 
-/// Cache configuration loaded from [cache] section.
-/// When the section is absent or `max_entries == 0`, the cache is disabled.
+/// In-memory cache configuration loaded from the `[cache]` section.
+///
+/// The cache is disabled entirely when the section is absent **or** when
+/// `max_entries` is set to `0`. This allows operators to turn off caching
+/// at runtime without removing the section.
 #[derive(Clone, Debug, Deserialize)]
 pub struct CacheConfig {
     #[serde(default = "default_cache_ttl_secs")]
@@ -135,7 +138,11 @@ pub struct CacheConfig {
     pub max_entries: u64,
 }
 
-/// Dashboard configuration for page defaults.
+/// Dashboard UI configuration loaded from the `[dashboard]` section.
+///
+/// Controls the default query window, selectable range bounds, and page-size
+/// limits exposed by every dashboard page. Templates read these values via
+/// `NavContext` so they do not need their own query-string parsing.
 #[derive(Clone, Debug, Deserialize)]
 pub struct DashboardConfig {
     #[serde(default = "default_dashboard_hours")]
@@ -165,14 +172,22 @@ impl Default for DashboardConfig {
     }
 }
 
-/// CORS configuration loaded from [cors] section.
+/// Cross-Origin Resource Sharing configuration loaded from the `[cors]` section.
+///
+/// An empty `allowed_origins` list disables CORS headers entirely. Each entry
+/// is matched against the `Origin` request header as a literal string.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct CorsConfig {
     #[serde(default)]
     pub allowed_origins: Vec<String>,
 }
 
-/// Server configuration.
+/// Top-level server configuration loaded from the `[server]` section.
+///
+/// Controls the TCP port the Axum listener binds to and the tracing subscriber
+/// format. `log_level` accepts the standard `tracing` filter strings
+/// (`trace`, `debug`, `info`, `warn`, `error`). `log_format` must be one of
+/// `compact`, `full`, `json`, or `pretty`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ServerConfig {
     #[serde(default = "default_port")]
@@ -193,7 +208,11 @@ impl Default for ServerConfig {
     }
 }
 
-/// HTTP configuration for client limits and timeouts.
+/// HTTP layer configuration loaded from the `[http]` section.
+///
+/// Governs both the Axum body-size limits for incoming requests and the reqwest
+/// client used to proxy requests upstream. `streaming_channel_capacity` sets
+/// the bounded mpsc channel depth for SSE streaming responses.
 #[derive(Clone, Debug, Deserialize)]
 pub struct HttpConfig {
     #[serde(default = "default_max_body_bytes")]
@@ -223,7 +242,12 @@ impl Default for HttpConfig {
     }
 }
 
-/// Database configuration for pool and retry settings.
+/// SQLite connection pool configuration loaded from the `[database]` section.
+///
+/// Controls pool size, acquisition timeout, idle-connection lifetime, and the
+/// exponential back-off parameters used on initial pool creation. Increase
+/// `log_concurrency_limit` to allow more parallel async log writes under high
+/// inference throughput.
 #[derive(Clone, Debug, Deserialize)]
 pub struct DatabaseConfig {
     #[serde(default = "default_connection_retries")]
@@ -253,7 +277,11 @@ impl Default for DatabaseConfig {
     }
 }
 
-/// Persistence backend configuration loaded from [persistence] section.
+/// Persistence backend configuration loaded from the `[persistence]` section.
+///
+/// `backend` selects the storage driver: `"memory"` stores inference logs
+/// in a `DashMap` (lost on restart, useful for testing) and `"sqlite"` persists
+/// them to the file at `sqlite_path`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct PersistenceSettings {
     #[serde(default = "default_backend")]
@@ -271,7 +299,12 @@ impl Default for PersistenceSettings {
     }
 }
 
-/// Authentication provider configuration.
+/// Upstream authentication provider loaded from an `[[auth_provider]]` array entry.
+///
+/// When the proxy forwards a request, it may need to inject provider-specific
+/// credentials that are separate from the client's own bearer token. Each
+/// entry describes how to derive and inject a single auth header. The
+/// `value_template` may reference environment variables.
 #[derive(Clone, Debug, Deserialize)]
 pub struct AuthProviderConfig {
     #[serde(rename = "type")]
@@ -280,7 +313,12 @@ pub struct AuthProviderConfig {
     pub value_template: Option<String>,
 }
 
-/// Configuration for global classifier settings.
+/// Global classifier pipeline configuration loaded from the `[classifiers]` section.
+///
+/// `enabled` is the master switch: setting it to `false` skips all
+/// classification and routes every request through the default entry. `order`
+/// defines the evaluation sequence; the first classifier that returns a
+/// non-`unknown` label wins, and later classifiers are not called.
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct ClassifiersConfig {
     #[serde(default = "default_enabled_true")]
@@ -302,7 +340,11 @@ impl Default for ClassifiersConfig {
     }
 }
 
-/// Configuration for the regex classifier backend.
+/// Regex classifier configuration loaded from the `[regex_classifier]` section.
+///
+/// The regex classifier scores prompts against weighted pattern lists. Very
+/// short prompts (under `short_prompt_len` characters) are skipped because
+/// regex patterns are unreliable on minimal input.
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct RegexClassifierConfig {
     #[serde(default = "default_enabled_true")]
@@ -320,7 +362,12 @@ impl Default for RegexClassifierConfig {
     }
 }
 
-/// Configuration for the LLM classifier backend.
+/// LLM classifier configuration loaded from the `[llm_classifier]` section.
+///
+/// The LLM classifier makes a secondary inference call to a smaller model to
+/// determine the intent category when the regex and few-shot classifiers
+/// return `unknown`. `timeout_secs` caps the classification call independently
+/// of the proxy's own `client_timeout_secs`.
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct LlmClassifierConfig {
     #[serde(default = "default_enabled_true")]
@@ -339,7 +386,19 @@ pub(crate) struct LlmClassifierConfig {
     pub timeout_secs: u64,
 }
 
-/// Configuration for the few-shot classifier backend.
+/// Few-shot (online Naive-Bayes) classifier configuration loaded from the
+/// `[fewshot_classifier]` section.
+///
+/// The classifier operates in two modes:
+/// - **Cold-start**: fewer than `cold_start_feedback_count` labelled examples
+///   have been seen; uses the stricter `cold_start_threshold` to avoid
+///   premature over-fitting.
+/// - **Warm**: uses `confidence_threshold` once enough examples are available.
+///
+/// `feature_dimensions` controls the hashing trick space for term features;
+/// larger values reduce collision probability at the cost of memory.
+/// `retraining_threshold` sets how many new examples must accumulate before
+/// the model weights are recomputed.
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct FewShotConfig {
     #[serde(default = "default_enabled_true")]

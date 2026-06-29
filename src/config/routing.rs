@@ -3,7 +3,12 @@ use std::collections::HashMap;
 
 // ── Shared Types ──
 
-/// A single upstream provider within a routing category.
+/// A single upstream model endpoint within a routing category.
+///
+/// Each `ProviderEntry` represents one concrete target the proxy can forward
+/// requests to. Within a [`RouteEntry`], providers are ordered: index 0 is the
+/// primary target and subsequent entries are cascade fallbacks tried in order
+/// when the primary is unreachable or returns a retriable error.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProviderEntry {
     pub model: String,
@@ -14,10 +19,31 @@ pub struct ProviderEntry {
     pub timeout_ms: Option<u64>,
 }
 
-/// A routing category with an ordered list of providers (primary first).
-/// Uses custom deserialization via `RouteEntryRaw` to support both legacy
-/// flat configs (`model = ..., endpoint = ...`) and new array-of-providers
-/// format (`providers = [{...}, ...]`).
+/// A routing category mapping an intent label to one or more upstream providers.
+///
+/// Supports two TOML shapes via [`RouteEntryRaw`] deserialization:
+///
+/// **Multi-provider (new):**
+/// ```toml
+/// [routing.COMPLEX]
+/// providers = [
+///   { model = "claude-sonnet-4", endpoint = "…", provider_type = "anthropic", api_key_env = "ANTHROPIC_API_KEY" },
+///   { model = "gpt-4o", endpoint = "…", provider_type = "openai_compatible", api_key_env = "OPENAI_API_KEY" },
+/// ]
+/// ```
+///
+/// **Flat (legacy):**
+/// ```toml
+/// [routing.SYNTAX_FIX]
+/// model = "gpt-4o-mini"
+/// endpoint = "https://api.openai.com/v1/chat/completions"
+/// provider_type = "openai_compatible"
+/// api_key_env = "OPENAI_API_KEY"
+/// cost_per_1m_input_tokens = 0.15
+/// ```
+///
+/// Both are normalised into `providers: Vec<ProviderEntry>` by
+/// `From<RouteEntryRaw>`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(from = "RouteEntryRaw")]
 pub struct RouteEntry {
@@ -26,15 +52,22 @@ pub struct RouteEntry {
 }
 
 impl RouteEntry {
-    /// Returns the first (primary) provider. Panics if `providers` is empty
-    /// — the deserializer guarantees at least one element.
+    /// Returns the first (primary) provider.
+    ///
+    /// # Panics
+    /// Panics if `providers` is empty. The deserialiser guarantees at least one
+    /// entry via [`RouteEntryRaw`], so this should never fire in practice.
     pub fn primary(&self) -> &ProviderEntry {
         &self.providers[0]
     }
 }
 
-/// Raw deserialization helper for backward-compatible config parsing.
-/// Accepts both legacy flat fields and the new `providers` array.
+/// Raw deserialization helper that accepts the union of the legacy flat-field
+/// shape and the new `providers` array shape, then normalises them into a
+/// [`RouteEntry`] through `From<RouteEntryRaw>`.
+///
+/// This struct is never exposed outside the module; it exists solely to make
+/// the `#[serde(from = "RouteEntryRaw")]` delegation on [`RouteEntry`] work.
 #[derive(Clone, Debug, Deserialize)]
 struct RouteEntryRaw {
     model: Option<String>,
@@ -69,8 +102,15 @@ impl From<RouteEntryRaw> for RouteEntry {
     }
 }
 
-/// Maps model names to their cost per 1M input tokens.
-/// Defaults are hardcoded; routing.toml entries can override.
+/// Lookup table that maps model names to their cost per 1M input tokens.
+///
+/// Built by [`loader::build_model_costs`] from two sources (later wins):
+/// 1. The top-level `[model_costs]` TOML table.
+/// 2. Per-route `cost_per_1m_input_tokens` fields in `[routing.*]` entries.
+///
+/// Implements [`persistence::types::CostProvider`] so the persistence layer
+/// can compute per-request cost estimates without taking a direct dependency
+/// on the config module.
 #[derive(Clone, Debug)]
 pub struct ModelCosts {
     costs: HashMap<String, f64>,
@@ -83,7 +123,8 @@ impl crate::persistence::types::CostProvider for ModelCosts {
 }
 
 impl ModelCosts {
-    /// Look up a model's cost per 1M input tokens.
+    /// Look up the cost (USD per 1M input tokens) for `model`.
+    /// Returns `None` when no cost has been configured for the model.
     pub fn get(&self, model: &str) -> Option<f64> {
         self.costs.get(model).copied()
     }

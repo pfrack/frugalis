@@ -4,15 +4,24 @@ use std::sync::atomic::AtomicBool;
 use super::backend::{percentile_99, PersistenceBackend};
 use super::types::{prompt_chars_to_cost, CostProvider, InferenceLog, InferenceRecord, LatencySummary, LatencySummaryRow, QueryError, SavingsEstimate};
 
-/// In-memory persistence backend backed by `Arc<RwLock<Vec<InferenceRecord>>>`.
-/// All queries operate over Rust iterators. p99 is computed in Rust.
+/// Ephemeral in-process persistence backend.
 ///
-/// ⚠️ Ephemeral: Data is lost when the process exits. Not suitable for production.
+/// Stores [`InferenceRecord`]s in an `Arc<RwLock<Vec<...>>>`. All reads and
+/// aggregations run over Rust iterators; p99 is computed via [`percentile_99`].
+///
+/// **Capped at 10,000 records** — the oldest entry is evicted on overflow so
+/// the process memory footprint stays bounded.
+///
+/// ⚠️ **Not suitable for production.** All data is lost when the process exits.
+/// Intended for local development (no database required) and unit/integration
+/// tests.
 pub struct MemoryBackend {
     pub records: std::sync::Arc<tokio::sync::RwLock<Vec<InferenceRecord>>>,
-    /// Test-only failure injection. When true, the next call to
-    /// `insert_inference` returns an error and atomically resets this flag
-    /// to false. Production code leaves this at its default `false`.
+    /// Deterministic failure injection for tests.
+    ///
+    /// When set to `true`, the next `insert_inference` call returns
+    /// `Err("test-injected failure")` and atomically resets this flag to
+    /// `false`. Production code never sets this; the default is `false`.
     pub(crate) fail_next: AtomicBool,
 }
 

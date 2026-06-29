@@ -15,8 +15,15 @@ pub(crate) use types::{
 };
 pub(crate) use crate::classification::types::{CategoryConfig, NegativePatternConfig, PatternEntry};
 
-/// Top-level configuration root, mirroring all sections in config.toml/config.yaml.
-/// Every field is `Option` so missing sections deserialize as `None`.
+/// Top-level configuration root that mirrors every section in `config.toml` (or
+/// `config.yaml`). Loaded once at startup by [`load_config_from_path`] and then
+/// projected into typed sub-configs via the `load_*_from_value` helpers in
+/// [`loader`].
+///
+/// Every field is `Option<T>` so an absent TOML section deserialises to `None`
+/// and the projection helper falls back to a safe default rather than failing.
+/// Semantic validation (bad regex, unknown log levels, etc.) is deferred to
+/// [`run_validation`].
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) struct ConfigRoot {
@@ -60,7 +67,11 @@ pub(crate) struct ConfigRoot {
     pub cache: Option<CacheConfig>,
 }
 
-/// Load a config file (TOML or YAML) and deserialize into ConfigRoot.
+/// Read a config file from `path` and deserialise it into [`ConfigRoot`].
+///
+/// The format is inferred from the file extension: `.yaml` / `.yml` use
+/// `serde_yaml`; everything else is treated as TOML. Returns an error string
+/// if the file cannot be read or fails to parse.
 pub(crate) fn load_config_from_path(path: &str) -> Result<ConfigRoot, String> {
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))?;
@@ -78,6 +89,8 @@ pub(crate) enum ConfigFormat {
     Yaml,
 }
 
+/// Infer the config file format from the file extension.
+/// `.yaml` / `.yml` → [`ConfigFormat::Yaml`]; anything else → [`ConfigFormat::Toml`].
 fn detect_format(path: &str) -> ConfigFormat {
     match std::path::Path::new(path).extension().and_then(|s| s.to_str()) {
         Some("yaml" | "yml") => ConfigFormat::Yaml,
@@ -85,8 +98,19 @@ fn detect_format(path: &str) -> ConfigFormat {
     }
 }
 
-/// Validate config schema and compile all regex patterns.
-/// Returns Ok(()) if everything is valid, or Err with a list of error messages.
+/// Validate config schema and compile all regex patterns eagerly.
+///
+/// When `config_path` is `Some`, the file at that path is loaded and validated.
+/// When `None`, the config embedded at compile time (`config.toml`) is used.
+///
+/// Checks include: port sanity, log-level / log-format enumeration, HTTP
+/// timeout > 0, all category thresholds and priorities > 0, routing keys
+/// matching known categories, auth provider completeness, model costs > 0,
+/// `patterns_dir` being a directory if it exists on disk, and successful
+/// compilation of every regex pattern (inline or loaded from a patterns file).
+///
+/// All errors are collected before returning so the caller sees the full list
+/// rather than stopping at the first problem.
 pub(crate) fn run_validation(config_path: Option<&str>) -> Result<(), Vec<String>> {
     let mut errors: Vec<String> = Vec::new();
 
@@ -250,11 +274,21 @@ pub(crate) fn run_validation(config_path: Option<&str>) -> Result<(), Vec<String
     }
 }
 
-/// Merge overlay ConfigRoot into base, respecting override-key semantics.
-/// Override keys (classifiers, regex_classifier, llm_classifier, categories,
-/// auth_provider, model_costs, routing, negative_patterns) are completely replaced.
-/// Non-override struct fields are merged field-by-field (overlay values win).
-/// Non-override scalars (baseline_model, classify_db_log) are replaced by overlay.
+/// Merge `overlay` into `base` using a two-tier strategy:
+///
+/// - **Field-level merge** (`server`, `http`, `database`, `persistence`,
+///   `dashboard`): each field of the overlay wins individually, leaving
+///   untouched base fields intact.
+/// - **Full replacement** (`cors`, `cache`, `classifiers`, `regex_classifier`,
+///   `llm_classifier`, `fewshot_classifier`, `categories`, `auth_providers`,
+///   `model_costs`, `negative_patterns`, `patterns_dir`, scalar fields): the
+///   entire section is replaced when the overlay provides it.
+/// - **Key-level merge** (`routing`): overlay entries are upserted into the
+///   base routing table rather than wholesale replacing it.
+///
+/// This allows an `init_template.toml` or environment-specific overlay to
+/// selectively override parts of the base `config.toml` without repeating
+/// unchanged sections.
 pub(crate) fn merge_configs(base: &mut ConfigRoot, overlay: ConfigRoot) {
     if let Some(s) = overlay.server {
         if let Some(ref mut b) = base.server {

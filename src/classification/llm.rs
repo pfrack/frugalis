@@ -28,6 +28,8 @@ impl Drop for LLMClassifier {
 }
 
 impl LLMClassifier {
+    /// Build an [`LLMClassifier`] from config, loading (or generating) the system prompt
+    /// and spawning a background task that refreshes the API key from the environment every 60 s.
     pub fn new(
         config: LlmClassifierConfig,
         client: reqwest::Client,
@@ -93,6 +95,8 @@ impl LLMClassifier {
         }
     }
 
+    /// Send the prompt to the configured LLM endpoint and parse the returned category.
+    /// Always returns a valid [`ClassificationResult`]; falls back to `Fallback` tier on any error.
     async fn classify_async(&self, prompt: &str) -> ClassificationResult {
         // Build the request body
         let user_message = format!(
@@ -163,6 +167,8 @@ impl LLMClassifier {
         }
     }
 
+    /// Extract the category name from the LLM JSON response and look it up in `self.categories`.
+    /// Returns `Fallback` if the response is missing, malformed, or contains an unknown category.
     fn parse_response(&self, json: serde_json::Value) -> ClassificationResult {
         let content = json
             .get("choices")

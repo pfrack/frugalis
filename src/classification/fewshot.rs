@@ -21,6 +21,8 @@ pub struct FewShotClassifier {
 }
 
 impl FewShotClassifier {
+    /// Build a [`FewShotClassifier`] from config, loading bootstrap examples from the
+    /// embedded YAML and merging any persisted training data from disk.
     pub fn new(
         config: FewShotConfig,
         routing: HashMap<String, RouteEntry>,
@@ -65,6 +67,7 @@ impl FewShotClassifier {
         classifier
     }
 
+    /// Lowercase, strip code blocks, and collapse whitespace — mirrors [`RegexClassifier`] sanitization.
     fn preprocess(text: &str) -> String {
         let lower = text.to_lowercase();
         let no_blocks = crate::classification::code_block_re().replace_all(&lower, " ");
@@ -72,6 +75,7 @@ impl FewShotClassifier {
         collapsed.join(" ")
     }
 
+    /// Convert preprocessed text into a TF-weighted feature vector over the current vocabulary.
     fn extract_features(&self, text: &str) -> Vec<f64> {
         let vocab = self.vocabulary.read().unwrap();
         let tokens: Vec<&str> = text.split_whitespace().collect();
@@ -94,6 +98,8 @@ impl FewShotClassifier {
         features
     }
 
+    /// Score each intent category against `input_features` using max cosine similarity
+    /// over all stored pattern vectors for that category.
     fn score_categories(&self, input_features: &[f64]) -> HashMap<String, f64> {
         let mut scores = HashMap::new();
         for entry in self.intent_patterns.read().unwrap().iter() {
@@ -111,6 +117,8 @@ impl FewShotClassifier {
         scores
     }
 
+    /// Check whether `preprocessed` exactly matches any training example; returns
+    /// `(category, confidence)` if found, `None` otherwise.
     fn exact_match_in(&self, preprocessed: &str, td: &[FewShotExample]) -> Option<(String, f64)> {
         for example in td {
             let example_preprocessed = Self::preprocess(&example.text);
@@ -121,10 +129,12 @@ impl FewShotClassifier {
         None
     }
 
+    /// Count examples whose confidence is below 0.99 (i.e., user-feedback examples, not bootstrap).
     fn feedback_count_in(td: &[FewShotExample]) -> usize {
         td.iter().filter(|e| e.confidence < 0.99).count()
     }
 
+    /// Return `cold_start_threshold` until enough feedback examples exist, then `confidence_threshold`.
     fn effective_threshold_for(td: &[FewShotExample], config: &FewShotConfig) -> f64 {
         if Self::feedback_count_in(td) < config.cold_start_feedback_count {
             config.cold_start_threshold
@@ -133,6 +143,8 @@ impl FewShotClassifier {
         }
     }
 
+    /// Rebuild vocabulary and per-category pattern vectors from `data` in-place.
+    /// Called on startup and after each feedback-triggered retrain cycle.
     fn retrain_internal(&self, data: &[FewShotExample]) {
         let new_vocab: dashmap::DashMap<String, usize> = dashmap::DashMap::new();
         let new_patterns: dashmap::DashMap<String, Vec<Vec<f64>>> = dashmap::DashMap::new();
@@ -191,6 +203,8 @@ impl FewShotClassifier {
         *self.intent_patterns.write().unwrap() = new_patterns;
     }
 
+    /// Accept a feedback signal: append the corrected example, trim excess training data,
+    /// and trigger a synchronous retrain cycle when the retraining threshold is reached.
     pub async fn add_feedback(
         &self,
         text: String,
@@ -258,6 +272,7 @@ impl FewShotClassifier {
         }
     }
 
+    /// Persist the current training set to the configured YAML file path.
     async fn save_training_data(&self, data: &[FewShotExample]) {
         match serde_yaml::to_string(data) {
             Ok(yaml) => {
@@ -275,6 +290,8 @@ impl FewShotClassifier {
         }
     }
 
+    /// Load persisted training examples from `path`; returns an empty vec if the file
+    /// is missing or unparseable (non-fatal — bootstrap data covers cold start).
     fn load_training_data(path: &str) -> Vec<FewShotExample> {
         match std::fs::read_to_string(path) {
             Ok(content) => match serde_yaml::from_str(&content) {
@@ -295,6 +312,8 @@ impl FewShotClassifier {
     }
 }
 
+/// Cosine similarity between two equal-length feature vectors.
+/// Returns 0.0 when either vector is all-zeros.
 fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
     let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f64 = a.iter().map(|x| x * x).sum::<f64>().sqrt();

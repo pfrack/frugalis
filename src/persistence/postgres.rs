@@ -14,15 +14,34 @@ use super::types::{
     LatencySummaryRow, QueryError, SavingsEstimate,
 };
 
-/// Postgres persistence backend backed by `sqlx::PgPool`.
-/// All existing PG-specific SQL, retry logic, and migration flow are preserved unchanged.
+/// Production Postgres persistence backend via `sqlx::PgPool`.
+///
+/// Created with [`PostgresBackend::from_env`], which reads `DATABASE_URL`,
+/// performs a health check with exponential back-off and jitter, and runs
+/// `sqlx::migrate!()` to apply all SQL files in `migrations/` before the
+/// server starts accepting traffic.
+///
+/// **p99 latency** is computed in the database via
+/// `PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY duration_ms)` — more
+/// accurate and efficient than Rust-side computation for large row sets.
 pub struct PostgresBackend {
     pub pool: PgPool,
 }
 
 impl PostgresBackend {
-    /// Create a new Postgres backend from env vars.
-    /// Reads `DATABASE_URL`, creates pool, runs health check with retries, applies migrations.
+    /// Initialise the Postgres backend from environment variables.
+    ///
+    /// **Steps:**
+    /// 1. Read `DATABASE_URL` (required; returns `Err` if absent).
+    /// 2. Parse connection options and create a lazy `PgPool` with limits from
+    ///    `db_config` (`max_connections`, `acquire_timeout_secs`,
+    ///    `idle_timeout_secs`).
+    /// 3. Health-check the pool with `SELECT 1`, retrying up to
+    ///    `connection_retries` times with exponential back-off and random
+    ///    jitter. **Panics** if all retries are exhausted.
+    /// 4. Run `sqlx::migrate!()` to apply all files in `migrations/`.
+    ///    **Panics** on migration failure.
+    /// 5. Log `"Migrations applied successfully"` and return.
     pub async fn from_env(db_config: &DatabaseConfig) -> Result<Self, String> {
         let url = std::env::var("DATABASE_URL")
             .map_err(|_| "DATABASE_URL environment variable is required".to_string())?;

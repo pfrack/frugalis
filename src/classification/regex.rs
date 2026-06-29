@@ -40,6 +40,7 @@ impl IntentClassify for RegexClassifier {
 
 // ── Prompt Sanitization ──
 
+/// Lowercase, strip code blocks, and collapse whitespace so pattern matching is stable.
 fn sanitize(text: &str) -> String {
     let lower = text.to_lowercase();
     let no_blocks = crate::classification::code_block_re().replace_all(&lower, " ");
@@ -49,6 +50,8 @@ fn sanitize(text: &str) -> String {
 
 // ── Pattern assembly ──
 
+/// Flatten all positive category patterns and negative suppression patterns into a single
+/// flat vec suitable for [`RegexSet`], and record the index range of the negative entries.
 fn build_all_patterns(
     categories: &[CategoryConfig],
     negative_patterns: &[NegativePatternConfig],
@@ -81,6 +84,8 @@ fn build_all_patterns(
     (patterns, metadata, negative_idx)
 }
 
+/// Return the name of the lowest-priority (highest `priority` value) category,
+/// used as the default fallback when no pattern fires.
 fn fallback_category(categories: &[CategoryConfig]) -> &str {
     categories
         .iter()
@@ -214,6 +219,8 @@ impl RegexClassifier {
         self.route_fallback(fallback_category(&self.categories))
     }
 
+    /// Route a matched category: look up its entry in the routing table.
+    /// Logs a warning and uses the fallback entry if the category has no route.
     fn route_match(&self, category: &str) -> ClassificationResult {
         if !self.routing.contains_key(category) {
             tracing::warn!(%category, "route_match: category not in routing table — falling back");
@@ -227,6 +234,7 @@ impl RegexClassifier {
         }
     }
 
+    /// Route to the fallback entry, preserving the supplied category name.
     fn route_fallback(&self, category: &str) -> ClassificationResult {
         ClassificationResult {
             category: category.to_string(),
