@@ -10,7 +10,6 @@ use tracing_subscriber::{fmt, layer::Layer, prelude::*, EnvFilter, Registry};
 mod telemetry;
 
 mod app;
-mod auth;
 mod cache;
 mod classification;
 mod config;
@@ -18,6 +17,7 @@ mod dashboard;
 mod persistence;
 mod protocol;
 mod proxy;
+mod routing;
 
 #[cfg(test)]
 mod test_util;
@@ -140,7 +140,7 @@ async fn main() {
         tracing::error!("Panic in Frugalis: {info}");
     }));
 
-    let auth_config = auth::AuthConfig::from_env().unwrap_or_else(|err| {
+    let auth_config = routing::AuthConfig::from_env().unwrap_or_else(|err| {
         panic!("Auth configuration error: {err}");
     });
     let auth_config = Arc::new(auth_config);
