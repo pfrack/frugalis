@@ -9,7 +9,7 @@ use axum::{
 };
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{auth, cache, classification, config, dashboard, persistence, proxy};
 
@@ -242,7 +242,7 @@ pub(crate) async fn build_persistence(
     let db_url = std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty());
 
     if let Some(url) = db_url {
-        match persistence::sql_backend::SqlBackend::connect(&url).await {
+        match persistence::sql_backend::SqlBackend::connect(&url, &db_config).await {
             Ok(backend) => {
                 info!("Persistence backend: sql (unified, via DATABASE_URL)");
                 Some(persistence::PersistenceConfig {
@@ -251,7 +251,13 @@ pub(crate) async fn build_persistence(
                 })
             }
             Err(e) => {
-                panic!("Persistence backend failed: {e}");
+                error!("DATABASE_URL backend failed ({}); falling back to memory", e);
+                let backend = persistence::memory::MemoryBackend::new();
+                info!("Persistence backend: memory (DATABASE_URL fallback)");
+                Some(persistence::PersistenceConfig {
+                    backend: Arc::new(persistence::DbBackend::Memory(backend)),
+                    task_semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_limit)),
+                })
             }
         }
     } else {
@@ -267,7 +273,7 @@ pub(crate) async fn build_persistence(
             }
             "sqlite" => {
                 let sqlite_url = format!("sqlite:{}?mode=rwc", persistence_settings.sqlite_path);
-                match persistence::sql_backend::SqlBackend::connect(&sqlite_url).await {
+                match persistence::sql_backend::SqlBackend::connect(&sqlite_url, &db_config).await {
                     Ok(backend) => {
                         info!(
                             "Persistence backend: sql (sqlite, path={})",

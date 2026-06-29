@@ -29,6 +29,7 @@ use cli::CliMode;
 
 #[tokio::main]
 async fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let cli::CliResult { mode, force } = cli::parse_args();
 
     // Early-exit commands (before config loading or tracing init)

@@ -1,2 +1,0 @@
--- Migration 002: UNIQUE constraint on request_id is already in V1.
--- This migration is a no-op for backward compatibility with existing databases.

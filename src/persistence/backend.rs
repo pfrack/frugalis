@@ -105,9 +105,8 @@ impl PersistenceBackend for DbBackend {
 /// Sorts a copy of the input, then returns the value at index
 /// `ceil(0.99 × n) − 1`. Returns `None` for an empty slice.
 ///
-/// Used by [`super::memory::MemoryBackend`] and [`super::sql_backend::SqlBackend`]
-/// (SQLite dialect) since neither has a native `PERCENTILE_CONT` function. The
-/// Postgres dialect delegates p99 to the database directly.
+/// Used by [`super::memory::MemoryBackend`]. The SQL backends compute p99 in
+/// the database (Postgres `PERCENTILE_CONT`, SQLite window functions).
 pub(crate) fn percentile_99(durations: &[i32]) -> Option<i32> {
     if durations.is_empty() {
         return None;

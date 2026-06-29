@@ -26,6 +26,9 @@ sea-query = { version = "1", features = ["with-chrono", "with-uuid"] }
 refinery = { version = "0.9", features = ["tokio-postgres", "rusqlite-bundled"] }
 rusqlite = "0.32"
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4"] }
+tokio-postgres-rustls = "0.12"
+rustls = { version = "0.23", features = ["ring"] }
+webpki-roots = "0.26"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 askama = "0.16.0"

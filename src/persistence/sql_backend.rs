@@ -60,36 +60,79 @@ impl SqlBackend {
     #[cfg(test)]
     pub async fn new_sqlite_in_memory() -> Result<Self, String> {
         let uri = format!("sqlite:file:sql_backend_test_{}?mode=memory&cache=shared", uuid::Uuid::new_v4());
-        Self::connect(&uri).await
+        Self::connect(&uri, &crate::config::types::DatabaseConfig::default()).await
     }
 
     /// Connect to a database and create a SqlBackend.
     /// Determines dialect from the URL scheme and runs migrations via refinery.
-    pub async fn connect(url: &str) -> Result<Self, String> {
+    /// Pool tuning (max connections, timeouts) comes from `db_config`.
+    pub async fn connect(url: &str, db_config: &crate::config::types::DatabaseConfig) -> Result<Self, String> {
+        use std::time::Duration;
         if url.starts_with("postgres://") || url.starts_with("postgresql://") {
-            // Run refinery migrations via tokio-postgres before creating the sqlx pool.
-            let (mut client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
-                .await
-                .map_err(|e| format!("failed to connect to Postgres for migrations: {e}"))?;
-            let conn_handle = tokio::spawn(async move {
-                if let Err(e) = connection.await {
-                    tracing::error!("Postgres connection error: {e}");
-                }
-            });
-            embedded::migrations::runner()
-                .run_async(&mut client)
-                .await
-                .map_err(|e| format!("Postgres migration failed: {e}"))?;
-            drop(client);
-            conn_handle.abort();
+            // rustls 0.23 requires a CryptoProvider to be installed before any
+            // TLS operation (including sqlx's tls-rustls pool setup). Idempotent:
+            // returns Err if already installed, which we safely ignore.
+            let _ = rustls::crypto::ring::default_provider().install_default();
 
-            let pool = sqlx::PgPool::connect(url)
-                .await
-                .map_err(|e| format!("failed to create Postgres pool: {e}"))?;
-            Ok(Self {
-                pool: Pool::Postgres(pool),
-                dialect: Dialect::Postgres,
-            })
+            let tls_mode = url.contains("sslmode=require")
+                || url.contains("sslmode=verify-ca")
+                || url.contains("sslmode=verify-full");
+
+            if tls_mode {
+                let roots = rustls::RootCertStore::from_iter(
+                    webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+                );
+                let tls = tokio_postgres_rustls::MakeRustlsConnect::new(
+                    rustls::ClientConfig::builder()
+                        .with_root_certificates(roots)
+                        .with_no_client_auth(),
+                );
+                let (mut client, connection) = tokio_postgres::connect(url, tls)
+                    .await
+                    .map_err(|e| format!("failed to connect to Postgres for migrations: {e}"))?;
+                let conn_handle = tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        tracing::error!("Postgres connection error: {e}");
+                    }
+                });
+                let migration_result = embedded::migrations::runner()
+                    .run_async(&mut client)
+                    .await;
+                drop(client);
+                conn_handle.abort();
+                migration_result.map_err(|e| format!("Postgres migration failed: {e}"))?;
+                let pool = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(db_config.max_connections)
+                    .acquire_timeout(Duration::from_secs(db_config.acquire_timeout_secs))
+                    .idle_timeout(Some(Duration::from_secs(db_config.idle_timeout_secs)))
+                    .connect(url)
+                    .await
+                    .map_err(|e| format!("failed to create Postgres pool: {e}"))?;
+                Ok(Self { pool: Pool::Postgres(pool), dialect: Dialect::Postgres })
+            } else {
+                let (mut client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+                    .await
+                    .map_err(|e| format!("failed to connect to Postgres for migrations: {e}"))?;
+                let conn_handle = tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        tracing::error!("Postgres connection error: {e}");
+                    }
+                });
+                let migration_result = embedded::migrations::runner()
+                    .run_async(&mut client)
+                    .await;
+                drop(client);
+                conn_handle.abort();
+                migration_result.map_err(|e| format!("Postgres migration failed: {e}"))?;
+                let pool = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(db_config.max_connections)
+                    .acquire_timeout(Duration::from_secs(db_config.acquire_timeout_secs))
+                    .idle_timeout(Some(Duration::from_secs(db_config.idle_timeout_secs)))
+                    .connect(url)
+                    .await
+                    .map_err(|e| format!("failed to create Postgres pool: {e}"))?;
+                Ok(Self { pool: Pool::Postgres(pool), dialect: Dialect::Postgres })
+            }
         } else if url.starts_with("sqlite:") {
             // Check if this is an in-memory database (can't persist migrations across connections).
             let is_in_memory = url.contains("mode=memory");
@@ -110,7 +153,11 @@ impl SqlBackend {
                 .map_err(|e| format!("spawn_blocking failed: {e}"))??;
             }
 
-            let pool = sqlx::SqlitePool::connect(url)
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(db_config.max_connections)
+                .acquire_timeout(Duration::from_secs(db_config.acquire_timeout_secs))
+                .idle_timeout(Some(Duration::from_secs(db_config.idle_timeout_secs)))
+                .connect(url)
                 .await
                 .map_err(|e| format!("failed to create SQLite pool: {e}"))?;
             let backend = Self {
@@ -129,7 +176,12 @@ impl SqlBackend {
         }
     }
 
-    /// Initialize SQLite schema (CREATE TABLE IF NOT EXISTS + migrations).
+    /// Initialize SQLite schema for in-memory databases.
+    ///
+    /// File-based SQLite runs refinery via rusqlite in `connect()`. In-memory
+    /// databases can't persist migration state across connections, so this
+    /// method applies the same schema V1 defines, directly via the sqlx pool.
+    /// Keep this DDL in sync with `migrations/V1__create_inferences.sql`.
     async fn init_sqlite_schema(&self) -> Result<(), String> {
         let pool = match &self.pool {
             Pool::Sqlite(p) => p,
@@ -138,59 +190,49 @@ impl SqlBackend {
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS inferences (\
-             request_id TEXT PRIMARY KEY, \
-             status TEXT NOT NULL, \
-             category TEXT, \
-             upstream_model TEXT, \
-             duration_ms INTEGER, \
-             prompt_snippet TEXT NOT NULL, \
-             prompt_char_count INTEGER, \
-             created_at TEXT NOT NULL DEFAULT (datetime('now')))",
+              request_id TEXT PRIMARY KEY, \
+              status TEXT NOT NULL, \
+              category TEXT, \
+              upstream_model TEXT, \
+              duration_ms INTEGER, \
+              created_at TEXT NOT NULL, \
+              prompt_snippet TEXT, \
+              prompt_char_count INTEGER, \
+              provider_attempts SMALLINT DEFAULT 1, \
+              final_provider TEXT, \
+              input_tokens INTEGER, \
+              output_tokens INTEGER, \
+              cache_read_tokens INTEGER, \
+              cache_creation_tokens INTEGER, \
+              client_session_id TEXT)",
         )
         .execute(pool)
         .await
         .map_err(|e| format!("failed to initialize SQLite schema: {e}"))?;
 
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_inferences_created_at \
-             ON inferences(created_at)",
+            "CREATE INDEX IF NOT EXISTS inferences_created_at_idx \
+             ON inferences(created_at DESC)",
         )
         .execute(pool)
         .await
         .map_err(|e| format!("failed to create SQLite index: {e}"))?;
 
-        // Migration: add columns if missing.
-        // SAFETY: col and typ are compile-time string literals. Do not pass dynamic values here.
-        {
-            let cols: Vec<String> = sqlx::query("PRAGMA table_info(inferences)")
-                .fetch_all(pool)
-                .await
-                .map(|rows| rows.iter().map(|r| r.get::<String, _>("name")).collect())
-                .unwrap_or_default();
-            for (col, typ) in [
-                ("provider_attempts", "SMALLINT DEFAULT 1"),
-                ("final_provider", "TEXT"),
-                ("input_tokens", "INTEGER"),
-                ("output_tokens", "INTEGER"),
-                ("cache_read_tokens", "INTEGER"),
-                ("cache_creation_tokens", "INTEGER"),
-                ("client_session_id", "TEXT"),
-            ] {
-                if cols.iter().any(|c| c == col) {
-                    continue;
-                }
-                let sql = format!("ALTER TABLE inferences ADD COLUMN {} {}", col, typ);
-                sqlx::query(sqlx::AssertSqlSafe(sql))
-                    .execute(pool)
-                    .await
-                    .map_err(|e| format!("failed to add column {}: {}", col, e))?;
-            }
-        }
-
         Ok(())
     }
 
     /// Execute a query that returns no rows (INSERT, UPDATE, DELETE).
+    ///
+    /// # Safety basis
+    /// Queries are built with sea-query's `to_string()` builder, which escapes
+    /// all `Value` parameters inline. This is the recognized safe pattern when
+    /// `sea-query-sqlx` (parameterized `build_sqlx` + `query_with`) is not
+    /// available — sea-query-sqlx 0.9.1 has a non-exhaustive-match bug with
+    /// sea-query 1.0's `with-chrono` feature. The `AssertSqlSafe` wrapper
+    /// acknowledges that the SQL string is not compile-time checked but is
+    /// trusted because sea-query generated it. All user-supplied values flow
+    /// through sea-query's `Value` type, which handles escaping; no raw
+    /// `format!` interpolation is used in sea-query-built queries.
     async fn execute_query(&self, sql: String) -> Result<(), sqlx::Error> {
         match &self.pool {
             Pool::Postgres(pool) => {
@@ -425,7 +467,7 @@ impl PersistenceBackend for SqlBackend {
                 // Single query using window functions to compute COUNT, AVG, and p99 per category.
                 // p99 is the value at the 99th percentile position within each category,
                 // selected via ROW_NUMBER / COUNT window functions — no data leaves the database.
-                let summary_sql = format!(
+                let summary_sql =
                     "SELECT category, count, avg_duration_ms, p99_duration_ms \
                      FROM ( \
                          SELECT category, \
@@ -435,15 +477,14 @@ impl PersistenceBackend for SqlBackend {
                              ROW_NUMBER() OVER (PARTITION BY category ORDER BY duration_ms ASC) AS rn, \
                              (COUNT(*) OVER (PARTITION BY category) * 99 + 99) / 100 AS p99_pos \
                          FROM inferences \
-                         WHERE created_at >= '{}' AND category IS NOT NULL AND duration_ms IS NOT NULL \
+                         WHERE created_at >= ? AND category IS NOT NULL AND duration_ms IS NOT NULL \
                      ) \
                      WHERE rn = p99_pos \
                      GROUP BY category \
-                     ORDER BY count DESC",
-                    cutoff_str
-                );
+                     ORDER BY count DESC";
 
                 let summary_rows_result: Vec<LatencySummaryRow> = sqlx::query(sqlx::AssertSqlSafe(summary_sql))
+                    .bind(&cutoff_str)
                     .fetch_all(pool).await?
                     .iter()
                     .map(|row| {
@@ -907,5 +948,126 @@ mod tests {
             "expected at least 1 unknown cost model, got {}",
             result.unknown_cost_count
         );
+    }
+
+    /// Exercises the refinery migration path (V1–V5) on a fresh file-based
+    /// SQLite database. Unlike the in-memory tests (which bypass refinery via
+    /// `init_sqlite_schema`), this test catches schema-completeness regressions
+    /// in the migration files.
+    #[tokio::test]
+    async fn test_sql_backend_connect_file_sqlite_refinery() {
+        let db_path = std::env::temp_dir().join(format!(
+            "frugalis_refinery_test_{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let url = format!("sqlite:{}", db_path.display());
+
+        let backend = SqlBackend::connect(&url, &crate::config::types::DatabaseConfig::default())
+            .await
+            .expect("connect should succeed on fresh file-based SQLite (refinery V1)");
+
+        let record = InferenceRecord {
+            request_id: uuid::Uuid::new_v4(),
+            status: "ok".to_string(),
+            category: Some("SQLITE_REFINERY".to_string()),
+            upstream_model: Some("test-model".to_string()),
+            duration_ms: Some(42),
+            prompt_snippet: "sqlite refinery test".to_string(),
+            prompt_char_count: Some(100),
+            created_at: chrono::Utc::now(),
+            final_provider: String::new(),
+            provider_attempts: 1,
+            ..Default::default()
+        };
+        backend
+            .insert_inference(&record)
+            .await
+            .expect("insert should succeed on fresh file-based SQLite schema");
+
+        let (records, count) = backend
+            .fetch_inferences(0, 10, Some("SQLITE_REFINERY"), None)
+            .await
+            .expect("fetch should succeed");
+        assert_eq!(count, 1, "expected 1 record after refinery insert");
+        assert_eq!(records[0].prompt_snippet, "sqlite refinery test");
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    mod slow_tests {
+        use super::*;
+        use crate::persistence::InferenceRecord;
+
+        /// Start a fresh Postgres testcontainer and return its URL + container
+        /// handle. The container stays alive while the caller holds the handle.
+        /// Returns `None` if Docker is unavailable — the test skips.
+        async fn fresh_postgres() -> Option<(
+            String,
+            testcontainers::ContainerAsync<testcontainers::GenericImage>,
+        )> {
+            use testcontainers::{
+                core::{IntoContainerPort, WaitFor},
+                runners::AsyncRunner,
+                GenericImage, ImageExt,
+            };
+            let container = GenericImage::new("postgres", "16-alpine")
+                .with_exposed_port(5432.tcp())
+                .with_wait_for(WaitFor::message_on_stderr(
+                    "database system is ready to accept connections",
+                ))
+                .with_env_var("POSTGRES_USER", "test")
+                .with_env_var("POSTGRES_PASSWORD", "test")
+                .with_env_var("POSTGRES_DB", "test")
+                .with_startup_timeout(std::time::Duration::from_secs(60))
+                .start()
+                .await
+                .ok()?;
+            let port = container.get_host_port_ipv4(5432.tcp()).await.ok()?;
+            let url = format!("postgres://test:test@127.0.0.1:{port}/test");
+            Some((url, container))
+        }
+
+        /// Exercises the refinery migration path (V1) on a **fresh**
+        /// Postgres database. This is the test that catches cross-dialect
+        /// migration bugs invisible to SQLite-only tests — e.g. SQLite-only
+        /// `datetime('now')` in a DEFAULT clause (F1) or a `PRIMARY KEY`
+        /// column the code never inserts (F2). Skips gracefully when Docker
+        /// is unavailable. Never falls back to `DATABASE_URL` — the whole
+        /// point is to test against a database that has never seen V1.
+        #[tokio::test]
+        async fn test_sql_backend_connect_postgres_refinery() {
+            let Some((url, _container)) = fresh_postgres().await else {
+                eprintln!("SKIP: Docker Postgres container unavailable");
+                return;
+            };
+            let backend = SqlBackend::connect(&url, &crate::config::types::DatabaseConfig::default())
+                .await
+                .expect("connect should succeed on fresh Postgres (refinery V1)");
+
+            let record = InferenceRecord {
+                request_id: uuid::Uuid::new_v4(),
+                status: "ok".to_string(),
+                category: Some("PG_REFINERY".to_string()),
+                upstream_model: Some("test-model".to_string()),
+                duration_ms: Some(42),
+                prompt_snippet: "postgres refinery test".to_string(),
+                prompt_char_count: Some(100),
+                created_at: chrono::Utc::now(),
+                final_provider: String::new(),
+                provider_attempts: 1,
+                ..Default::default()
+            };
+            backend
+                .insert_inference(&record)
+                .await
+                .expect("insert should succeed on fresh Postgres schema");
+
+            let (records, count) = backend
+                .fetch_inferences(0, 10, Some("PG_REFINERY"), None)
+                .await
+                .expect("fetch should succeed");
+            assert_eq!(count, 1, "expected 1 record after refinery insert");
+            assert_eq!(records[0].prompt_snippet, "postgres refinery test");
+        }
     }
 }
