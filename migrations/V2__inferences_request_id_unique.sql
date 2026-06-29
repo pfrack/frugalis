@@ -1,3 +1,2 @@
--- Migration 002: Enforce request_id uniqueness on inferences
--- Prevents duplicate rows if upstream retry logic logs the same request twice.
-ALTER TABLE inferences ADD CONSTRAINT inferences_request_id_unique UNIQUE (request_id);
+-- Migration 002: UNIQUE constraint on request_id is already in V1.
+-- This migration is a no-op for backward compatibility with existing databases.

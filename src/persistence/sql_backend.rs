@@ -3,7 +3,7 @@ use sea_query::{Expr, ExprTrait, Iden, Query, SqliteQueryBuilder, PostgresQueryB
 use sqlx::Row;
 use tracing::error;
 
-use super::backend::{percentile_99, retry_once, PersistenceBackend};
+use super::backend::{retry_once, PersistenceBackend};
 use super::types::{
     prompt_chars_to_cost, CostProvider, InferenceLog, InferenceRecord, LatencySummary,
     LatencySummaryRow, QueryError, SavingsEstimate,
@@ -71,7 +71,7 @@ impl SqlBackend {
             let (mut client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
                 .await
                 .map_err(|e| format!("failed to connect to Postgres for migrations: {e}"))?;
-            tokio::spawn(async move {
+            let conn_handle = tokio::spawn(async move {
                 if let Err(e) = connection.await {
                     tracing::error!("Postgres connection error: {e}");
                 }
@@ -81,6 +81,7 @@ impl SqlBackend {
                 .await
                 .map_err(|e| format!("Postgres migration failed: {e}"))?;
             drop(client);
+            conn_handle.abort();
 
             let pool = sqlx::PgPool::connect(url)
                 .await
@@ -90,6 +91,25 @@ impl SqlBackend {
                 dialect: Dialect::Postgres,
             })
         } else if url.starts_with("sqlite:") {
+            // Check if this is an in-memory database (can't persist migrations across connections).
+            let is_in_memory = url.contains("mode=memory");
+
+            if !is_in_memory {
+                // File-based SQLite: run refinery migrations via rusqlite before creating the pool.
+                let path_part = url.strip_prefix("sqlite:").unwrap_or(url);
+                let db_path = path_part.split('?').next().unwrap_or(path_part).to_string();
+                let runner = embedded::migrations::runner();
+                tokio::task::spawn_blocking(move || {
+                    let mut conn = rusqlite::Connection::open(&db_path)
+                        .map_err(|e| format!("failed to open SQLite for migrations: {e}"))?;
+                    runner.run(&mut conn)
+                        .map_err(|e| format!("SQLite migration failed: {e}"))?;
+                    Ok::<(), String>(())
+                })
+                .await
+                .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+            }
+
             let pool = sqlx::SqlitePool::connect(url)
                 .await
                 .map_err(|e| format!("failed to create SQLite pool: {e}"))?;
@@ -98,7 +118,10 @@ impl SqlBackend {
                 dialect: Dialect::Sqlite,
             };
 
-            backend.init_sqlite_schema().await?;
+            // For in-memory databases, run schema init directly (refinery can't persist across connections).
+            if is_in_memory {
+                backend.init_sqlite_schema().await?;
+            }
 
             Ok(backend)
         } else {
@@ -136,7 +159,8 @@ impl SqlBackend {
         .await
         .map_err(|e| format!("failed to create SQLite index: {e}"))?;
 
-        // Migration: add provider_attempts and final_provider columns if missing.
+        // Migration: add columns if missing.
+        // SAFETY: col and typ are compile-time string literals. Do not pass dynamic values here.
         {
             let cols: Vec<String> = sqlx::query("PRAGMA table_info(inferences)")
                 .fetch_all(pool)
@@ -200,6 +224,7 @@ async fn insert_once_sql_backend(backend: &SqlBackend, record: &InferenceRecord)
                 Inferences::CacheReadTokens,
                 Inferences::CacheCreationTokens,
                 Inferences::ClientSessionId,
+                Inferences::CreatedAt,
             ])
             .values_panic([
                 record.request_id.to_string().into(),
@@ -216,6 +241,7 @@ async fn insert_once_sql_backend(backend: &SqlBackend, record: &InferenceRecord)
                 record.cache_read_tokens.into(),
                 record.cache_creation_tokens.into(),
                 record.client_session_id.clone().into(),
+                record.created_at.format("%Y-%m-%d %H:%M:%S").to_string().into(),
             ]);
         match backend.dialect {
             Dialect::Postgres => q.to_string(PostgresQueryBuilder),
@@ -333,7 +359,7 @@ impl PersistenceBackend for SqlBackend {
 
     async fn fetch_latency_summary(&self, hours: u32) -> Result<LatencySummary, QueryError> {
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
-        let cutoff_str = cutoff.to_rfc3339();
+        let cutoff_str = cutoff.format("%Y-%m-%d %H:%M:%S").to_string();
 
         match self.dialect {
             Dialect::Postgres => {
@@ -344,7 +370,7 @@ impl PersistenceBackend for SqlBackend {
                         .expr(Expr::cust("ROUND(AVG(duration_ms))::INTEGER AS avg_duration_ms"))
                         .expr(Expr::cust("ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY duration_ms))::INTEGER AS p99_duration_ms"))
                         .from(Inferences::Table)
-                        .and_where(Expr::cust(format!("created_at >= '{}'", cutoff_str)))
+                        .and_where(Expr::col(Inferences::CreatedAt).gte(Expr::val(cutoff_str.clone())))
                         .add_group_by([Expr::col(Inferences::Category)])
                         .order_by_expr(Expr::cust("count"), sea_query::Order::Desc);
                     q.to_string(PostgresQueryBuilder)
@@ -396,73 +422,45 @@ impl PersistenceBackend for SqlBackend {
                     _ => return Err(QueryError("pool type mismatch for SQLite dialect".to_string())),
                 };
 
-                // Grouped aggregation query for non-null categories.
-                let agg_sql = {
-                    let mut q = Query::select();
-                    q.column(Inferences::Category)
-                        .expr(Expr::cust("COUNT(*) AS count"))
-                        .expr(Expr::cust("CAST(ROUND(AVG(duration_ms)) AS INTEGER) AS avg_duration_ms"))
-                        .from(Inferences::Table)
-                        .and_where(Expr::cust(format!("created_at >= '{}'", cutoff_str)))
-                        .and_where(Expr::col(Inferences::Category).is_not_null())
-                        .add_group_by([Expr::col(Inferences::Category)])
-                        .order_by_expr(Expr::cust("count"), sea_query::Order::Desc);
-                    q.to_string(SqliteQueryBuilder)
-                };
+                // Single query using window functions to compute COUNT, AVG, and p99 per category.
+                // p99 is the value at the 99th percentile position within each category,
+                // selected via ROW_NUMBER / COUNT window functions — no data leaves the database.
+                let summary_sql = format!(
+                    "SELECT category, count, avg_duration_ms, p99_duration_ms \
+                     FROM ( \
+                         SELECT category, \
+                             COUNT(*) OVER (PARTITION BY category) AS count, \
+                             CAST(ROUND(AVG(duration_ms) OVER (PARTITION BY category)) AS INTEGER) AS avg_duration_ms, \
+                             duration_ms AS p99_duration_ms, \
+                             ROW_NUMBER() OVER (PARTITION BY category ORDER BY duration_ms ASC) AS rn, \
+                             (COUNT(*) OVER (PARTITION BY category) * 99 + 99) / 100 AS p99_pos \
+                         FROM inferences \
+                         WHERE created_at >= '{}' AND category IS NOT NULL AND duration_ms IS NOT NULL \
+                     ) \
+                     WHERE rn = p99_pos \
+                     GROUP BY category \
+                     ORDER BY count DESC",
+                    cutoff_str
+                );
 
-                let mut summary_rows: Vec<LatencySummaryRow> = Vec::new();
-
-                let agg_rows = sqlx::query(sqlx::AssertSqlSafe(agg_sql))
-                    .fetch_all(pool).await?;
-
-                for row in &agg_rows {
-                    let category: String = row.try_get("category").unwrap_or_default();
-                    let request_count: i64 = row.try_get("count").unwrap_or(0);
-                    let avg_duration_ms: Option<i32> = row.try_get("avg_duration_ms").unwrap_or(None);
-                    summary_rows.push(LatencySummaryRow {
-                        category,
-                        request_count,
-                        avg_duration_ms,
-                        p99_duration_ms: None,
-                    });
-                }
-
-                // Fetch raw durations per category for Rust-side p99.
-                let dur_sql = {
-                    let mut q = Query::select();
-                    q.column(Inferences::Category)
-                        .column(Inferences::DurationMs)
-                        .from(Inferences::Table)
-                        .and_where(Expr::cust(format!("created_at >= '{}'", cutoff_str)))
-                        .and_where(Expr::col(Inferences::Category).is_not_null())
-                        .and_where(Expr::col(Inferences::DurationMs).is_not_null())
-                        .order_by(Inferences::Category, sea_query::Order::Asc)
-                        .order_by(Inferences::DurationMs, sea_query::Order::Asc);
-                    q.to_string(SqliteQueryBuilder)
-                };
-
-                let dur_rows = sqlx::query(sqlx::AssertSqlSafe(dur_sql))
-                    .fetch_all(pool).await?;
-
-                let mut p99_groups: std::collections::HashMap<String, Vec<i32>> = std::collections::HashMap::new();
-                for row in &dur_rows {
-                    let cat: String = row.try_get("category").unwrap_or_default();
-                    let dur: i32 = row.try_get("duration_ms").unwrap_or(0);
-                    p99_groups.entry(cat).or_default().push(dur);
-                }
-
-                for row in &mut summary_rows {
-                    if let Some(durations) = p99_groups.remove(&row.category) {
-                        row.p99_duration_ms = percentile_99(&durations);
-                    }
-                }
+                let summary_rows_result: Vec<LatencySummaryRow> = sqlx::query(sqlx::AssertSqlSafe(summary_sql))
+                    .fetch_all(pool).await?
+                    .iter()
+                    .map(|row| {
+                        let category: String = row.try_get("category").unwrap_or_default();
+                        let request_count: i64 = row.try_get("count").unwrap_or(0);
+                        let avg_duration_ms: Option<i32> = row.try_get("avg_duration_ms").unwrap_or(None);
+                        let p99_duration_ms: Option<i32> = row.try_get("p99_duration_ms").unwrap_or(None);
+                        LatencySummaryRow { category, request_count, avg_duration_ms, p99_duration_ms }
+                    })
+                    .collect();
 
                 // Count unclassified (NULL category) records.
                 let unclassified_sql = {
                     let mut q = Query::select();
                     q.expr(Expr::cust("COUNT(*)"))
                         .from(Inferences::Table)
-                        .and_where(Expr::cust(format!("created_at >= '{}'", cutoff_str)))
+                        .and_where(Expr::col(Inferences::CreatedAt).gte(Expr::val(cutoff_str.clone())))
                         .and_where(Expr::col(Inferences::Category).is_null());
                     q.to_string(SqliteQueryBuilder)
                 };
@@ -472,10 +470,10 @@ impl PersistenceBackend for SqlBackend {
                     .try_get(0)
                     .map_err(|e| QueryError(e.to_string()))?;
 
-                let total_classified_count: i64 = summary_rows.iter().map(|r| r.request_count).sum();
+                let total_classified_count: i64 = summary_rows_result.iter().map(|r| r.request_count).sum();
 
                 Ok(LatencySummary {
-                    rows: summary_rows,
+                    rows: summary_rows_result,
                     unclassified_count: unclassified,
                     total_classified_count,
                 })
@@ -490,7 +488,7 @@ impl PersistenceBackend for SqlBackend {
         baseline_model: &str,
     ) -> Result<SavingsEstimate, QueryError> {
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
-        let cutoff_str = cutoff.to_rfc3339();
+        let cutoff_str = cutoff.format("%Y-%m-%d %H:%M:%S").to_string();
 
         fn build_sql(dialect: Dialect, cutoff_str: &str) -> String {
             let mut q = Query::select();
@@ -500,7 +498,7 @@ impl PersistenceBackend for SqlBackend {
                 .expr(Expr::cust("COALESCE(SUM(LENGTH(prompt_snippet)), 0) AS total_fallback_chars"))
                 .expr(Expr::cust("COALESCE(SUM(CASE WHEN prompt_char_count IS NULL THEN 1 ELSE 0 END), 0) AS fallback_count"))
                 .from(Inferences::Table)
-                .and_where(Expr::cust(format!("created_at >= '{}'", cutoff_str)))
+                .and_where(Expr::col(Inferences::CreatedAt).gte(Expr::val(cutoff_str.to_string())))
                 .and_where(Expr::col(Inferences::Category).is_not_null())
                 .and_where(Expr::col(Inferences::UpstreamModel).is_not_null())
                 .add_group_by([Expr::col(Inferences::UpstreamModel)]);
