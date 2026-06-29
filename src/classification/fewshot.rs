@@ -299,7 +299,8 @@ impl FewShotClassifier {
                 Err(e) => {
                     tracing::warn!(
                         "Failed to parse few-shot training data from {}: {}",
-                        path, e
+                        path,
+                        e
                     );
                     vec![]
                 }

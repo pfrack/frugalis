@@ -5,7 +5,7 @@ use tracing::{debug, warn};
 use super::routing::*;
 use super::types::*;
 use super::ConfigRoot;
-use crate::classification::types::{CategoryConfig, NegativePatternConfig, PatternEntry};
+use crate::config::types::{CategoryConfig, NegativePatternConfig, PatternEntry};
 
 #[cfg(test)]
 pub(crate) const CONFIG_DEFAULT: &str = "config.toml";
@@ -591,6 +591,7 @@ pub(crate) fn load_llm_classifier_config_from_value(
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::io::Write;
 
     fn test_categories() -> Vec<CategoryConfig> {
         vec![
@@ -701,7 +702,6 @@ api_key_env = ""
 
     #[test]
     fn load_routing_from_file_invalid_toml() {
-        use std::io::Write;
         let temp_dir = std::env::temp_dir();
         let file_path = temp_dir.join("invalid_routing.toml");
         let mut file = std::fs::File::create(&file_path).expect("create temp file");
@@ -797,7 +797,6 @@ api_key_env = ""
         std::env::remove_var("CONFIG_PATH");
 
         // 3. When file exists but TOML is invalid, fall back to hardcoded defaults (empty categories)
-        use std::io::Write;
         let file_path_invalid = temp_dir.join("invalid_config.toml");
         let mut file = std::fs::File::create(&file_path_invalid).expect("create temp file");
         file.write_all(b"not valid toml {{").expect("write");

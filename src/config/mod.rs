@@ -3,17 +3,16 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-pub mod loader;
-pub mod routing;
-pub mod types;
+pub(crate) mod loader;
+pub(crate) mod routing;
+pub(crate) mod types;
 
 pub(crate) use routing::RouteEntry;
 pub(crate) use types::{
-    AuthProviderConfig, CacheConfig, ClassifiersConfig, CorsConfig, DashboardConfig, DatabaseConfig,
-    FewShotConfig, HttpConfig, LlmClassifierConfig, PersistenceSettings, RegexClassifierConfig,
-    ServerConfig,
+    AuthProviderConfig, CacheConfig, CategoryConfig, ClassifiersConfig, CorsConfig,
+    DashboardConfig, DatabaseConfig, FewShotConfig, HttpConfig, LlmClassifierConfig,
+    NegativePatternConfig, PatternEntry, PersistenceSettings, RegexClassifierConfig, ServerConfig,
 };
-pub(crate) use crate::classification::types::{CategoryConfig, NegativePatternConfig, PatternEntry};
 
 /// Top-level configuration root that mirrors every section in `config.toml` (or
 /// `config.yaml`). Loaded once at startup by [`load_config_from_path`] and then
@@ -92,7 +91,10 @@ pub(crate) enum ConfigFormat {
 /// Infer the config file format from the file extension.
 /// `.yaml` / `.yml` → [`ConfigFormat::Yaml`]; anything else → [`ConfigFormat::Toml`].
 fn detect_format(path: &str) -> ConfigFormat {
-    match std::path::Path::new(path).extension().and_then(|s| s.to_str()) {
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+    {
         Some("yaml" | "yml") => ConfigFormat::Yaml,
         _ => ConfigFormat::Toml,
     }
@@ -393,6 +395,7 @@ pub(crate) fn merge_configs(base: &mut ConfigRoot, overlay: ConfigRoot) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::path::PathBuf;
 
     #[test]
@@ -553,7 +556,6 @@ priority = 4
 
     #[test]
     fn validate_external_pattern_file_not_found() {
-        use std::io::Write;
         let tmp_dir = std::env::temp_dir();
         let config_path = tmp_dir.join("test_validate_missing_patterns.toml");
         let mut file = std::fs::File::create(&config_path).unwrap();
@@ -745,7 +747,6 @@ categories:
 
     #[test]
     fn load_config_from_path_toml() {
-        use std::io::Write;
         let temp_dir = std::env::temp_dir();
         let file_path = temp_dir.join("test_load_config.toml");
         let mut file = std::fs::File::create(&file_path).expect("create temp file");
@@ -764,7 +765,6 @@ categories:
 
     #[test]
     fn load_config_from_path_yaml() {
-        use std::io::Write;
         let temp_dir = std::env::temp_dir();
         let file_path = temp_dir.join("test_load_config.yaml");
         let mut file = std::fs::File::create(&file_path).expect("create temp file");
@@ -783,7 +783,6 @@ categories:
 
     #[test]
     fn load_config_from_path_unknown_extension_defaults_to_toml() {
-        use std::io::Write;
         let temp_dir = std::env::temp_dir();
         let file_path = temp_dir.join("test_load_config.conf");
         let mut file = std::fs::File::create(&file_path).expect("create temp file");

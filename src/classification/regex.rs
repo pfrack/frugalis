@@ -5,12 +5,11 @@ use async_trait::async_trait;
 use regex::RegexSet;
 
 use crate::classification::chain::IntentClassify;
-use crate::classification::types::{
-    CategoryConfig, ClassificationResult, ClassificationTier, NegativePatternConfig, PatternMeta,
-};
+use crate::classification::types::{ClassificationResult, ClassificationTier, PatternMeta};
+use crate::config::types::{CategoryConfig, NegativePatternConfig};
 
 #[cfg(test)]
-use crate::classification::types::{DualThreshold, PatternEntry};
+use crate::config::types::{DualThreshold, PatternEntry};
 use crate::config::routing::RouteEntry;
 
 pub struct RegexClassifier {

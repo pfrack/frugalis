@@ -224,8 +224,10 @@ pub(crate) async fn translate_openai_buffered_to_anthropic(
         };
         let status =
             StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        let translated =
-            crate::protocol::response::openai_to_anthropic_error(&error_body, upstream_status.as_u16());
+        let translated = crate::protocol::response::openai_to_anthropic_error(
+            &error_body,
+            upstream_status.as_u16(),
+        );
         return (status, translated);
     }
 
@@ -236,7 +238,10 @@ pub(crate) async fn translate_openai_buffered_to_anthropic(
                 if upstream_body_bytes.len() + chunk.len() > max_upstream_body_bytes {
                     return (
                         StatusCode::BAD_GATEWAY,
-                        crate::proxy::util::anthropic_error_json("api_error", "upstream response too large"),
+                        crate::proxy::util::anthropic_error_json(
+                            "api_error",
+                            "upstream response too large",
+                        ),
                     );
                 }
                 upstream_body_bytes.extend_from_slice(&chunk);

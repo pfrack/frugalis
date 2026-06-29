@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use tracing::warn;
 
 #[cfg(test)]
-use std::time::Duration;
-#[cfg(test)]
 use sqlx::PgPool;
+#[cfg(test)]
+use std::time::Duration;
 
 use super::memory::MemoryBackend;
 use super::postgres::PostgresBackend;
@@ -202,31 +202,51 @@ impl TestDb {
     }
 }
 
+/// Shared test container — initialized once per test binary. Holding the
+/// container (not just the pool) keeps the Docker container alive for the
+/// entire test run instead of starting/stopping one per integration test.
+#[cfg(test)]
+static SHARED_TEST_DB: tokio::sync::Mutex<Option<std::sync::Arc<TestDb>>> =
+    tokio::sync::Mutex::const_new(None);
+
 /// Test helper: create a test database pool.
 ///
 /// Priority:
-/// 1. Ephemeral PostgreSQL container via testcontainers (Docker required)
-/// 2. DATABASE_URL env var with a short connect timeout (3s)
+/// 1. Shared ephemeral PostgreSQL container via testcontainers (Docker required)
+/// 2. DATABASE_URL env var with a short connect timeout (5s)
 ///
-/// Returns `None` when neither is available.
+/// Returns `None` when neither is available. The container is shared across
+/// all integration tests in a single `cargo test` invocation via a static
+/// `Mutex<Option<Arc<TestDb>>>`, so resource pressure on the Docker daemon
+/// stays at one container regardless of how many `persistence_integration_*`
+/// tests run.
 #[cfg(test)]
 pub(crate) async fn test_pool() -> Option<std::sync::Arc<PgPool>> {
-    // Try disposable PostgreSQL container first (in-memory, Docker-backed)
-    if let Some(tdb) = TestDb::new().await {
-        // Quick health check — if the container is flaky, skip gracefully
-        let ok = tokio::time::timeout(
-            Duration::from_secs(3),
+    // Try the shared container. First call starts it; subsequent calls reuse.
+    let tdb = {
+        let mut guard = SHARED_TEST_DB.lock().await;
+        if guard.is_none() {
+            *guard = TestDb::new().await.map(std::sync::Arc::new);
+        }
+        guard.as_ref().cloned()
+    };
+    if let Some(tdb) = tdb {
+        // Per-call health check in case the container died mid-test-run.
+        let health = tokio::time::timeout(
+            Duration::from_secs(5),
             sqlx::query("SELECT 1").execute(tdb.pool.as_ref()),
         )
         .await;
-        if ok.is_ok() && ok.unwrap().is_ok() {
-            return Some(tdb.pool);
+        if health.is_ok() && health.unwrap().is_ok() {
+            return Some(tdb.pool.clone());
         }
-        eprintln!("WARN: Docker Postgres container started but failed health check — skipping");
+        eprintln!("WARN: shared Postgres container failed health check — falling back to DATABASE_URL");
+    } else {
+        eprintln!("WARN: Docker Postgres container failed to initialize — falling back to DATABASE_URL");
     }
-    // Fall back to DATABASE_URL env var
+    // Fall back to DATABASE_URL env var.
     let url = std::env::var("DATABASE_URL").ok()?;
-    tokio::time::timeout(Duration::from_secs(3), sqlx::PgPool::connect(&url))
+    tokio::time::timeout(Duration::from_secs(5), sqlx::PgPool::connect(&url))
         .await
         .ok()?
         .ok()

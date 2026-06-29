@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::SqlitePool;
 use sqlx::Row;
+use sqlx::SqlitePool;
 use tracing::error;
 
 use super::backend::{percentile_99, retry_once, PersistenceBackend};
@@ -108,7 +108,7 @@ impl SqliteBackend {
                     continue;
                 }
                 let sql = format!("ALTER TABLE inferences ADD COLUMN {} {}", col, typ);
-                sqlx::query(&sql)
+                sqlx::query(sqlx::AssertSqlSafe(sql))
                     .execute(&self.pool)
                     .await
                     .map_err(|e| format!("failed to add column {}: {}", col, e))?;
@@ -198,7 +198,7 @@ impl PersistenceBackend for SqliteBackend {
         );
 
         // Execute count query.
-        let mut count_query = sqlx::query(&count_sql);
+        let mut count_query = sqlx::query(sqlx::AssertSqlSafe(count_sql));
         if let Some(cat) = filter_category {
             count_query = count_query.bind(cat);
         }
@@ -213,7 +213,7 @@ impl PersistenceBackend for SqliteBackend {
             .map_err(|e| QueryError(e.to_string()))?;
 
         // Execute data query.
-        let mut data_query = sqlx::query(&data_sql);
+        let mut data_query = sqlx::query(sqlx::AssertSqlSafe(data_sql));
         if let Some(cat) = filter_category {
             data_query = data_query.bind(cat);
         }

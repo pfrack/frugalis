@@ -1,6 +1,6 @@
 use axum::body::Body;
-use axum::response::Response;
 use axum::body::Bytes;
+use axum::response::Response;
 use futures::StreamExt;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -108,11 +108,11 @@ pub(crate) fn handle_streaming_response(
 
 /// Convert a non-2xx upstream response into an SSE error event for the client.
 ///
-/// 5 invariants protect this code path (the prior-review-fix lessons in
-/// `context/foundation/lessons.md`, specifically "Re-run review after a
-/// follow-up change touches the same handler" — the F1–F4 review fixes
-/// were lost twice across follow-up commits; this function is the
-/// regression guard that catches any future re-loss):
+/// 5 invariants protect this code path. The lesson
+/// "Re-run review after a follow-up change touches the same handler"
+/// records that review fixes in this proxy were lost twice across
+/// follow-up commits; this function is the regression guard that catches
+/// any future re-loss:
 /// 1. **Body cap (2 KB)** — upstream error bodies are bounded to 2 KB.
 ///    Large upstream bodies would amplify latency and memory pressure
 ///    on the proxy, and SSE clients don't need the full body to surface
@@ -144,7 +144,9 @@ pub(crate) async fn handle_streaming_error(upstream_response: reqwest::Response)
 /// Translates the Anthropic error body to OpenAI error envelope,
 /// returns an SSE error event (matching the format used by
 /// `handle_streaming_error`) with the upstream's status code.
-pub(crate) async fn handle_anthropic_streaming_error(upstream_response: reqwest::Response) -> Response {
+pub(crate) async fn handle_anthropic_streaming_error(
+    upstream_response: reqwest::Response,
+) -> Response {
     handle_streaming_error_with_transform(upstream_response, |body, status| {
         crate::protocol::response::translate_error(&body, status)
     })
@@ -499,4 +501,828 @@ pub(crate) fn handle_translating_anthropic_stream(
         axum::http::header::HeaderValue::from_static("no-cache"),
     );
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::build_app;
+    use crate::{auth, classification, config};
+    use std::sync::Arc;
+
+    use crate::app::test_helpers::test_app_with_http_client;
+    use crate::app::test_helpers::{make_test_app_state, test_categories, test_negative_patterns};
+    use crate::proxy::util::format_sse_error_event;
+    use crate::test_util::EnvGuard;
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+    };
+    use serial_test::serial;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tower::util::ServiceExt;
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_returns_sse_content_type() {
+        let env = "TEST_STREAM_CT";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let sse_body =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n";
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .expect("response should have Content-Type");
+        assert_eq!(content_type, "text/event-stream");
+        let cache_control = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .expect("response should have Cache-Control");
+        assert_eq!(cache_control, "no-cache");
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.contains("data:"));
+        assert!(body.contains("[DONE]"));
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_forwards_upstream_bytes() {
+        let env = "TEST_STREAM_FWD";
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let sse_chunks = "data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\ndata: [DONE]\n\n";
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_chunks);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.contains(r#"content":"A""#));
+        assert!(body.contains(r#"content":"B""#));
+        assert!(body.contains("[DONE]"));
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_non_2xx_returns_sse_error_event() {
+        let env = "TEST_STREAM_ERR";
+        let _env_guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"overloaded"}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.starts_with("event: error"));
+        mock.assert();
+    }
+
+    #[test]
+    fn test_format_sse_error_event_plain_text() {
+        let s = format_sse_error_event("hello");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"hello\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_escapes_backslash() {
+        let s = format_sse_error_event(r"a\b");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a\\\\b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_escapes_double_quote() {
+        let s = format_sse_error_event("a\"b");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a\\\"b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_newline_with_space() {
+        let s = format_sse_error_event("a\nb");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_carriage_return_with_space() {
+        let s = format_sse_error_event("a\rb");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_combined_injection_produces_valid_json() {
+        let s = format_sse_error_event("\";\n}\nattack\n\r{");
+        let json_str = s
+            .strip_prefix("event: error\ndata: ")
+            .and_then(|s| s.strip_suffix("\n\n"))
+            .expect("SSE event should have correct framing");
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_str).expect("data: payload should be valid JSON");
+        assert_eq!(parsed, serde_json::json!({"error": "\"; } attack  {"}));
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_tab_with_space() {
+        let s = format_sse_error_event("a\tb");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_backspace_with_space() {
+        let s = format_sse_error_event("a\x08\x08");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a  \"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_form_feed_with_space() {
+        let s = format_sse_error_event("a\x0Cb");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_replaces_other_control_chars_with_space() {
+        let s = format_sse_error_event("a\x01b\x1Fc");
+        assert_eq!(s, "event: error\ndata: {\"error\":\"a b c\"}\n\n");
+    }
+
+    #[test]
+    fn test_format_sse_error_event_preserves_printable_ascii() {
+        let s = format_sse_error_event("Hello, World! 123 ~`@#$%^&*()");
+        assert_eq!(
+            s,
+            "event: error\ndata: {\"error\":\"Hello, World! 123 ~`@#$%^&*()\"}\n\n"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_truncates_oversized_body() {
+        let env = "TEST_STREAM_TRUNC";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let large_body = "x".repeat(3_000);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(large_body);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.len() <= 2 * 1024 + 64);
+        assert!(body.starts_with("event: error"));
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_escapes_json_injection() {
+        let env = "TEST_STREAM_ESC";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"a\"b\\c\nd"}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        let json_str = body
+            .strip_prefix("event: error\ndata: ")
+            .and_then(|s| s.strip_suffix("\n\n"))
+            .expect("SSE framing");
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_str).expect("data: payload should be valid JSON");
+        let error_value = parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("error field should be a string");
+        assert_eq!(error_value, r#"{"error":"a\"b\\c\nd"}"#);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_content_type_and_cache_control() {
+        let env = "TEST_STREAM_CT";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"overloaded"}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(content_type, "text/event-stream");
+        let cache_control = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(cache_control, "no-cache");
+        mock.assert();
+    }
+
+    async fn assert_status_passthrough(status: u16) {
+        let env = "TEST_STREAM_ST";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(status)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"upstream"}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status().as_u16(), status);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_status_passthrough_429() {
+        assert_status_passthrough(429).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_status_passthrough_500() {
+        assert_status_passthrough(500).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_status_passthrough_502() {
+        assert_status_passthrough(502).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_handler_error_status_passthrough_503() {
+        assert_status_passthrough(503).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_inline_mid_stream_error_uses_same_format() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let env = "TEST_INLINE_ERR";
+        let _env_guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/v1/chat/completions");
+
+        let server_task = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let headers = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 1000\r\n\r\n";
+            sock.write_all(headers.as_bytes()).await.expect("headers");
+            sock.flush().await.expect("flush headers");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            sock.write_all(b"data: he").await.expect("first chunk");
+            sock.flush().await.expect("flush first chunk");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            drop(sock);
+        });
+
+        let cats = test_categories();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("test reqwest client should build");
+        let mut routing = std::collections::HashMap::new();
+        routing.insert(
+            cats[1].name.clone(),
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: url,
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env.to_string()),
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        };
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
+        let app_state = make_test_app_state(
+            regex_classifier,
+            Some(client),
+            config::routing::ModelCosts::empty(),
+            String::new(),
+            10_485_760,
+        );
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let app = build_app(auth_config, app_state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.starts_with("data: he"));
+        assert!(body.contains("event: error\ndata: {\"error\":"));
+        let data_line = body
+            .split('\n')
+            .find(|line| line.starts_with("data: ") && line.contains("\"error\""))
+            .expect("expected an SSE data: line with the error event");
+        let json_str = data_line.trim_start_matches("data: ");
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_str).expect("SSE error data: must be valid JSON");
+        assert!(parsed.get("error").and_then(|v| v.as_str()).is_some());
+
+        match tokio::time::timeout(std::time::Duration::from_secs(2), server_task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => panic!("server task panicked: {e:?}"),
+            Err(_) => panic!("server task did not complete within 2s"),
+        }
+    }
+
+    mod slow_tests {
+        use crate::app::test_helpers::{test_categories, test_negative_patterns};
+        use crate::app::{build_app, AppState};
+        use crate::test_util::EnvGuard;
+        use crate::{auth, classification, config};
+        use axum::{
+            body::Body,
+            http::{header, Request, StatusCode},
+            routing::get,
+            Router,
+        };
+        use serial_test::serial;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::sync::RwLock;
+        use tower::util::ServiceExt;
+
+        async fn spawn_slow_sse_server() -> (String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let url = format!("http://{addr}/v1/chat/completions");
+            let handle = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let headers = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+                let _ = sock.write_all(headers.as_bytes()).await;
+                let _ = sock.flush().await;
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                let body = "data: hello\n\n";
+                let _ = sock.write_all(body.as_bytes()).await;
+                let _ = sock.flush().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            });
+            (url, handle)
+        }
+
+        fn build_keepalive_app(url: String, env_var: &'static str) -> Router {
+            let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap();
+            let cats = test_categories();
+            let mut routing = std::collections::HashMap::new();
+            routing.insert(
+                cats[1].name.clone(),
+                config::routing::RouteEntry {
+                    providers: vec![config::routing::ProviderEntry {
+                        model: "sf-model".to_string(),
+                        endpoint: url,
+                        provider_type: "openai_compatible".to_string(),
+                        api_key_env: Some(env_var.to_string()),
+                        timeout_ms: None,
+                    }],
+                    cost_per_1m_input_tokens: None,
+                },
+            );
+            let fallback = config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
+                    model: "fallback-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            };
+            let regex_classifier = classification::regex::RegexClassifier::from_values(
+                routing,
+                fallback,
+                30,
+                cats,
+                &test_negative_patterns(),
+            );
+            let model_costs = config::routing::ModelCosts::empty();
+            let baseline_model = String::new();
+            let classifier_chain =
+                classification::chain::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
+            let classifier = Some(Arc::new(classifier_chain));
+            let mut merged_routing = HashMap::new();
+            if let Some(cls) = classifier.as_ref() {
+                for backend in cls.backends().iter() {
+                    if let Some(r) = backend.get_routing() {
+                        merged_routing.extend(r.clone());
+                    }
+                }
+            }
+            let auth_config = Arc::new(auth::AuthConfig::from_values(
+                "proxy-token",
+                "user",
+                "password",
+            ));
+            let app_state = Arc::new(AppState {
+                persistence: None,
+                classifier,
+                fewshot_classifier: None,
+                routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
+                model_costs: Arc::new(tokio::sync::RwLock::new(model_costs)),
+                baseline_model: Arc::new(tokio::sync::RwLock::new(baseline_model)),
+                classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                http_client: Some(client),
+                max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(10_485_760)),
+                keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(1)),
+                request_body_limit_bytes: 10_485_760,
+                streaming_channel_capacity: 32,
+                dashboard_config: config::types::DashboardConfig::default(),
+                auth_providers: Arc::new(vec![]),
+                allowed_origins: Arc::new(RwLock::new(vec![])),
+                response_cache: None,
+                #[cfg(feature = "otel")]
+                metrics: None,
+            });
+            build_app(auth_config, app_state)
+        }
+
+        fn count_anchored_keepalives(body: &str) -> usize {
+            body.split('\n')
+                .filter(|line| *line == ": keepalive")
+                .count()
+        }
+
+        async fn spawn_fast_sse_server() -> (String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let url = format!("http://{addr}/v1/chat/completions");
+            let handle = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let headers = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+                let _ = sock.write_all(headers.as_bytes()).await;
+                let _ = sock.flush().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let body = "data: hello\n\n";
+                let _ = sock.write_all(body.as_bytes()).await;
+                let _ = sock.flush().await;
+            });
+            (url, handle)
+        }
+
+        async fn spawn_chunk_then_idle_sse_server() -> (String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let url = format!("http://{addr}/v1/chat/completions");
+            let handle = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let headers = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+                let _ = sock.write_all(headers.as_bytes()).await;
+                let _ = sock.flush().await;
+                let _ = sock.write_all(b"data: chunk1\n\n").await;
+                let _ = sock.flush().await;
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                let _ = sock.write_all(b"data: chunk2\n\n").await;
+                let _ = sock.flush().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            });
+            (url, handle)
+        }
+
+        async fn spawn_long_stall_sse_server() -> (String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let url = format!("http://{addr}/v1/chat/completions");
+            let handle = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let headers = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+                let _ = sock.write_all(headers.as_bytes()).await;
+                let _ = sock.flush().await;
+                tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
+                let body = "data: hello\n\n";
+                let _ = sock.write_all(body.as_bytes()).await;
+                let _ = sock.flush().await;
+            });
+            (url, handle)
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn test_streaming_keepalive_injected() {
+            let (url, server_handle) = spawn_slow_sse_server().await;
+            let env = "TEST_STREAM_KA_SLOW";
+            let _guard = EnvGuard(env);
+            std::env::set_var(env, "sk-test");
+            let app = build_keepalive_app(url, env);
+            let response = app.oneshot(
+                Request::builder().method("POST").uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#)).expect("request should be valid"),
+            ).await.expect("request should succeed");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body should be readable");
+            let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+            assert!(count_anchored_keepalives(body) >= 1);
+            assert!(body.contains("data: hello"));
+            let _ = server_handle.await;
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn test_streaming_keepalive_not_injected_when_upstream_fast() {
+            let (url, server_handle) = spawn_fast_sse_server().await;
+            let env = "TEST_STREAM_KA_FAST";
+            let _guard = EnvGuard(env);
+            std::env::set_var(env, "sk-test");
+            let app = build_keepalive_app(url, env);
+            let response = app.oneshot(
+                Request::builder().method("POST").uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#)).expect("request should be valid"),
+            ).await.expect("request should succeed");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body should be readable");
+            let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+            assert_eq!(count_anchored_keepalives(body), 0);
+            assert!(body.contains("data: hello"));
+            let _ = server_handle.await;
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn test_streaming_keepalive_injected_alongside_chunk() {
+            let (url, server_handle) = spawn_chunk_then_idle_sse_server().await;
+            let env = "TEST_STREAM_KA_CHUNK";
+            let _guard = EnvGuard(env);
+            std::env::set_var(env, "sk-test");
+            let app = build_keepalive_app(url, env);
+            let response = app.oneshot(
+                Request::builder().method("POST").uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#)).expect("request should be valid"),
+            ).await.expect("request should succeed");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body should be readable");
+            let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+            assert!(body.contains("data: chunk1"));
+            assert!(body.contains("data: chunk2"));
+            assert!(count_anchored_keepalives(body) >= 1);
+            let _ = server_handle.await;
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn test_streaming_keepalive_multiple_consecutive() {
+            let (url, server_handle) = spawn_long_stall_sse_server().await;
+            let env = "TEST_STREAM_KA_LONG";
+            let _guard = EnvGuard(env);
+            std::env::set_var(env, "sk-test");
+            let app = build_keepalive_app(url, env);
+            let response = app.oneshot(
+                Request::builder().method("POST").uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#)).expect("request should be valid"),
+            ).await.expect("request should succeed");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body should be readable");
+            let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+            assert!(count_anchored_keepalives(body) >= 3);
+            assert!(body.contains("data: hello"));
+            let _ = server_handle.await;
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn test_graceful_shutdown() {
+            use std::time::Duration;
+            use tokio::sync::oneshot;
+            let app = Router::new().route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    "OK"
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+                shutdown_rx.await.ok();
+            });
+            let server_task = tokio::spawn(async move {
+                server.await.expect("server task");
+            });
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let client = reqwest::Client::new();
+            let resp = client
+                .get(format!("http://{}/slow", addr))
+                .send()
+                .await
+                .unwrap();
+            shutdown_tx.send(()).unwrap();
+            let body = resp.text().await.unwrap();
+            assert_eq!(body, "OK");
+            server_task.await.unwrap();
+        }
+    }
 }

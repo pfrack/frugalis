@@ -45,9 +45,9 @@ pub struct InferenceLog {
     pub category: Option<String>,
     pub upstream_model: Option<String>,
     pub duration_ms: Option<i32>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // read by Askama template (inferences.html:60,78); rustc can't see template-generated reads
     pub provider_attempts: Option<i16>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // read by Askama template (inferences.html:75); rustc can't see template-generated reads
     pub final_provider: Option<String>,
 }
 

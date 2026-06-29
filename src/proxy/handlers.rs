@@ -1,55 +1,19 @@
 use crate::app::AppState;
 use crate::classification::chain::IntentClassify;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::body::Bytes;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
+use sha2::{Digest, Sha256};
+
+#[cfg(feature = "otel")]
+use crate::proxy::RequestMetrics;
+
 #[cfg(feature = "otel")]
 use opentelemetry::KeyValue;
-
-#[cfg(feature = "otel")]
-pub(crate) struct RequestMetrics {
-    metrics: Option<crate::telemetry::Metrics>,
-    method: &'static str,
-    route: &'static str,
-    start: std::time::Instant,
-    status: StatusCode,
-}
-
-#[cfg(feature = "otel")]
-impl RequestMetrics {
-    pub(crate) fn new(metrics: Option<crate::telemetry::Metrics>, method: &'static str, route: &'static str) -> Self {
-        Self {
-            metrics,
-            method,
-            route,
-            start: std::time::Instant::now(),
-            status: StatusCode::OK,
-        }
-    }
-    pub(crate) fn set_status(&mut self, status: StatusCode) {
-        self.status = status;
-    }
-}
-
-#[cfg(feature = "otel")]
-impl Drop for RequestMetrics {
-    fn drop(&mut self) {
-        if let Some(ref m) = self.metrics {
-            let attrs = [
-                KeyValue::new("method", self.method),
-                KeyValue::new("route", self.route),
-                KeyValue::new("status", self.status.as_u16().to_string()),
-            ];
-            m.requests_total.add(1, &attrs);
-            m.request_duration_seconds
-                .record(self.start.elapsed().as_secs_f64(), &attrs);
-        }
-    }
-}
 
 pub(crate) async fn health() -> (StatusCode, &'static str) {
     debug!("Health check request received");
@@ -211,7 +175,6 @@ pub(crate) async fn completion_handler(
         if no_cache {
             debug!("Cache bypass via X-Frugalis-No-Cache header");
         } else {
-            use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(&body);
             let key = format!("{:x}", hasher.finalize());
@@ -262,7 +225,9 @@ pub(crate) async fn completion_handler(
                     None => crate::classification::types::ClassificationResult::fallback(),
                 };
                 let response_body = crate::proxy::util::classification_only_json(&fallback);
-                crate::proxy::util::log_classification(&state, &fallback, &body_str, "", start, "ok", 1, "");
+                crate::proxy::util::log_classification(
+                    &state, &fallback, &body_str, "", start, "ok", 1, "",
+                );
                 return crate::proxy::util::json_response(StatusCode::OK, response_body);
             }
         }
@@ -416,7 +381,10 @@ pub(crate) async fn completion_handler(
                     rm.set_status(StatusCode::BAD_REQUEST);
                     return crate::proxy::util::json_response(
                         StatusCode::BAD_REQUEST,
-                        crate::proxy::util::upstream_error_json(400, &format!("invalid JSON body: {e}")),
+                        crate::proxy::util::upstream_error_json(
+                            400,
+                            &format!("invalid JSON body: {e}"),
+                        ),
                     );
                 }
             };
@@ -492,8 +460,10 @@ pub(crate) async fn completion_handler(
                         if !upstream_response.status().is_success() {
                             if client_wants_stream {
                                 let resp =
-                                    crate::proxy::streaming::handle_anthropic_streaming_error(upstream_response)
-                                        .await;
+                                    crate::proxy::streaming::handle_anthropic_streaming_error(
+                                        upstream_response,
+                                    )
+                                    .await;
                                 crate::proxy::util::log_classification(
                                     &state,
                                     &classification,
@@ -590,15 +560,14 @@ pub(crate) async fn completion_handler(
                         );
                         #[cfg(feature = "otel")]
                         rm.set_status(status);
-                        if status == StatusCode::OK {
+                        if status.is_success() {
                             if let Some(ref key) = cache_key {
                                 if let Some(ref cache) = state.response_cache {
                                     cache.put(
                                         key.clone(),
                                         crate::cache::CachedEntry {
                                             body: response_body.clone(),
-                                            content_type: "application/json".to_string(),
-                                            status: 200,
+                                            status: status.as_u16(),
                                         },
                                     );
                                 }
@@ -679,41 +648,42 @@ pub(crate) async fn completion_handler(
             body.clone()
         };
 
-        let (client_wants_stream, upstream_req) = match crate::proxy::upstream::build_upstream_request(
-            client,
-            provider,
-            &provider_body,
-            &api_key,
-            &state.auth_providers,
-            &forward_headers,
-        ) {
-            Err(msg) => {
-                if is_last {
-                    crate::proxy::util::log_classification(
-                        &state,
-                        &classification,
-                        &body_str,
-                        &prompt,
-                        start,
-                        "bad_request",
-                        idx as u8 + 1,
-                        &provider.model,
-                    );
-                    #[cfg(feature = "otel")]
-                    rm.set_status(StatusCode::BAD_REQUEST);
-                    return crate::proxy::util::json_response(
+        let (client_wants_stream, upstream_req) =
+            match crate::proxy::upstream::build_upstream_request(
+                client,
+                provider,
+                &provider_body,
+                &api_key,
+                &state.auth_providers,
+                &forward_headers,
+            ) {
+                Err(msg) => {
+                    if is_last {
+                        crate::proxy::util::log_classification(
+                            &state,
+                            &classification,
+                            &body_str,
+                            &prompt,
+                            start,
+                            "bad_request",
+                            idx as u8 + 1,
+                            &provider.model,
+                        );
+                        #[cfg(feature = "otel")]
+                        rm.set_status(StatusCode::BAD_REQUEST);
+                        return crate::proxy::util::json_response(
+                            StatusCode::BAD_REQUEST,
+                            crate::proxy::util::upstream_error_json(400, &msg),
+                        );
+                    }
+                    last_error_response = Some(crate::proxy::util::json_response(
                         StatusCode::BAD_REQUEST,
                         crate::proxy::util::upstream_error_json(400, &msg),
-                    );
+                    ));
+                    continue;
                 }
-                last_error_response = Some(crate::proxy::util::json_response(
-                    StatusCode::BAD_REQUEST,
-                    crate::proxy::util::upstream_error_json(400, &msg),
-                ));
-                continue;
-            }
-            Ok(r) => r,
-        };
+                Ok(r) => r,
+            };
 
         #[cfg_attr(not(feature = "otel"), allow(unused_variables))]
         let upstream_start = std::time::Instant::now();
@@ -755,13 +725,12 @@ pub(crate) async fn completion_handler(
                             return resp;
                         }
                         let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
-                        let (status, resp_body) =
-                            crate::proxy::upstream::handle_buffered_response(
-                                upstream_response,
-                                max_upstream_body_bytes,
-                                false,
-                            )
-                            .await;
+                        let (status, resp_body) = crate::proxy::upstream::handle_buffered_response(
+                            upstream_response,
+                            max_upstream_body_bytes,
+                            false,
+                        )
+                        .await;
                         let log_status = if status == StatusCode::OK {
                             "ok"
                         } else {
@@ -804,13 +773,12 @@ pub(crate) async fn completion_handler(
                         );
                     }
                     let max_upstream_body_bytes = *state.max_upstream_body_bytes.read().await;
-                    let (status, resp_body) =
-                        crate::proxy::upstream::handle_buffered_response(
-                            upstream_response,
-                            max_upstream_body_bytes,
-                            false,
-                        )
-                        .await;
+                    let (status, resp_body) = crate::proxy::upstream::handle_buffered_response(
+                        upstream_response,
+                        max_upstream_body_bytes,
+                        false,
+                    )
+                    .await;
                     let log_status = if status == StatusCode::OK {
                         "ok"
                     } else {
@@ -835,16 +803,15 @@ pub(crate) async fn completion_handler(
                     );
                     #[cfg(feature = "otel")]
                     rm.set_status(status);
-                    if status == StatusCode::OK {
+                    if status.is_success() {
                         if let Some(ref key) = cache_key {
                             if let Some(ref cache) = state.response_cache {
                                 cache.put(
                                     key.clone(),
-                                    crate::cache::CachedEntry {
-                                        body: resp_body.clone(),
-                                        content_type: "application/json".to_string(),
-                                        status: 200,
-                                    },
+                                        crate::cache::CachedEntry {
+                                            body: resp_body.clone(),
+                                            status: status.as_u16(),
+                                        },
                                 );
                             }
                         }
@@ -890,7 +857,10 @@ pub(crate) async fn completion_handler(
                     );
                     last_error_response = Some(crate::proxy::util::json_response(
                         upstream_response.status(),
-                        crate::proxy::util::upstream_error_json(upstream_response.status().as_u16(), "upstream error"),
+                        crate::proxy::util::upstream_error_json(
+                            upstream_response.status().as_u16(),
+                            "upstream error",
+                        ),
                     ));
                 }
                 Err(e) => {
@@ -968,7 +938,10 @@ pub(crate) async fn messages_handler(
         rm.set_status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
         return crate::proxy::util::json_response(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            crate::proxy::util::anthropic_error_json("invalid_request_error", "expected application/json"),
+            crate::proxy::util::anthropic_error_json(
+                "invalid_request_error",
+                "expected application/json",
+            ),
         );
     }
 
@@ -979,7 +952,10 @@ pub(crate) async fn messages_handler(
             rm.set_status(StatusCode::BAD_REQUEST);
             return crate::proxy::util::json_response(
                 StatusCode::BAD_REQUEST,
-                crate::proxy::util::anthropic_error_json("invalid_request_error", "invalid UTF-8 body"),
+                crate::proxy::util::anthropic_error_json(
+                    "invalid_request_error",
+                    "invalid UTF-8 body",
+                ),
             );
         }
     };
@@ -1010,7 +986,6 @@ pub(crate) async fn messages_handler(
         if no_cache {
             debug!("Cache bypass via X-Frugalis-No-Cache header");
         } else {
-            use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(&body);
             let key = format!("{:x}", hasher.finalize());
@@ -1060,7 +1035,9 @@ pub(crate) async fn messages_handler(
                     None => crate::classification::types::ClassificationResult::fallback(),
                 };
                 let response_body = crate::proxy::util::classification_only_json(&fallback);
-                crate::proxy::util::log_classification(&state, &fallback, &body_str, "", start, "ok", 1, "");
+                crate::proxy::util::log_classification(
+                    &state, &fallback, &body_str, "", start, "ok", 1, "",
+                );
                 return crate::proxy::util::json_response(StatusCode::OK, response_body);
             }
         }
@@ -1284,41 +1261,42 @@ pub(crate) async fn messages_handler(
             request_bytes
         };
 
-        let (client_wants_stream, upstream_req) = match crate::proxy::upstream::build_upstream_request(
-            client,
-            provider,
-            &request_bytes,
-            &api_key,
-            &state.auth_providers,
-            &forward_headers,
-        ) {
-            Err(msg) => {
-                if is_last {
-                    crate::proxy::util::log_classification(
-                        &state,
-                        &classification,
-                        &body_str,
-                        &prompt,
-                        start,
-                        "bad_request",
-                        idx as u8 + 1,
-                        &provider.model,
-                    );
-                    #[cfg(feature = "otel")]
-                    rm.set_status(StatusCode::BAD_REQUEST);
-                    return crate::proxy::util::json_response(
+        let (client_wants_stream, upstream_req) =
+            match crate::proxy::upstream::build_upstream_request(
+                client,
+                provider,
+                &request_bytes,
+                &api_key,
+                &state.auth_providers,
+                &forward_headers,
+            ) {
+                Err(msg) => {
+                    if is_last {
+                        crate::proxy::util::log_classification(
+                            &state,
+                            &classification,
+                            &body_str,
+                            &prompt,
+                            start,
+                            "bad_request",
+                            idx as u8 + 1,
+                            &provider.model,
+                        );
+                        #[cfg(feature = "otel")]
+                        rm.set_status(StatusCode::BAD_REQUEST);
+                        return crate::proxy::util::json_response(
+                            StatusCode::BAD_REQUEST,
+                            crate::proxy::util::anthropic_error_json("invalid_request_error", &msg),
+                        );
+                    }
+                    last_error_response = Some(crate::proxy::util::json_response(
                         StatusCode::BAD_REQUEST,
                         crate::proxy::util::anthropic_error_json("invalid_request_error", &msg),
-                    );
+                    ));
+                    continue;
                 }
-                last_error_response = Some(crate::proxy::util::json_response(
-                    StatusCode::BAD_REQUEST,
-                    crate::proxy::util::anthropic_error_json("invalid_request_error", &msg),
-                ));
-                continue;
-            }
-            Ok(r) => r,
-        };
+                Ok(r) => r,
+            };
 
         #[cfg_attr(not(feature = "otel"), allow(unused_variables))]
         let upstream_start = std::time::Instant::now();
@@ -1487,16 +1465,15 @@ pub(crate) async fn messages_handler(
                     );
                     #[cfg(feature = "otel")]
                     rm.set_status(status);
-                    if status == StatusCode::OK {
+                    if status.is_success() {
                         if let Some(ref key) = cache_key {
                             if let Some(ref cache) = state.response_cache {
                                 cache.put(
                                     key.clone(),
-                                    crate::cache::CachedEntry {
-                                        body: resp_body.clone(),
-                                        content_type: "application/json".to_string(),
-                                        status: 200,
-                                    },
+                                        crate::cache::CachedEntry {
+                                            body: resp_body.clone(),
+                                            status: status.as_u16(),
+                                        },
                                 );
                             }
                         }
@@ -1674,4 +1651,1524 @@ pub(crate) async fn feedback_handler(
             "status": "accepted"
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::build_app;
+    use crate::app::test_helpers::{
+        make_test_app_state, parse_json_body, test_app, test_app_with_anthropic_http_client,
+        test_app_with_classifier, test_app_with_http_client, test_categories,
+        test_negative_patterns,
+    };
+    use crate::test_util::EnvGuard;
+    use crate::{auth, classification, config};
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+        Router,
+    };
+    use serial_test::serial;
+    use std::collections::HashMap;
+    use tower::util::ServiceExt;
+
+    #[tokio::test]
+    async fn test_feedback_requires_auth() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/feedback")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"text":"hello","actual_category":"CASUAL"}"#))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_feedback_no_fewshot_returns_503() {
+        let app = test_app_with_classifier();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/feedback")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"text":"hello","actual_category":"SYNTAX_FIX"}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn test_completion_handler_returns_classification_json() {
+        let response = test_app_with_classifier()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("category").and_then(|v| v.as_str()),
+            Some("SYNTAX_FIX")
+        );
+        assert_eq!(
+            json.get("status").and_then(|v| v.as_str()),
+            Some("classified")
+        );
+        assert_eq!(json.get("tier").and_then(|v| v.as_str()), Some("Regex"));
+    }
+
+    #[tokio::test]
+    async fn test_classify_handler_returns_classification_json() {
+        let response = test_app_with_classifier()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/classify")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("classify request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("category").and_then(|v| v.as_str()),
+            Some("SYNTAX_FIX")
+        );
+        assert_eq!(json.get("model").and_then(|v| v.as_str()), Some("sf-model"));
+        assert_eq!(
+            json.get("status").and_then(|v| v.as_str()),
+            Some("classified")
+        );
+        assert_eq!(json.get("tier").and_then(|v| v.as_str()), Some("Regex"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_max_upstream_body_bytes_truncation() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let _guard2 = EnvGuard("TEST_API_KEY");
+        std::env::set_var("TEST_API_KEY", "sk-test");
+        let (app, server) = test_app_with_http_client("TEST_API_KEY", 1_100_000);
+        let large_content = "x".repeat(2_000_000);
+        let body = format!("{{\"choices\":[{{\"message\":{{\"content\":\"{large_content}\"}}}}]}}");
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(body);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("error").and_then(|v| v.as_str()),
+            Some("upstream_error")
+        );
+        assert_eq!(
+            json.get("message").and_then(|v| v.as_str()),
+            Some("upstream response too large")
+        );
+        mock.assert();
+    }
+
+    fn test_app_with_enriched_classifier(
+        provider_type_val: &str,
+        api_key_env_val: Option<&str>,
+    ) -> Router {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let cats = test_categories();
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let mut routing = HashMap::new();
+        routing.insert(
+            cats[1].name.clone(),
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: "https://test.endpoint".to_string(),
+                    provider_type: provider_type_val.to_string(),
+                    api_key_env: api_key_env_val.map(|s| s.to_string()),
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        routing.insert(
+            cats[3].name.clone(),
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        };
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
+        let app_state = make_test_app_state(
+            regex_classifier,
+            None,
+            config::routing::ModelCosts::empty(),
+            String::new(),
+            10_485_760,
+        );
+        build_app(auth_config, app_state)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_does_not_include_enriched_fields() {
+        let _guard = EnvGuard("TEST_API_KEY");
+        std::env::set_var("TEST_API_KEY", "sk-test-value-123");
+        let response = test_app_with_enriched_classifier("test_provider", Some("TEST_API_KEY"))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("category").and_then(|v| v.as_str()),
+            Some("SYNTAX_FIX")
+        );
+        for forbidden in ["provider_type", "endpoint", "api_key"] {
+            assert!(
+                json.get(forbidden).is_none(),
+                "response should NOT contain {forbidden}, got: {json}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_completion_no_enriched_fields_with_missing_env() {
+        let response = test_app_with_enriched_classifier("test_provider", Some("MISSING_KEY_XYZ"))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        assert!(
+            json.get("api_key").is_none(),
+            "response should NOT contain api_key, got: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_classify_no_enriched_fields() {
+        let response = test_app_with_enriched_classifier("test_provider", Some("TEST_API_KEY"))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/classify")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("classify request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        for forbidden in ["provider_type", "api_key"] {
+            assert!(
+                json.get(forbidden).is_none(),
+                "classify response should not contain {forbidden}, got: {json}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn routes_auth_health_is_public() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("health request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_models_endpoint_returns_valid_json_no_auth() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("models request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .expect("response should have Content-Type");
+        assert!(content_type.starts_with("application/json"));
+        let json = parse_json_body(response).await;
+        assert_eq!(json.get("object").and_then(|v| v.as_str()), Some("list"));
+        assert_eq!(json.get("has_more").and_then(|v| v.as_bool()), Some(false));
+        let data = json
+            .get("data")
+            .and_then(|v| v.as_array())
+            .expect("data should be an array");
+        assert_eq!(data.len(), 3);
+        let model_ids: Vec<&str> = data
+            .iter()
+            .map(|m| m.get("id").and_then(|v| v.as_str()).unwrap_or(""))
+            .collect();
+        assert!(model_ids.contains(&"claude-sonnet-4-6-20250514"));
+        assert!(model_ids.contains(&"claude-haiku-4-5-20250514"));
+        assert!(model_ids.contains(&"claude-opus-4-20250514"));
+        for model in data {
+            assert_eq!(model.get("object").and_then(|v| v.as_str()), Some("model"));
+            assert_eq!(
+                model.get("owned_by").and_then(|v| v.as_str()),
+                Some("anthropic")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_models_endpoint_entries_have_display_name_and_prefixed_id() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("models request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        let data = json
+            .get("data")
+            .and_then(|v| v.as_array())
+            .expect("data should be an array");
+        assert!(!data.is_empty());
+        for model in data {
+            let id = model
+                .get("id")
+                .and_then(|v| v.as_str())
+                .expect("each entry must have an id");
+            assert!(
+                id.starts_with("claude") || id.starts_with("anthropic"),
+                "id must be claude/anthropic-prefixed, got {id}"
+            );
+            let display_name = model
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .expect("each entry must have a display_name");
+            assert!(!display_name.is_empty());
+            assert_eq!(model.get("type").and_then(|v| v.as_str()), Some("model"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_returns_estimated_tokens() {
+        let body = serde_json::json!({"messages": [{"role": "user", "content": "hello world"}]});
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages/count_tokens")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("count_tokens request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        let tokens = json
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .expect("input_tokens should be a number");
+        assert_eq!(tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_array_content_blocks() {
+        let body = serde_json::json!({"messages": [{"role": "user", "content": [{"type": "text", "text": "hello world test"}]}]});
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages/count_tokens")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("count_tokens request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        let tokens = json
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .expect("input_tokens should be a number");
+        assert_eq!(tokens, 4);
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_empty_messages() {
+        let body = serde_json::json!({"messages": []});
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages/count_tokens")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("count_tokens request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        let tokens = json
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .expect("input_tokens should be a number");
+        assert_eq!(tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn routes_auth_proxy_requires_valid_bearer_token() {
+        let unauthorized = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("proxy unauthorized request should complete");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("proxy authorized request should complete");
+        assert_eq!(authorized.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn routes_auth_dashboard_requires_basic_auth_challenge() {
+        let unauthorized = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("dashboard unauthorized request should complete");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let challenge = unauthorized
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .expect("dashboard unauthorized should include challenge header");
+        assert!(challenge.starts_with("Basic"));
+
+        let authorized = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard")
+                    .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNzd29yZA==")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("dashboard authorized request should complete");
+        assert_eq!(authorized.status(), StatusCode::OK);
+    }
+
+    fn test_app_with_dead_endpoint(env_var_name: &str) -> Router {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let cats = test_categories();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .expect("test reqwest client should build");
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let mut routing = HashMap::new();
+        routing.insert(
+            cats[1].name.clone(),
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        routing.insert(
+            cats[3].name.clone(),
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        };
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
+        let app_state = make_test_app_state(
+            regex_classifier,
+            Some(client),
+            config::routing::ModelCosts::empty(),
+            String::new(),
+            10_485_760,
+        );
+        build_app(auth_config, app_state)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_upstream_returns_response() {
+        let env = "TEST_UPSTREAM_RESP";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"hello"}}]}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.contains(r#""choices""#));
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_upstream_request_includes_auth_header() {
+        let env = "TEST_UPSTREAM_AUTH";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header("Authorization", "Bearer sk-test");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body("ok");
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_upstream_request_includes_content_type_json() {
+        let env = "TEST_UPSTREAM_CT";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header("Content-Type", "application/json");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body("ok");
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_upstream_unreachable_returns_502() {
+        let env = "TEST_UPSTREAM_DEAD";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let app = test_app_with_dead_endpoint(env);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("error").and_then(|v| v.as_str()),
+            Some("upstream_error")
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_upstream_skip_classify_via_headers() {
+        let env = "TEST_UPSTREAM_SKIP";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"skipped"}}]}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-frugalis-category", "SYNTAX_FIX")
+                    .header("x-frugalis-model", "gpt-4o-mini")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.contains(r#""skipped""#));
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_messages_handler_requires_auth() {
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"claude-3.5","messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_non_streaming_passthrough() {
+        let env = "TEST_ANTHROPIC_NS";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages").header("x-api-key", "sk-ant-test").header("anthropic-version", "2023-06-01");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hello"}]}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body_str = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body_str.contains("hello"));
+        assert!(body_str.contains("msg_1"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_forwards_anthropic_client_headers() {
+        let env = "TEST_ANTHROPIC_FWD";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages")
+                .header("x-api-key", "sk-ant-test").header("anthropic-version", "2024-10-22")
+                .header("anthropic-beta", "context-management-2025-09").header("x-claude-code-session-id", "sess-123");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .header("anthropic-version", "2024-10-22").header("anthropic-beta", "context-management-2025-09")
+                .header("x-claude-code-session-id", "sess-123")
+                .body(Body::from(r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_does_not_forward_anthropic_headers_to_openai() {
+        let env = "TEST_OPENAI_NO_FWD";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let beta_canary = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header_exists("anthropic-beta");
+            then.status(200).body("canary-beta");
+        });
+        let version_canary = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header_exists("anthropic-version");
+            then.status(200).body("canary-version");
+        });
+        let positive = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .header("Authorization", "Bearer sk-test");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body("ok");
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("anthropic-version", "2024-10-22")
+                    .header("anthropic-beta", "context-management-2025-09")
+                    .header("x-claude-code-session-id", "sess-123")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(beta_canary.hits(), 0);
+        assert_eq!(version_canary.hits(), 0);
+        assert_eq!(positive.hits(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_streaming_passthrough() {
+        let env = "TEST_ANTHROPIC_STREAM";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200).header("content-type", "text/event-stream")
+                .body("event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n");
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"claude-3.5","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"fix this bug"}]}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream")
+        );
+        mock.assert();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body_str = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body_str.contains("message_start"));
+        assert!(body_str.contains("content_block_delta"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_upstream_error_forwards_body() {
+        let env = "TEST_ANTHROPIC_ERR";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(429).header("content-type", "application/json")
+                .body(r#"{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        mock.assert();
+        let json = parse_json_body(response).await;
+        assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("error"));
+    }
+
+    #[tokio::test]
+    async fn test_messages_handler_classification_only_when_no_http_client() {
+        let response = test_app_with_classifier().oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("status").and_then(|v| v.as_str()),
+            Some("classified")
+        );
+        assert_eq!(
+            json.get("category").and_then(|v| v.as_str()),
+            Some("SYNTAX_FIX")
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_overrides_model_to_classifier_choice() {
+        let env = "TEST_ANTHROPIC_MODEL";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .body_contains("\"model\":\"sf-model\"");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":"msg_1","type":"message"}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"fix this bug"}]}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_true_returns_sse_content() {
+        let env = "TEST_STREAM_TSSE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body("data: hello\n\n");
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(content_type, "text/event-stream");
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_false_returns_buffered_json() {
+        let env = "TEST_STREAM_FJSON";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"buffered"}}]}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":false}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(content_type, "application/json");
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_streaming_absent_returns_buffered_json() {
+        let env = "TEST_STREAM_AJSON";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"default"}}]}"#);
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(content_type, "application/json");
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_streaming_degradation_no_client() {
+        let app = test_app_with_classifier();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body.contains(r#""status":"classified""#));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_anthropic_translation() {
+        let env = "TEST_TRANSLATE_O2A";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages").header("x-api-key", "sk-ant-test").header("anthropic-version", "2023-06-01")
+                .body_contains("\"system\"").body_contains("\"max_tokens\"");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"msg_1","type":"message","role":"assistant","model":"sf-model","content":[{"type":"text","text":"translated response"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"gpt-4","messages":[{"role":"system","content":"You are helpful."},{"role":"user","content":"fix this bug"}],"max_tokens":100}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("object").and_then(|v| v.as_str()),
+            Some("chat.completion")
+        );
+        let choices = json
+            .get("choices")
+            .and_then(|v| v.as_array())
+            .expect("choices array");
+        assert_eq!(choices.len(), 1);
+        let message = choices[0].get("message").expect("message field");
+        assert_eq!(
+            message.get("content").and_then(|v| v.as_str()),
+            Some("translated response")
+        );
+        assert_eq!(
+            choices[0].get("finish_reason").and_then(|v| v.as_str()),
+            Some("stop")
+        );
+        let usage = json.get("usage").expect("usage field");
+        assert_eq!(
+            usage.get("prompt_tokens").and_then(|v| v.as_u64()),
+            Some(10)
+        );
+        assert_eq!(
+            usage.get("completion_tokens").and_then(|v| v.as_u64()),
+            Some(5)
+        );
+        assert_eq!(usage.get("total_tokens").and_then(|v| v.as_u64()), Some(15));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_anthropic_translation_inserts_cache_control() {
+        let env = "TEST_TRANSLATE_O2A_CACHE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages").header("x-api-key", "sk-ant-test").body_contains("\"cache_control\"");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"max_tokens":100}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_translates_cache_tokens_in_usage() {
+        let env = "TEST_USAGE_O2A_CACHE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages").header("x-api-key", "sk-ant-test");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"msg_u","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":80,"cache_creation_input_tokens":5}}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"max_tokens":100}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = parse_json_body(response).await;
+        let usage = json.get("usage").expect("usage in client response");
+        assert_eq!(
+            usage.get("prompt_tokens").and_then(|v| v.as_u64()),
+            Some(100 + 80 + 5)
+        );
+        assert_eq!(
+            usage.get("completion_tokens").and_then(|v| v.as_u64()),
+            Some(20)
+        );
+        let cached = usage
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|v| v.as_u64());
+        assert_eq!(cached, Some(80));
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_anthropic_streaming() {
+        let env = "TEST_TRANSLATE_O2A_STREAM";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200).header("content-type", "text/event-stream")
+                .body("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_s1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"sf-model\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello \"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"world\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream")
+        );
+        mock.assert();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body_str = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body_str.contains("chatcmpl-"));
+        assert!(body_str.contains("\"role\":\"assistant\""));
+        assert!(body_str.contains("Hello "));
+        assert!(body_str.contains("\"finish_reason\":\"stop\""));
+        assert!(body_str.contains("[DONE]"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_anthropic_error() {
+        let env = "TEST_TRANSLATE_O2A_ERR";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(429).header("content-type", "application/json")
+                .body(r#"{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}]}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        mock.assert();
+        let json = parse_json_body(response).await;
+        let error = json.get("error").expect("error field");
+        assert_eq!(
+            error.get("type").and_then(|v| v.as_str()),
+            Some("rate_limit_error")
+        );
+        assert_eq!(
+            error.get("message").and_then(|v| v.as_str()),
+            Some("Too many requests")
+        );
+    }
+
+    fn test_app_with_openai_translation(env_var_name: &str) -> (Router, httpmock::MockServer) {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let cats = test_categories();
+        let server = httpmock::MockServer::start();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("test reqwest client should build");
+        let auth_config = Arc::new(auth::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+        let endpoint = server.url("/v1/chat/completions");
+        let mut routing = HashMap::new();
+        routing.insert(
+            cats[1].name.clone(),
+            config::routing::RouteEntry {
+                providers: vec![config::routing::ProviderEntry {
+                    model: "gpt-4o".to_string(),
+                    endpoint: endpoint.clone(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some(env_var_name.to_string()),
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        let fallback = config::routing::RouteEntry {
+            providers: vec![config::routing::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        };
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
+        let app_state = make_test_app_state(
+            regex_classifier,
+            Some(client),
+            config::routing::ModelCosts::empty(),
+            String::new(),
+            10_485_760,
+        );
+        let app = build_app(auth_config, app_state);
+        (app, server)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_openai_translation_strips_cache_control() {
+        let env = "TEST_A2O_NO_CACHE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-openai-test");
+        let (app, server) = test_app_with_openai_translation(env);
+        let canary = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/chat/completions")
+                .body_contains("cache_control");
+            then.status(200).body("canary");
+        });
+        let positive = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions").header("authorization", "Bearer sk-openai-test");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .header("x-frugalis-category", "SYNTAX_FIX").header("x-frugalis-model", "gpt-4o")
+                .body(Body::from(r#"{"model":"claude-3.5","max_tokens":1024,"messages":[{"role":"user","content":[{"type":"text","text":"fix this bug","cache_control":{"type":"ephemeral"}}]}]}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(canary.hits(), 0);
+        assert_eq!(positive.hits(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_anthropic_passthrough_preserves_cache_control() {
+        let env = "TEST_ANT_PASSTHROUGH_CACHE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages").header("x-api-key", "sk-ant-test").header("anthropic-version", "2023-06-01").body_contains("\"cache_control\"");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":[{"type":"text","text":"fix this bug","cache_control":{"type":"ephemeral"}}]}]}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_openai_translation_non_streaming() {
+        let env = "TEST_A2O_NS";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-openai-test");
+        let (app, server) = test_app_with_openai_translation(env);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions").header("authorization", "Bearer sk-openai-test");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"chatcmpl-abc","object":"chat.completion","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"Hello from OpenAI"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .header("x-frugalis-category", "SYNTAX_FIX").header("x-frugalis-model", "gpt-4o")
+                .body(Body::from(r#"{"model":"claude-3.5","max_tokens":1024,"messages":[{"role":"user","content":"fix this bug"}]}"#)).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body.get("type").unwrap().as_str().unwrap(), "message");
+        assert_eq!(body.get("role").unwrap().as_str().unwrap(), "assistant");
+        assert_eq!(
+            body.get("stop_reason").unwrap().as_str().unwrap(),
+            "end_turn"
+        );
+        let content = body.get("content").unwrap().as_array().unwrap();
+        assert_eq!(
+            content[0].get("text").unwrap().as_str().unwrap(),
+            "Hello from OpenAI"
+        );
+        let usage = body.get("usage").unwrap();
+        assert_eq!(usage.get("input_tokens").unwrap().as_u64().unwrap(), 10);
+        assert_eq!(usage.get("output_tokens").unwrap().as_u64().unwrap(), 5);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_openai_translation_streaming() {
+        let env = "TEST_A2O_STREAM";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-openai-test");
+        let (app, server) = test_app_with_openai_translation(env);
+        let sse_body = "data: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .header("x-frugalis-category", "SYNTAX_FIX").header("x-frugalis-model", "gpt-4o")
+                .body(Body::from(r#"{"model":"claude-3.5","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"fix this bug"}]}"#)).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(body_str.contains("event: message_start"));
+        assert!(body_str.contains("event: content_block_start"));
+        assert!(body_str.contains("text_delta"));
+        assert!(body_str.contains("Hi"));
+        assert!(body_str.contains("event: message_delta"));
+        assert!(body_str.contains("end_turn"));
+        assert!(body_str.contains("event: message_stop"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_openai_translation_error() {
+        let env = "TEST_A2O_ERR";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-openai-test");
+        let (app, server) = test_app_with_openai_translation(env);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(429).header("content-type", "application/json")
+                .body(r#"{"error":{"message":"Rate limit exceeded","type":"rate_limit","code":"rate_limit_exceeded"}}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .header("x-frugalis-category", "SYNTAX_FIX").header("x-frugalis-model", "gpt-4o")
+                .body(Body::from(r#"{"model":"claude-3.5","max_tokens":1024,"messages":[{"role":"user","content":"fix this bug"}]}"#)).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        mock.assert();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body.get("type").unwrap().as_str().unwrap(), "error");
+        let error = body.get("error").unwrap();
+        assert_eq!(
+            error.get("type").unwrap().as_str().unwrap(),
+            "rate_limit_error"
+        );
+        assert_eq!(
+            error.get("message").unwrap().as_str().unwrap(),
+            "Rate limit exceeded"
+        );
+    }
 }

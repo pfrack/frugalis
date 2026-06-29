@@ -359,4 +359,199 @@ mod tests {
         assert_eq!(counter2.load(Ordering::SeqCst), 1);
         assert_eq!(counter3.load(Ordering::SeqCst), 1);
     }
+
+    #[tokio::test]
+    async fn test_chain_with_regex_and_fewshot() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        use crate::app::test_helpers::{test_categories, test_negative_patterns};
+        use std::collections::HashMap;
+        let cats = test_categories();
+        let mut routing = HashMap::new();
+        routing.insert(
+            cats[1].name.clone(),
+            crate::config::routing::RouteEntry {
+                providers: vec![crate::config::routing::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        routing.insert(
+            cats[3].name.clone(),
+            crate::config::routing::RouteEntry {
+                providers: vec![crate::config::routing::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        let fallback = crate::config::routing::RouteEntry {
+            providers: vec![crate::config::routing::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        };
+        let regex_classifier = crate::classification::regex::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats.clone(),
+            &test_negative_patterns(),
+        );
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let fewshot_config = crate::config::types::FewShotConfig {
+            enabled: true,
+            confidence_threshold: 0.4,
+            cold_start_threshold: 0.6,
+            cold_start_feedback_count: 5,
+            feature_dimensions: 1000,
+            retraining_threshold: 5,
+            data_path: format!("/tmp/fewshot_int_{}.yaml", nanos),
+            max_vocabulary_warn: 5000,
+            max_training_examples: 10000,
+        };
+        let fewshot = crate::classification::fewshot::FewShotClassifier::new(
+            fewshot_config,
+            HashMap::new(),
+            crate::config::routing::RouteEntry {
+                providers: vec![crate::config::routing::ProviderEntry {
+                    model: "fallback-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+
+        let chain = ClassifierChain::new(vec![Arc::new(regex_classifier), Arc::new(fewshot)]);
+        let result = chain.classify("fix this bug").await;
+        assert_eq!(result.category, "SYNTAX_FIX");
+        assert_eq!(result.tier, ClassificationTier::Regex);
+
+        let result = chain.classify("can you explain what a hash map is").await;
+        assert_eq!(result.category, "CASUAL");
+        assert_eq!(result.tier, ClassificationTier::FewShot);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_chain_3_backend_escalates_to_llm() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        use crate::app::test_helpers::{test_categories, test_negative_patterns};
+        use crate::classification::chain::test_util::CountingClassifier;
+        use crate::test_util::EnvGuard;
+        use httpmock::prelude::*;
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _guard = EnvGuard("OPENAI_API_KEY");
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+
+        let server = MockServer::start();
+        let llm_mock = server.mock(|when, then| {
+            when.method(POST).path("/v1/chat/completions");
+            then.status(200).json_body(
+                serde_json::json!({"choices": [{"message": {"content": "SYNTAX_FIX"}}]}),
+            );
+        });
+
+        let cats = test_categories();
+        let cats_for_llm = cats.clone();
+        let mut routing = HashMap::new();
+        routing.insert(
+            "SYNTAX_FIX".to_string(),
+            crate::config::routing::RouteEntry {
+                providers: vec![crate::config::routing::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        routing.insert(
+            "CASUAL".to_string(),
+            crate::config::routing::RouteEntry {
+                providers: vec![crate::config::routing::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        let fallback = crate::config::routing::RouteEntry {
+            providers: vec![crate::config::routing::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        };
+        let regex_classifier = crate::classification::regex::RegexClassifier::from_values(
+            routing,
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
+
+        let fewshot_counter = Arc::new(AtomicUsize::new(0));
+        let fewshot_stub = CountingClassifier {
+            counter: fewshot_counter.clone(),
+            result: ClassificationResult::fallback(),
+        };
+
+        let llm_config = crate::config::types::LlmClassifierConfig {
+            enabled: true,
+            model: "gpt-4o-mini".to_string(),
+            endpoint: server.url("/v1/chat/completions"),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            provider_type: "openai_compatible".to_string(),
+            prompt_template_path: None,
+            timeout_secs: 3,
+        };
+        let llm = crate::classification::llm::LLMClassifier::new(
+            llm_config,
+            reqwest::Client::new(),
+            cats_for_llm,
+            Arc::new(vec![]),
+        );
+
+        let chain = ClassifierChain::new(vec![
+            Arc::new(regex_classifier),
+            Arc::new(fewshot_stub),
+            Arc::new(llm),
+        ]);
+        let result = chain.classify("this is a long prompt that exercises the chain's escalation path from regex through fewshot to the llm tier").await;
+
+        assert_eq!(result.category, "SYNTAX_FIX");
+        assert_eq!(result.tier, ClassificationTier::Regex);
+        assert_eq!(fewshot_counter.load(Ordering::SeqCst), 1);
+        llm_mock.assert_hits(1);
+    }
 }

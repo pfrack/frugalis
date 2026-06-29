@@ -3,7 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::classification::chain::IntentClassify;
-use crate::classification::types::{CategoryConfig, ClassificationResult, ClassificationTier};
+use crate::classification::types::{ClassificationResult, ClassificationTier};
+use crate::config::types::CategoryConfig;
 use crate::config::types::{AuthProviderConfig, LlmClassifierConfig};
 
 /// LLM-based intent classifier that fires when RegexClassifier returns Fallback.
@@ -213,7 +214,9 @@ impl IntentClassify for LLMClassifier {
         self.classify_async(prompt).await
     }
 
-    fn get_routing(&self) -> Option<&std::collections::HashMap<String, crate::config::routing::RouteEntry>> {
+    fn get_routing(
+        &self,
+    ) -> Option<&std::collections::HashMap<String, crate::config::routing::RouteEntry>> {
         None
     }
 }
@@ -311,7 +314,7 @@ fn append_forward_headers(out: &mut Vec<(String, String)>, forward_headers: &[(S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classification::types::{CategoryConfig, ClassificationTier};
+    use crate::classification::types::ClassificationTier;
     use crate::config::types::AuthProviderConfig;
     use serial_test::serial;
 
