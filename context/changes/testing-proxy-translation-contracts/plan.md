@@ -449,9 +449,9 @@ All tests in this plan are integration tests — they exercise the full handler 
 
 #### Automated
 
-- [x] 1.1 `test_app_with_nim_http_client` compiles and returns functional Router
-- [x] 1.2 `test_app_with_ollama_http_client` compiles and returns functional Router
-- [x] 1.3 Existing test suite passes: `cargo test`
+- [x] 1.1 `test_app_with_nim_http_client` compiles and returns functional Router — d3a347e
+- [x] 1.2 `test_app_with_ollama_http_client` compiles and returns functional Router — d3a347e
+- [x] 1.3 Existing test suite passes: `cargo test` — d3a347e
 
 #### Manual
 
@@ -479,22 +479,22 @@ All tests in this plan are integration tests — they exercise the full handler 
 
 #### Automated
 
-- [ ] 3.1 Structural assertions on existing R1 non-streaming test
-- [ ] 3.2 Structural assertions on existing R1 streaming test
-- [ ] 3.3 Structural assertions on existing R2 non-streaming test
-- [ ] 3.4 Structural assertions on existing R2 streaming test
-- [ ] 3.5 completion_handler nvidia_nim passthrough + sanitization test
-- [ ] 3.6 completion_handler ollama passthrough test
-- [ ] 3.7 messages_handler nvidia_nim translation + sanitization test
-- [ ] 3.8 messages_handler ollama translation test
-- [ ] 3.9 R5 passthrough test (openai_responses verbatim forwarding)
-- [ ] 3.10 Responses auth gate test (401 without token)
-- [ ] 3.11 Responses upstream error envelope test (429 → error shape)
-- [ ] 3.12 Responses cache hit test (response_id stability)
-- [ ] 3.13 Responses header forwarding test (openai-beta passthrough)
-- [ ] 3.14 Responses two-stage streaming structural assertions test
-- [ ] 3.15 Responses Anthropic buffered tool_use→function_call test
-- [ ] 3.16 Full test suite passes: `cargo test`
+- [ ] 3.1 Structural assertions on existing R1 non-streaming test — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.2 Structural assertions on existing R1 streaming test — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.3 Structural assertions on existing R2 non-streaming test — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.4 Structural assertions on existing R2 streaming test — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.5 completion_handler nvidia_nim passthrough + sanitization test — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.6 completion_handler ollama passthrough test — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.7 messages_handler nvidia_nim translation + sanitization test — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.8 messages_handler ollama translation test — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.9 R5 passthrough test (openai_responses verbatim forwarding) — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.10 Responses auth gate test (401 without token) — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.11 Responses upstream error envelope test (429 → error shape) — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.12 Responses cache hit test (response_id stability) — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.13 Responses header forwarding test (openai-beta passthrough) — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.14 Responses two-stage streaming structural assertions test — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.15 Responses Anthropic buffered tool_use→function_call test — reverted by 894681a (was falsely checked off in d3a347e)
+- [ ] 3.16 Full test suite passes: `cargo test` — reverted by 894681a (was falsely checked off in d3a347e)
 
 #### Manual
 
