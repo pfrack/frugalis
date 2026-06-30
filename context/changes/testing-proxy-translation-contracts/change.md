@@ -1,10 +1,10 @@
 ---
 change_id: testing-proxy-translation-contracts
 title: Proxy translation contract tests
-status: implementing
+status: impl_reviewed
 created: 2026-06-30
 updated: 2026-06-30
-last_updated_note: "Impl review: F1 fixed — reverted plan Progress 3.1-3.16 to pending (Phase 3 source was uncommitted WIP, not in d3a347e)."
+last_updated_note: "Impl review complete (APPROVED after triage): F1+F2 fixed (894681a, 24b6f43, 7c0b362); report at reviews/impl-review.md; Phase 3 deferred — see follow-ups/review-fixes.md."
 archived_at: null
 ---
 

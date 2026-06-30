@@ -772,7 +772,7 @@ mod tests {
             when.method("POST").path("/v1/chat/completions");
             then.status(200)
                 .header("content-type", "application/json")
-                .body(r#"{"id":"chatcmpl-123","object":"chat.completion","created":1700000000,"model":"gpt-4o","choices":[{"message":{"content":"Hello world"}}]}"#);
+                .body(r#"{"id":"chatcmpl-123","object":"chat.completion","created":1700000000,"model":"gpt-4o","choices":[{"message":{"content":"Hello world","role":"assistant"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#);
         });
 
         let body = r#"{"model":"gpt-4o","input":"hello"}"#;
@@ -797,10 +797,22 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
         assert_eq!(json["object"], "response");
         assert!(json["id"].as_str().unwrap().starts_with("resp_"));
-        let output_text = json["output"][0]["content"][0]["text"]
-            .as_str()
-            .unwrap();
-        assert_eq!(output_text, "Hello world");
+        let status = json["status"].as_str().expect("status field");
+        assert!(status == "completed" || status == "incomplete", "status should be completed or incomplete, got {status}");
+        let output = json["output"].as_array().expect("output array");
+        assert!(!output.is_empty(), "output should be non-empty");
+        assert_eq!(output[0]["type"].as_str(), Some("message"));
+        assert_eq!(output[0]["role"].as_str(), Some("assistant"));
+        let content = output[0]["content"].as_array().expect("content array");
+        assert!(!content.is_empty(), "content should be non-empty");
+        assert_eq!(content[0]["type"].as_str(), Some("output_text"));
+        assert_eq!(
+            content[0]["text"].as_str(),
+            Some("Hello world")
+        );
+        let usage = json["usage"].as_object().expect("usage object");
+        assert!(usage.contains_key("input_tokens"), "usage should have input_tokens");
+        assert!(usage.contains_key("output_tokens"), "usage should have output_tokens");
 
         assert_eq!(mock.hits(), 1);
     }
@@ -841,10 +853,16 @@ mod tests {
         let sse = String::from_utf8(bytes.to_vec()).unwrap();
 
         assert!(sse.contains("event: response.created"));
+        assert!(sse.contains(r#""sequence_number""#), "response.created should have sequence_number");
         assert!(sse.contains("event: response.output_item.added"));
+        assert!(sse.contains(r#""type":"message""#), "output_item.added should have type:message");
         assert!(sse.contains("event: response.content_part.added"));
+        assert!(sse.contains(r#""type":"output_text""#), "content_part.added should have type:output_text");
         assert!(sse.contains("event: response.output_text.delta"));
+        assert!(sse.contains(r#""delta":"#), "output_text.delta should have delta field");
         assert!(sse.contains("event: response.completed"));
+        assert!(sse.contains(r#""status":"completed""#), "response.completed should have status:completed");
+        assert!(sse.contains(r#""usage""#), "response.completed should have usage");
         let delta_count = sse.matches("event: response.output_text.delta").count();
         assert_eq!(delta_count, 2);
         assert_eq!(mock.hits(), 1);
@@ -861,7 +879,7 @@ mod tests {
             when.method("POST").path("/v1/messages");
             then.status(200)
                 .header("content-type", "application/json")
-                .body(r#"{"id":"msg_123","type":"message","content":[{"type":"text","text":"Hello from Anthropic"}],"role":"assistant","model":"claude-3-5-sonnet","stop_reason":"end_turn"}"#);
+                .body(r#"{"id":"msg_123","type":"message","content":[{"type":"text","text":"Hello from Anthropic"}],"role":"assistant","model":"claude-3-5-sonnet","stop_reason":"end_turn","usage":{"input_tokens":20,"output_tokens":10}}"#);
         });
 
         let body = r#"{"model":"claude-3-5-sonnet","input":"hello"}"#;
@@ -885,10 +903,23 @@ mod tests {
             .expect("body readable");
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
         assert_eq!(json["object"], "response");
-        let output_text = json["output"][0]["content"][0]["text"]
-            .as_str()
-            .unwrap();
-        assert_eq!(output_text, "Hello from Anthropic");
+        assert!(json["id"].as_str().unwrap().starts_with("resp_"));
+        let status = json["status"].as_str().expect("status field");
+        assert!(status == "completed" || status == "incomplete", "status should be completed or incomplete, got {status}");
+        let output = json["output"].as_array().expect("output array");
+        assert!(!output.is_empty(), "output should be non-empty");
+        assert_eq!(output[0]["type"].as_str(), Some("message"));
+        assert_eq!(output[0]["role"].as_str(), Some("assistant"));
+        let content = output[0]["content"].as_array().expect("content array");
+        assert!(!content.is_empty(), "content should be non-empty");
+        assert_eq!(content[0]["type"].as_str(), Some("output_text"));
+        assert_eq!(
+            content[0]["text"].as_str(),
+            Some("Hello from Anthropic")
+        );
+        let usage = json["usage"].as_object().expect("usage object");
+        assert!(usage.contains_key("input_tokens"), "usage should have input_tokens");
+        assert!(usage.contains_key("output_tokens"), "usage should have output_tokens");
 
         assert_eq!(mock.hits(), 1);
     }
@@ -934,11 +965,20 @@ mod tests {
             .expect("body readable");
         let sse = String::from_utf8(bytes.to_vec()).unwrap();
 
+        assert!(sse.contains("event: response.created"));
+        assert!(sse.contains(r#""sequence_number""#), "response.created should have sequence_number");
+        assert!(sse.contains("event: response.output_item.added"));
+        assert!(sse.contains(r#""type":"message""#), "output_item.added should have type:message");
+        assert!(sse.contains("event: response.content_part.added"));
+        assert!(sse.contains(r#""type":"output_text""#), "content_part.added should have type:output_text");
         assert!(sse.contains("event: response.reasoning_summary_text.delta"));
         assert!(sse.contains("Step1"));
         assert!(sse.contains("event: response.output_text.delta"));
+        assert!(sse.contains(r#""delta":"#), "output_text.delta should have delta field");
         assert!(sse.contains("world"));
         assert!(sse.contains("event: response.completed"));
+        assert!(sse.contains(r#""status":"completed""#), "response.completed should have status:completed");
+        assert!(sse.contains(r#""usage""#), "response.completed should have usage");
 
         assert_eq!(mock.hits(), 1);
     }
@@ -1131,5 +1171,126 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(mock.hits(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_responses_handler_anthropic_two_stage_streaming() {
+        let _guard = EnvGuard("TEST_CACHE_PROXY");
+        std::env::set_var("TEST_CACHE_PROXY", "sk-test");
+        let (app, server) = test_app_with_anthropic_http_client("TEST_CACHE_PROXY", 10_485_760);
+
+        let sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"content\":[],\"role\":\"assistant\",\"model\":\"sf-model\",\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello \"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"world\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse);
+        });
+
+        let body = r#"{"model":"claude-3-5-sonnet","input":"hello","stream":true}"#;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body readable");
+        let sse = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert!(sse.contains("event: response.created"), "output should start with response.created");
+        assert!(sse.contains(r#""sequence_number":1"#), "first event should have sequence_number 1");
+        assert!(sse.contains("event: response.output_item.added"), "should have output_item.added");
+        assert!(sse.contains(r#""type":"message""#), "output_item should have type:message");
+        assert!(sse.contains("event: response.content_part.added"), "should have content_part.added");
+        assert!(sse.contains(r#""type":"output_text""#), "content_part should have type:output_text");
+        assert!(sse.contains("event: response.output_text.delta"), "should have output_text.delta");
+        assert!(sse.contains(r#""delta""#), "delta should contain delta field");
+        assert!(sse.contains("Hello"), "delta should contain translated text");
+        assert!(sse.contains("world"), "delta should contain translated text");
+        assert!(sse.contains("event: response.completed"), "should end with response.completed");
+        assert!(sse.contains(r#""status":"completed""#), "completed should have status:completed");
+        assert!(!sse.contains("event: message_start"), "raw Anthropic event types should not leak");
+        assert!(!sse.contains("event: content_block_delta"), "raw Anthropic event types should not leak");
+
+        let seq_numbers: Vec<u64> = sse.lines()
+            .filter(|l| l.contains(r#""sequence_number""#))
+            .filter_map(|l| {
+                let json: serde_json::Value = serde_json::from_str(l.trim_start_matches("data: ")).ok()?;
+                json.get("sequence_number")?.as_u64()
+            })
+            .collect();
+        for i in 1..seq_numbers.len() {
+            assert!(seq_numbers[i] > seq_numbers[i - 1],
+                "sequence_number should be monotonically increasing: idx {} ({} -> {})", i, seq_numbers[i-1], seq_numbers[i]);
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_responses_handler_anthropic_buffered_tool_use() {
+        let _guard = EnvGuard("TEST_CACHE_PROXY");
+        std::env::set_var("TEST_CACHE_PROXY", "sk-test");
+        let (app, server) = test_app_with_anthropic_http_client("TEST_CACHE_PROXY", 10_485_760);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":"msg_t1","type":"message","role":"assistant","model":"sf-model","content":[{"type":"tool_use","id":"toolu_xyz","name":"get_weather","input":{"city":"London"}}],"stop_reason":"tool_use","usage":{"input_tokens":15,"output_tokens":10}}"#);
+        });
+
+        let body = r#"{"model":"claude-3-5-sonnet","input":"hello"}"#;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body readable");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+
+        assert_eq!(json["object"], "response");
+        assert_eq!(json["output"][0]["type"], "function_call");
+        assert!(json["output"][0]["name"].as_str().is_some(), "function_call should have name");
+        assert!(json["output"][0]["arguments"].as_str().is_some(), "function_call should have arguments");
+        assert_eq!(json["output"][0]["name"].as_str(), Some("get_weather"));
+        assert!(json["output"][0]["arguments"].as_str().unwrap().contains("London"),
+            "arguments should contain the tool input data");
     }
 }
