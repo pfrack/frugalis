@@ -327,6 +327,7 @@ pub(crate) fn build_app(auth_config: Arc<routing::AuthConfig>, app_state: Arc<Ap
         )
         .route("/classify", post(proxy::handlers::classify_handler))
         .route("/feedback", post(proxy::handlers::feedback_handler))
+        .route("/responses", post(proxy::responses_handler::responses_handler))
         .route_layer(routing::proxy_auth_layer(auth_config.clone()))
         .merge(unauth_v1_routes);
 
