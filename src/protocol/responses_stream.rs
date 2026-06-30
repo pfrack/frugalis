@@ -41,6 +41,12 @@ pub(crate) struct ResponsesStreamState {
     pub has_tool_calls: bool,
     pub has_refusal: bool,
     pub finished: bool,
+    pub msg_id: Option<String>,
+    pub fc_ids: Vec<String>,
+    pub rs_id: Option<String>,
+    /// Accumulated usage from the last chunk that contained a top-level `usage` field.
+    /// OpenAI Chat SSE streams emit usage in the final delta; propagated to `response.completed`.
+    pub accumulated_usage: Option<(u64, u64, u64)>, // (input_tokens, output_tokens, total_tokens)
 }
 
 impl ResponsesStreamState {
@@ -61,10 +67,14 @@ impl ResponsesStreamState {
             tool_call_arguments: vec![],
             has_content: false,
             reasoning_text: String::new(),
-            has_reasoning: false,
-            has_tool_calls: false,
-            has_refusal: false,
+            has_reasoning: bool::default(),
+            has_tool_calls: bool::default(),
+            has_refusal: bool::default(),
             finished: false,
+            msg_id: None,
+            fc_ids: vec![],
+            rs_id: None,
+            accumulated_usage: None,
         }
     }
 
@@ -91,6 +101,7 @@ impl ResponsesStreamState {
         if !self.reasoning_output_item_emitted {
             let output_index = self.msg_output_index;
             self.msg_output_index += 1;
+            let rs_id = format!("rs_{}", Uuid::new_v4());
             events.push(SseEvent::new(
                 "response.output_item.added",
                 serde_json::json!({
@@ -98,7 +109,7 @@ impl ResponsesStreamState {
                     "output_index": output_index,
                     "item": {
                         "type": "reasoning",
-                        "id": format!("rs_{}", Uuid::new_v4()),
+                        "id": rs_id.clone(),
                         "summary": [],
                         "content": [],
                     },
@@ -107,13 +118,15 @@ impl ResponsesStreamState {
             ));
             self.sequence_number += 1;
             self.reasoning_output_item_emitted = true;
+            self.rs_id = Some(rs_id);
         }
         if !self.reasoning_summary_part_emitted {
+            let rs_item_id = self.rs_id.as_deref().unwrap_or("unknown_id").to_string();
             events.push(SseEvent::new(
                 "response.reasoning_summary_part.added",
                 serde_json::json!({
                     "type": "response.reasoning_summary_part.added",
-                    "item_id": format!("rs_{}", Uuid::new_v4()),
+                    "item_id": rs_item_id,
                     "output_index": self.msg_output_index.saturating_sub(1),
                     "summary_index": 0,
                     "part": {
@@ -135,6 +148,7 @@ impl ResponsesStreamState {
             let output_index = self.msg_output_index;
             self.msg_output_index += 1;
             self.content_index = 0;
+            let msg_id = format!("msg_{}", Uuid::new_v4());
             events.push(SseEvent::new(
                 "response.output_item.added",
                 serde_json::json!({
@@ -142,7 +156,7 @@ impl ResponsesStreamState {
                     "output_index": output_index,
                     "item": {
                         "type": "message",
-                        "id": format!("msg_{}", Uuid::new_v4()),
+                        "id": msg_id.clone(),
                         "role": "assistant",
                         "status": "in_progress",
                         "content": [],
@@ -152,9 +166,10 @@ impl ResponsesStreamState {
             ));
             self.sequence_number += 1;
             self.msg_output_item_emitted = true;
+            self.msg_id = Some(msg_id);
         }
         if !self.content_part_emitted {
-            let msg_item_id = format!("msg_{}", Uuid::new_v4());
+            let msg_item_id = self.msg_id.as_deref().unwrap_or("unknown_id").to_string();
             events.push(SseEvent::new(
                 "response.content_part.added",
                 serde_json::json!({
@@ -196,7 +211,7 @@ impl ResponsesStreamState {
                         "output_index": output_index,
                         "item": {
                             "type": "function_call",
-                            "id": fc_id,
+                            "id": fc_id.clone(),
                             "call_id": call_id,
                             "name": name,
                             "arguments": "",
@@ -211,6 +226,7 @@ impl ResponsesStreamState {
                     self.tool_call_ids.push(call_id.to_string());
                     self.tool_call_names.push(name.to_string());
                     self.tool_call_arguments.push(String::new());
+                    self.fc_ids.push(fc_id.clone());
                 } else {
                     self.tool_call_emitted[i] = true;
                 }
@@ -234,6 +250,8 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
     if chunk == "data: [DONE]" || chunk == "[DONE]" {
         if !state.finished {
             state.finished = true;
+            let (input_tokens, output_tokens, total_tokens) =
+                state.accumulated_usage.unwrap_or((0, 0, 0));
             events.push(SseEvent::new(
                 "response.completed",
                 serde_json::json!({
@@ -243,9 +261,9 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                         "status": "completed",
                         "output": [],
                         "usage": {
-                            "input_tokens": 0,
-                            "output_tokens": 0,
-                            "total_tokens": 0,
+                            "input_tokens": input_tokens,
+                            "output_tokens": output_tokens,
+                            "total_tokens": total_tokens,
                         },
                     },
                     "sequence_number": state.sequence_number,
@@ -265,6 +283,8 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
     if data_str == "[DONE]" {
         if !state.finished {
             state.finished = true;
+            let (input_tokens, output_tokens, total_tokens) =
+                state.accumulated_usage.unwrap_or((0, 0, 0));
             events.push(SseEvent::new(
                 "response.completed",
                 serde_json::json!({
@@ -274,9 +294,9 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                         "status": "completed",
                         "output": [],
                         "usage": {
-                            "input_tokens": 0,
-                            "output_tokens": 0,
-                            "total_tokens": 0,
+                            "input_tokens": input_tokens,
+                            "output_tokens": output_tokens,
+                            "total_tokens": total_tokens,
                         },
                     },
                     "sequence_number": state.sequence_number,
@@ -291,6 +311,15 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
         Ok(v) => v,
         Err(_) => return events,
     };
+
+    // Accumulate usage from chunks that carry a top-level `usage` field.
+    // OpenAI Chat SSE streams emit this in the final delta chunk.
+    if let Some(usage) = parsed.get("usage") {
+        let input = usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let output = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let total = usage.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(input + output);
+        state.accumulated_usage = Some((input, output, total));
+    }
 
     // Extract the choice
     let choice = match parsed
@@ -316,7 +345,7 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                     "response.reasoning_summary_text.delta",
                     serde_json::json!({
                         "type": "response.reasoning_summary_text.delta",
-                        "item_id": format!("rs_{}", Uuid::new_v4()),
+                        "item_id": state.rs_id.as_deref().unwrap_or("unknown_id").to_string(),
                         "output_index": state.msg_output_index.saturating_sub(1),
                         "summary_index": 0,
                         "delta": reasoning_content,
@@ -338,7 +367,7 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                     "response.output_text.delta",
                     serde_json::json!({
                         "type": "response.output_text.delta",
-                        "item_id": format!("msg_{}", Uuid::new_v4()),
+                        "item_id": state.msg_id.as_deref().unwrap_or("unknown_id").to_string(),
                         "output_index": state.msg_output_index.saturating_sub(1),
                         "content_index": 0,
                         "delta": content,
@@ -369,7 +398,7 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                             "response.function_call_arguments.delta",
                             serde_json::json!({
                                 "type": "response.function_call_arguments.delta",
-                                "item_id": format!("fc_{}", Uuid::new_v4()),
+                                "item_id": state.fc_ids.get(i).map(|s| s.as_str()).unwrap_or("").to_string(),
                                 "output_index": state.msg_output_index.saturating_sub(1),
                                 "delta": args,
                                 "sequence_number": state.sequence_number,
@@ -392,7 +421,7 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                     "response.refusal.delta",
                     serde_json::json!({
                         "type": "response.refusal.delta",
-                        "item_id": format!("msg_{}", Uuid::new_v4()),
+                        "item_id": state.msg_id.as_deref().unwrap_or("unknown_id").to_string(),
                         "output_index": state.msg_output_index.saturating_sub(1),
                         "content_index": 0,
                         "delta": refusal,
@@ -413,7 +442,7 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                     "response.output_text.done",
                     serde_json::json!({
                         "type": "response.output_text.done",
-                        "item_id": format!("msg_{}", Uuid::new_v4()),
+                        "item_id": state.msg_id.as_deref().unwrap_or("unknown_id").to_string(),
                         "output_index": state.msg_output_index.saturating_sub(1),
                         "content_index": 0,
                         "sequence_number": state.sequence_number,
@@ -425,7 +454,7 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                     "response.content_part.done",
                     serde_json::json!({
                         "type": "response.content_part.done",
-                        "item_id": format!("msg_{}", Uuid::new_v4()),
+                        "item_id": state.msg_id.as_deref().unwrap_or("unknown_id").to_string(),
                         "output_index": state.msg_output_index.saturating_sub(1),
                         "content_index": 0,
                         "part": {
@@ -445,7 +474,7 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                         "output_index": state.msg_output_index.saturating_sub(1),
                         "item": {
                             "type": "message",
-                            "id": format!("msg_{}", Uuid::new_v4()),
+                            "id": state.msg_id.as_deref().unwrap_or("unknown_id").to_string(),
                             "role": "assistant",
                             "status": "completed",
                             "content": [],
@@ -461,7 +490,7 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                     "response.reasoning_summary_text.done",
                     serde_json::json!({
                         "type": "response.reasoning_summary_text.done",
-                        "item_id": format!("rs_{}", Uuid::new_v4()),
+                        "item_id": state.rs_id.as_deref().unwrap_or("unknown_id").to_string(),
                         "output_index": state.msg_output_index.saturating_sub(1),
                         "summary_index": 0,
                         "text": state.reasoning_text,
@@ -477,7 +506,7 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                         "output_index": state.msg_output_index.saturating_sub(1),
                         "item": {
                             "type": "reasoning",
-                            "id": format!("rs_{}", Uuid::new_v4()),
+                            "id": state.rs_id.as_deref().unwrap_or("unknown_id").to_string(),
                             "summary": [{
                                 "type": "summary_text",
                                 "text": state.reasoning_text,
@@ -506,7 +535,7 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                         "response.function_call_arguments.done",
                         serde_json::json!({
                             "type": "response.function_call_arguments.done",
-                            "item_id": format!("fc_{}", Uuid::new_v4()),
+                            "item_id": state.fc_ids[i].clone(),
                             "name": name,
                             "output_index": state.msg_output_index.saturating_sub(1),
                             "arguments": args,
@@ -522,7 +551,7 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                             "output_index": state.msg_output_index.saturating_sub(1),
                             "item": {
                                 "type": "function_call",
-                                "id": format!("fc_{}", Uuid::new_v4()),
+                                "id": state.fc_ids[i].clone(),
                                 "call_id": if i < state.tool_call_ids.len() { state.tool_call_ids[i].clone() } else { String::new() },
                                 "name": name,
                                 "arguments": args,
@@ -532,10 +561,12 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
                         }),
                     ));
                     state.sequence_number += 1;
-                }
             }
+        }
 
-            state.finished = true;
+        // Emit response.completed event before marking finished
+        events.push(crate::protocol::responses_stream::finalize_stream(state));
+        state.finished = true;
         }
     }
 
@@ -545,6 +576,7 @@ pub(crate) fn translate_chat_chunk_to_responses_events(
 pub(crate) fn finalize_stream(
     state: &ResponsesStreamState,
 ) -> SseEvent {
+    let (input_tokens, output_tokens, total_tokens) = state.accumulated_usage.unwrap_or((0, 0, 0));
     SseEvent::new(
         "response.completed",
         serde_json::json!({
@@ -554,9 +586,9 @@ pub(crate) fn finalize_stream(
                 "status": "completed",
                 "output": [],
                 "usage": {
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 0,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": total_tokens,
                 },
             },
             "sequence_number": state.sequence_number,

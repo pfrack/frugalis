@@ -293,14 +293,42 @@ pub fn auth_headers_for(
         append_forward_headers(&mut headers, forward_headers);
         return headers;
     }
-    vec![("authorization".into(), format!("Bearer {api_key}"))]
+    let mut openai_auth = vec![("authorization".into(), format!("Bearer {api_key}"))];
+    // Append openai-* and x-openai-* client-forwarded headers for openai_compatible
+    // and openai_responses providers (e.g. openai-beta, openai-organization).
+    if pt == "openai_compatible" || pt == "openai_responses" {
+        append_openai_forward_headers(&mut openai_auth, forward_headers);
+    }
+    openai_auth
+}
+
+/// Append client-forwarded `openai-*` / `x-openai-*` headers to `out`,
+/// skipping any name already present (e.g. `authorization` is never overwritten).
+fn append_openai_forward_headers(
+    out: &mut Vec<(String, String)>,
+    forward_headers: &[(String, String)],
+) {
+    for (name, value) in forward_headers {
+        if !name.starts_with("openai-") && !name.starts_with("x-openai-") {
+            continue;
+        }
+        if out.iter().any(|(n, _)| n == name.as_str()) {
+            continue;
+        }
+        out.push((name.clone(), value.clone()));
+    }
 }
 
 /// Append client-forwarded `anthropic-*` / `x-claude-code-*` headers to `out`,
 /// skipping `anthropic-version` (the caller already emitted it with the
 /// resolved value) and any name already present.
+/// Only `anthropic-*` and `x-claude-code-*` prefixes are forwarded — other
+/// provider-specific headers (e.g. `openai-*`) collected upstream are dropped here.
 fn append_forward_headers(out: &mut Vec<(String, String)>, forward_headers: &[(String, String)]) {
     for (name, value) in forward_headers {
+        if !name.starts_with("anthropic-") && !name.starts_with("x-claude-code-") {
+            continue;
+        }
         if name == "anthropic-version" {
             continue;
         }

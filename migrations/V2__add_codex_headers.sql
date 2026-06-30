@@ -8,3 +8,8 @@ ALTER TABLE inferences ADD COLUMN codex_installation_id TEXT;
 ALTER TABLE inferences ADD COLUMN codex_turn_state TEXT;
 ALTER TABLE inferences ADD COLUMN codex_window_id TEXT;
 ALTER TABLE inferences ADD COLUMN codex_turn_metadata TEXT;
+
+-- NOTE: The `responses` transcript store table (CREATE TABLE responses ...) was
+-- deferred per the scope guardrail "No server-side transcript store" in the
+-- codex-responses-api plan. `store: true` is logged as a warning but not honored.
+-- Add a V3 migration when TranscriptStore is implemented.

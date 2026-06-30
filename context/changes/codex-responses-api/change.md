@@ -1,7 +1,7 @@
 # Change: Codex Responses API Shim
 
 - id: codex-responses-api
-- status: implemented
+- status: impl_reviewed
 - created: 2026-06-30
 - updated: 2026-06-30
 - commit: 46b6b72 (p1), b3d2534 (p2), 3967009 (p3), f3de924 (p4), 61f1cbf (p5)

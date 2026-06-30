@@ -271,6 +271,16 @@ pub(crate) fn request_to_chat(
             }));
         }
         Some(serde_json::Value::Array(items)) => {
+            if items.is_empty() {
+                return Err(ResponsesRejection::bad_request(
+                    "'input' array must not be empty",
+                ));
+            }
+            if items.len() > 1000 {
+                return Err(ResponsesRejection::bad_request(
+                    "'input' array exceeds maximum length of 1000 items",
+                ));
+            }
             for (idx, item) in items.iter().enumerate() {
                 validate_input_item(item, idx)?;
                 if let Some(msg) = input_item_to_chat_message(item) {
