@@ -634,9 +634,9 @@ Following the 9-cell matrix from the research:
 
 #### Automated
 
-- [x] 5.1 OpenAPI spec: openapi/responses-shim.yaml created
-- [x] 5.2 Bash tests: 5 functions added to scripts/test.sh (responses auth, streaming, non-streaming, unsupported field, function call)
-- [x] 5.3 AGENTS.md correctness verified (no stale references)
+- [x] 5.1 OpenAPI spec: openapi/responses-shim.yaml created — 61f1cbf
+- [x] 5.2 Bash tests: 5 functions added to scripts/test.sh (responses auth, streaming, non-streaming, unsupported field, function call) — 61f1cbf
+- [x] 5.3 AGENTS.md correctness verified (no stale references) — 61f1cbf
 
 #### Manual
 
