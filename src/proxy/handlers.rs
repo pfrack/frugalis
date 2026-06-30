@@ -1959,7 +1959,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_completion_no_enriched_fields_with_missing_env() {
+        let _guard = EnvGuard("MISSING_KEY_XYZ");
+        std::env::remove_var("MISSING_KEY_XYZ");
         let response = test_app_with_enriched_classifier("test_provider", Some("MISSING_KEY_XYZ"))
             .oneshot(
                 Request::builder()
@@ -1983,7 +1986,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_classify_no_enriched_fields() {
+        let _guard = EnvGuard("TEST_API_KEY");
+        std::env::set_var("TEST_API_KEY", "sk-test-value-123");
         let response = test_app_with_enriched_classifier("test_provider", Some("TEST_API_KEY"))
             .oneshot(
                 Request::builder()

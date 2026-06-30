@@ -111,9 +111,14 @@ pub fn make_test_app_state(
     })
 }
 
-pub fn test_app_with_http_client(
+/// Build a test app + httpmock server for a single provider-type endpoint.
+/// Used by the per-provider wrappers below; each one supplies the
+/// (endpoint_path, provider_type) pair that distinguishes it.
+pub fn test_app_with_provider(
     env_var_name: &str,
     max_upstream_body_bytes: usize,
+    endpoint_path: &str,
+    provider_type: &str,
 ) -> (Router, httpmock::MockServer) {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     use std::collections::HashMap;
@@ -128,7 +133,7 @@ pub fn test_app_with_http_client(
         "user",
         "password",
     ));
-    let endpoint = server.url("/v1/chat/completions");
+    let endpoint = server.url(endpoint_path);
     let mut routing = HashMap::new();
     routing.insert(
         cats[1].name.clone(),
@@ -136,7 +141,7 @@ pub fn test_app_with_http_client(
             providers: vec![routing::ProviderEntry {
                 model: "sf-model".to_string(),
                 endpoint: endpoint.clone(),
-                provider_type: "openai_compatible".to_string(),
+                provider_type: provider_type.to_string(),
                 api_key_env: Some(env_var_name.to_string()),
                 timeout_ms: None,
             }],
@@ -149,7 +154,7 @@ pub fn test_app_with_http_client(
             providers: vec![routing::ProviderEntry {
                 model: "ca-model".to_string(),
                 endpoint,
-                provider_type: "openai_compatible".to_string(),
+                provider_type: provider_type.to_string(),
                 api_key_env: Some(env_var_name.to_string()),
                 timeout_ms: None,
             }],
@@ -182,225 +187,49 @@ pub fn test_app_with_http_client(
     );
     let app = build_app(auth_config, app_state);
     (app, server)
+}
+
+pub fn test_app_with_http_client(
+    env_var_name: &str,
+    max_upstream_body_bytes: usize,
+) -> (Router, httpmock::MockServer) {
+    test_app_with_provider(
+        env_var_name,
+        max_upstream_body_bytes,
+        "/v1/chat/completions",
+        "openai_compatible",
+    )
 }
 
 pub fn test_app_with_anthropic_http_client(
     env_var_name: &str,
     max_upstream_body_bytes: usize,
 ) -> (Router, httpmock::MockServer) {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-    use std::collections::HashMap;
-    let cats = test_categories();
-    let server = httpmock::MockServer::start();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .expect("test reqwest client should build");
-    let auth_config = Arc::new(routing::AuthConfig::from_values(
-        "proxy-token",
-        "user",
-        "password",
-    ));
-    let endpoint = server.url("/v1/messages");
-    let mut routing = HashMap::new();
-    routing.insert(
-        cats[1].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
-                model: "sf-model".to_string(),
-                endpoint: endpoint.clone(),
-                provider_type: "anthropic".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
-                timeout_ms: None,
-            }],
-            cost_per_1m_input_tokens: None,
-        },
-    );
-    routing.insert(
-        cats[3].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
-                model: "ca-model".to_string(),
-                endpoint,
-                provider_type: "anthropic".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
-                timeout_ms: None,
-            }],
-            cost_per_1m_input_tokens: None,
-        },
-    );
-    let fallback = routing::RouteEntry {
-        providers: vec![routing::ProviderEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
-            provider_type: String::new(),
-            api_key_env: None,
-            timeout_ms: None,
-        }],
-        cost_per_1m_input_tokens: None,
-    };
-    let regex_classifier = classification::regex::RegexClassifier::from_values(
-        routing,
-        fallback,
-        30,
-        cats,
-        &test_negative_patterns(),
-    );
-    let app_state = make_test_app_state(
-        regex_classifier,
-        Some(client),
-        routing::ModelCosts::empty(),
-        String::new(),
-        max_upstream_body_bytes,
-    );
-    let app = build_app(auth_config, app_state);
-    (app, server)
+    test_app_with_provider(env_var_name, max_upstream_body_bytes, "/v1/messages", "anthropic")
 }
 
 pub fn test_app_with_nim_http_client(
     env_var_name: &str,
     max_upstream_body_bytes: usize,
 ) -> (Router, httpmock::MockServer) {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-    use std::collections::HashMap;
-    let cats = test_categories();
-    let server = httpmock::MockServer::start();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .expect("test reqwest client should build");
-    let auth_config = Arc::new(routing::AuthConfig::from_values(
-        "proxy-token",
-        "user",
-        "password",
-    ));
-    let endpoint = server.url("/v1/chat/completions");
-    let mut routing = HashMap::new();
-    routing.insert(
-        cats[1].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
-                model: "sf-model".to_string(),
-                endpoint: endpoint.clone(),
-                provider_type: "nvidia_nim".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
-                timeout_ms: None,
-            }],
-            cost_per_1m_input_tokens: None,
-        },
-    );
-    routing.insert(
-        cats[3].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
-                model: "ca-model".to_string(),
-                endpoint,
-                provider_type: "nvidia_nim".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
-                timeout_ms: None,
-            }],
-            cost_per_1m_input_tokens: None,
-        },
-    );
-    let fallback = routing::RouteEntry {
-        providers: vec![routing::ProviderEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
-            provider_type: String::new(),
-            api_key_env: None,
-            timeout_ms: None,
-        }],
-        cost_per_1m_input_tokens: None,
-    };
-    let regex_classifier = classification::regex::RegexClassifier::from_values(
-        routing,
-        fallback,
-        30,
-        cats,
-        &test_negative_patterns(),
-    );
-    let app_state = make_test_app_state(
-        regex_classifier,
-        Some(client),
-        routing::ModelCosts::empty(),
-        String::new(),
+    test_app_with_provider(
+        env_var_name,
         max_upstream_body_bytes,
-    );
-    let app = build_app(auth_config, app_state);
-    (app, server)
+        "/v1/chat/completions",
+        "nvidia_nim",
+    )
 }
 
 pub fn test_app_with_ollama_http_client(
     env_var_name: &str,
     max_upstream_body_bytes: usize,
 ) -> (Router, httpmock::MockServer) {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-    use std::collections::HashMap;
-    let cats = test_categories();
-    let server = httpmock::MockServer::start();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .expect("test reqwest client should build");
-    let auth_config = Arc::new(routing::AuthConfig::from_values(
-        "proxy-token",
-        "user",
-        "password",
-    ));
-    let endpoint = server.url("/v1/chat/completions");
-    let mut routing = HashMap::new();
-    routing.insert(
-        cats[1].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
-                model: "sf-model".to_string(),
-                endpoint: endpoint.clone(),
-                provider_type: "ollama".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
-                timeout_ms: None,
-            }],
-            cost_per_1m_input_tokens: None,
-        },
-    );
-    routing.insert(
-        cats[3].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
-                model: "ca-model".to_string(),
-                endpoint,
-                provider_type: "ollama".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
-                timeout_ms: None,
-            }],
-            cost_per_1m_input_tokens: None,
-        },
-    );
-    let fallback = routing::RouteEntry {
-        providers: vec![routing::ProviderEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
-            provider_type: String::new(),
-            api_key_env: None,
-            timeout_ms: None,
-        }],
-        cost_per_1m_input_tokens: None,
-    };
-    let regex_classifier = classification::regex::RegexClassifier::from_values(
-        routing,
-        fallback,
-        30,
-        cats,
-        &test_negative_patterns(),
-    );
-    let app_state = make_test_app_state(
-        regex_classifier,
-        Some(client),
-        routing::ModelCosts::empty(),
-        String::new(),
+    test_app_with_provider(
+        env_var_name,
         max_upstream_body_bytes,
-    );
-    let app = build_app(auth_config, app_state);
-    (app, server)
+        "/v1/chat/completions",
+        "ollama",
+    )
 }
 
 pub fn test_app() -> Router {
@@ -603,72 +432,7 @@ pub fn test_app_with_cache(
 pub fn test_app_with_openai_responses_http_client(
     env_var_name: &str,
 ) -> (Router, httpmock::MockServer) {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-    let cats = test_categories();
-    let server = httpmock::MockServer::start();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .expect("test reqwest client should build");
-    let auth_config = Arc::new(routing::AuthConfig::from_values(
-        "proxy-token",
-        "user",
-        "password",
-    ));
-    let endpoint = server.url("/v1/responses");
-    let mut routing = std::collections::HashMap::new();
-    routing.insert(
-        cats[1].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
-                model: "sf-model".to_string(),
-                endpoint: endpoint.clone(),
-                provider_type: "openai_responses".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
-                timeout_ms: None,
-            }],
-            cost_per_1m_input_tokens: None,
-        },
-    );
-    routing.insert(
-        cats[3].name.clone(),
-        routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
-                model: "ca-model".to_string(),
-                endpoint,
-                provider_type: "openai_responses".to_string(),
-                api_key_env: Some(env_var_name.to_string()),
-                timeout_ms: None,
-            }],
-            cost_per_1m_input_tokens: None,
-        },
-    );
-    let fallback = routing::RouteEntry {
-        providers: vec![routing::ProviderEntry {
-            model: "fallback-model".to_string(),
-            endpoint: String::new(),
-            provider_type: String::new(),
-            api_key_env: None,
-            timeout_ms: None,
-        }],
-        cost_per_1m_input_tokens: None,
-    };
-    let regex_classifier = classification::regex::RegexClassifier::from_values(
-        routing,
-        fallback,
-        30,
-        cats,
-        &test_negative_patterns(),
-    );
-    let app_state = make_test_app_state(
-        regex_classifier,
-        Some(client),
-        routing::ModelCosts::empty(),
-        String::new(),
-        10_485_760,
-    );
-    let app = build_app(auth_config, app_state);
-    (app, server)
+    test_app_with_provider(env_var_name, 10_485_760, "/v1/responses", "openai_responses")
 }
 
 pub async fn parse_json_body(response: axum::response::Response) -> serde_json::Value {
