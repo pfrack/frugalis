@@ -9,8 +9,9 @@ pub(crate) mod types;
 
 pub(crate) use backend::{DbBackend, PersistenceBackend};
 pub(crate) use types::{
-    extract_last_user_message, extract_last_user_message_anthropic, InferenceLog, InferenceRecord,
-    LatencySummary, SavingsEstimate,
+    extract_last_user_message, extract_last_user_message_anthropic,
+    extract_last_user_message_responses, InferenceLog, InferenceRecord, LatencySummary,
+    SavingsEstimate,
 };
 
 /// Shared persistence handle injected into the Axum router state.

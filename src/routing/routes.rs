@@ -7,8 +7,14 @@ use std::collections::HashMap;
 ///
 /// Each `ProviderEntry` represents one concrete target the proxy can forward
 /// requests to. Within a [`RouteEntry`], providers are ordered: index 0 is the
-/// primary target and subsequent entries are cascade fallbacks tried in order
+/// primary target and subsequent providers are cascade fallbacks tried in order
 /// when the primary is unreachable or returns a retriable error.
+///
+/// Valid `provider_type` values:
+/// - `"openai_compatible"` — OpenAI Chat Completions API
+/// - `"anthropic"` — Anthropic Messages API
+/// - `"openai_responses"` — OpenAI Responses API (passthrough)
+/// - `"nvidia_nim"` — Nvidia NIM (OpenAI-compatible with sanitization)
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProviderEntry {
     pub model: String,
@@ -195,5 +201,15 @@ mod tests {
         );
         assert!(entry.providers[0].timeout_ms.is_none());
         assert_eq!(entry.cost_per_1m_input_tokens, Some(0.15));
+    }
+
+    #[test]
+    fn parse_openai_responses_provider_type() {
+        let toml_str = r#"
+        providers = [
+            { model = "gpt-4o", endpoint = "https://api.openai.com/v1/responses", provider_type = "openai_responses", api_key_env = "OPENAI_API_KEY" },
+        ]"#;
+        let entry: RouteEntry = toml::from_str(toml_str).expect("openai_responses provider should parse");
+        assert_eq!(entry.providers[0].provider_type, "openai_responses");
     }
 }

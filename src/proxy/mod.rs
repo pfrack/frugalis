@@ -1,4 +1,5 @@
 pub(crate) mod handlers;
+pub(crate) mod responses_handler;
 pub(crate) mod streaming;
 pub(crate) mod upstream;
 pub(crate) mod util;

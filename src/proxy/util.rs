@@ -463,7 +463,8 @@ pub(crate) fn collect_forward_headers(headers: &HeaderMap) -> Vec<(String, Strin
     let mut out: Vec<(String, String)> = Vec::new();
     for (name, value) in headers.iter() {
         let name_lower = name.as_str();
-        if (name_lower.starts_with("anthropic-") || name_lower.starts_with("x-claude-code-"))
+        if (name_lower.starts_with("anthropic-") || name_lower.starts_with("x-claude-code-")
+            || name_lower.starts_with("openai-") || name_lower.starts_with("x-openai-"))
             && !out.iter().any(|(n, _)| *n == name_lower)
         {
             if let Ok(v) = value.to_str() {
@@ -626,6 +627,67 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .expect("json_response must set Content-Type");
         assert_eq!(ct, "application/json");
+    }
+
+    #[test]
+    fn test_collect_forward_headers_includes_openai_prefixes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HeaderName::from_bytes(b"openai-beta").unwrap(),
+            header::HeaderValue::from_static("responses=v1"),
+        );
+        headers.insert(
+            header::HeaderName::from_bytes(b"openai-organization").unwrap(),
+            header::HeaderValue::from_static("org-123"),
+        );
+        headers.insert(
+            header::HeaderName::from_bytes(b"openai-project").unwrap(),
+            header::HeaderValue::from_static("proj-456"),
+        );
+        headers.insert(
+            header::HeaderName::from_bytes(b"x-openai-internal-codex-responses-lite").unwrap(),
+            header::HeaderValue::from_static("true"),
+        );
+        let result = collect_forward_headers(&headers);
+        assert_eq!(result.len(), 4);
+        assert!(result.iter().any(|(n, _)| *n == "openai-beta"));
+        assert!(result.iter().any(|(n, _)| *n == "openai-organization"));
+        assert!(result.iter().any(|(n, _)| *n == "openai-project"));
+        assert!(result
+            .iter()
+            .any(|(n, _)| *n == "x-openai-internal-codex-responses-lite"));
+    }
+
+    #[test]
+    fn test_collect_forward_headers_preserves_existing_anthropic_prefixes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HeaderName::from_bytes(b"anthropic-beta").unwrap(),
+            header::HeaderValue::from_static("beta-1"),
+        );
+        headers.insert(
+            header::HeaderName::from_bytes(b"openai-beta").unwrap(),
+            header::HeaderValue::from_static("responses=v1"),
+        );
+        let result = collect_forward_headers(&headers);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|(n, _)| *n == "anthropic-beta"));
+        assert!(result.iter().any(|(n, _)| *n == "openai-beta"));
+    }
+
+    #[test]
+    fn test_collect_forward_headers_skips_non_allowlisted_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HeaderName::from_bytes(b"x-custom").unwrap(),
+            header::HeaderValue::from_static("value"),
+        );
+        headers.insert(
+            header::HeaderName::from_bytes(b"authorization").unwrap(),
+            header::HeaderValue::from_static("Bearer token"),
+        );
+        let result = collect_forward_headers(&headers);
+        assert_eq!(result.len(), 0);
     }
 
     #[test]
