@@ -226,18 +226,22 @@ pub(crate) fn log_classification(
     provider_attempts: u8,
     final_provider: &str,
 ) {
-    enqueue_inference_record(
-        state,
-        classification,
-        prompt,
-        start,
-        log_status,
-        provider_attempts,
-        final_provider,
-        None,
-        None,
-        None,
-    );
+     enqueue_inference_record(
+         state,
+         classification,
+         prompt,
+         start,
+         log_status,
+         provider_attempts,
+         final_provider,
+         None,
+         None,
+         None,
+         None, // codex_installation_id
+         None, // codex_turn_state
+         None, // codex_window_id
+         None, // codex_turn_metadata
+     );
 }
 
 /// Success-path logging variant that captures token usage and the Claude Code
@@ -258,18 +262,22 @@ pub(crate) fn log_classification_with_usage(
     usage: Option<&UsageBreakdown>,
     session_id: Option<&str>,
 ) {
-    enqueue_inference_record(
-        state,
-        classification,
-        prompt,
-        start,
-        log_status,
-        provider_attempts,
-        final_provider,
-        usage,
-        session_id,
-        None, // previous_response_id
-    );
+     enqueue_inference_record(
+         state,
+         classification,
+         prompt,
+         start,
+         log_status,
+         provider_attempts,
+         final_provider,
+         usage,
+         session_id,
+         None, // previous_response_id
+         None, // codex_installation_id
+         None, // codex_turn_state
+         None, // codex_window_id
+         None, // codex_turn_metadata
+     );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -285,19 +293,27 @@ pub(crate) fn log_classification_with_usage_and_prev(
     usage: Option<&UsageBreakdown>,
     session_id: Option<&str>,
     previous_response_id: Option<&str>,
+    codex_installation_id: Option<&str>,
+    codex_turn_state: Option<&str>,
+    codex_window_id: Option<&str>,
+    codex_turn_metadata: Option<&str>,
 ) {
-    enqueue_inference_record(
-        state,
-        classification,
-        prompt,
-        start,
-        log_status,
-        provider_attempts,
-        final_provider,
-        usage,
-        session_id,
-        previous_response_id,
-    );
+     enqueue_inference_record(
+         state,
+         classification,
+         prompt,
+         start,
+         log_status,
+         provider_attempts,
+         final_provider,
+         usage,
+         session_id,
+         previous_response_id,
+         codex_installation_id,
+         codex_turn_state,
+         codex_window_id,
+         codex_turn_metadata,
+     );
 }
 
 /// Build the InferenceRecord (with optional token usage + session id) and
@@ -315,6 +331,10 @@ pub(crate) fn enqueue_inference_record(
     usage: Option<&UsageBreakdown>,
     session_id: Option<&str>,
     previous_response_id: Option<&str>,
+    codex_installation_id: Option<&str>,
+    codex_turn_state: Option<&str>,
+    codex_window_id: Option<&str>,
+    codex_turn_metadata: Option<&str>,
 ) {
     if let Some(persistence) = &state.persistence {
         let duration_ms = start.elapsed().as_millis() as i32;
@@ -352,10 +372,10 @@ pub(crate) fn enqueue_inference_record(
             cache_creation_tokens,
             client_session_id: session_id.map(|s| s.to_string()),
             previous_response_id: previous_response_id.map(|s| s.to_string()),
-            codex_installation_id: None,
-            codex_turn_state: None,
-            codex_window_id: None,
-            codex_turn_metadata: None,
+            codex_installation_id: codex_installation_id.map(|s| s.to_string()),
+            codex_turn_state: codex_turn_state.map(|s| s.to_string()),
+            codex_window_id: codex_window_id.map(|s| s.to_string()),
+            codex_turn_metadata: codex_turn_metadata.map(|s| s.to_string()),
         };
         crate::persistence::log_inference(
             persistence.backend.clone(),
@@ -500,7 +520,8 @@ pub(crate) fn collect_forward_headers(headers: &HeaderMap) -> Vec<(String, Strin
     for (name, value) in headers.iter() {
         let name_lower = name.as_str();
         if (name_lower.starts_with("anthropic-") || name_lower.starts_with("x-claude-code-")
-            || name_lower.starts_with("openai-") || name_lower.starts_with("x-openai-"))
+            || name_lower.starts_with("openai-") || name_lower.starts_with("x-openai-")
+            || name_lower.starts_with("x-codex-"))
             && !out.iter().any(|(n, _)| *n == name_lower)
         {
             if let Ok(v) = value.to_str() {

@@ -6,6 +6,7 @@ use axum::{
     response::Response,
     body::Bytes,
 };
+use tracing::{debug, warn};
 use crate::app::AppState;
 use crate::classification::chain::IntentClassify;
 
@@ -84,6 +85,24 @@ pub(crate) async fn responses_handler(
     let forward_headers = crate::proxy::util::collect_forward_headers(&headers);
     let session_id = crate::proxy::util::session_id_from_forward(&forward_headers);
 
+    // Extract Codex headers for persistence
+    let codex_installation_id = headers
+        .get("x-codex-installation-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let codex_turn_state = headers
+        .get("x-codex-turn-state")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let codex_window_id = headers
+        .get("x-codex-window-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let codex_turn_metadata = headers
+        .get("x-codex-turn-metadata")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     // ── Cache check ──
     let mut cache_key: Option<String> = None;
     if let Some(cache) = &state.response_cache {
@@ -98,8 +117,16 @@ pub(crate) async fn responses_handler(
             hasher.update(&body);
             let key = format!("{:x}", hasher.finalize());
             if let Some(entry) = cache.get(&key) {
-                // The cached value is already in Chat format. Re-parse and
-                // re-wrap in Responses envelope so the cache is opaque.
+                // If entry.response_id is non-empty, the cached body is already a
+                // synthesized Responses JSON envelope; return it directly.
+                if !entry.response_id.is_empty() {
+                    return crate::proxy::util::json_response(
+                        StatusCode::from_u16(entry.status).unwrap_or(StatusCode::OK),
+                        entry.body,
+                    );
+                }
+                // Otherwise the cached body is in Chat format (from other handlers).
+                // Re-parse and re-wrap in Responses envelope so the cache is opaque.
                 if let Ok(cached_json) = serde_json::from_str::<serde_json::Value>(&entry.body) {
                     if let Ok(resp) = crate::protocol::responses::response_from_chat(
                         &cached_json,
@@ -203,6 +230,7 @@ pub(crate) async fn responses_handler(
             Some(env_name) => match std::env::var(env_name) {
                 Ok(key) if !key.is_empty() => key,
                 _ => {
+                    warn!("API key env var '{:?}' is missing or empty for provider {}; cascading", env_name, provider.model);
                     if is_last {
                         crate::proxy::util::log_classification(
                             &state,
@@ -227,6 +255,7 @@ pub(crate) async fn responses_handler(
                 }
             },
             None => {
+                warn!("no api_key_env configured for provider {}; cascading", provider.model);
                 if is_last {
                     crate::proxy::util::log_classification(
                         &state,
@@ -370,18 +399,22 @@ pub(crate) async fn responses_handler(
                     if stream {
                         let keepalive_interval_secs =
                             *state.keepalive_interval_secs.read().await;
-                        return crate::proxy::responses_streaming::handle_responses_streaming_response(
-                            state,
-                            classification,
-                            body_str,
-                            prompt,
-                            std::time::Instant::now(),
-                            upstream_response.bytes_stream(),
-                            keepalive_interval_secs,
-                            idx as u8 + 1,
-                            provider.model.clone(),
-                            session_id.map(|s| s.to_string()),
-                        );
+                    return crate::proxy::responses_streaming::handle_responses_streaming_response(
+                        state,
+                        classification,
+                        body_str,
+                        prompt,
+                        std::time::Instant::now(),
+                        upstream_response.bytes_stream(),
+                        keepalive_interval_secs,
+                        idx as u8 + 1,
+                        provider.model.clone(),
+                        session_id.map(|s| s.to_string()),
+                        codex_installation_id.clone(),
+                        codex_turn_state.clone(),
+                        codex_window_id.clone(),
+                        codex_turn_metadata.clone(),
+                    );
                     }
 
                     // ── Non-streaming path ──
@@ -416,6 +449,10 @@ pub(crate) async fn responses_handler(
                         usage.as_ref(),
                         session_id,
                         extras.previous_response_id.as_deref(),
+                        codex_installation_id.as_deref(),
+                        codex_turn_state.as_deref(),
+                        codex_window_id.as_deref(),
+                        codex_turn_metadata.as_deref(),
                     );
 
                     if !upstream_status.is_success() {
@@ -463,15 +500,24 @@ pub(crate) async fn responses_handler(
                         }
                     };
 
-                    // Cache the translated Responses body (via original key)
+                    // Extract response_id for cache entry to preserve across hits
+                    let response_id = responses_json
+                        .get("response")
+                        .and_then(|r| r.get("id"))
+                        .and_then(|i| i.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+
+                    // Cache the synthesized Responses body (via original key)
                     if upstream_status.is_success() {
                         if let Some(ref key) = cache_key {
                             if let Some(ref cache) = state.response_cache {
                                 cache.put(
                                     key.clone(),
                                     crate::cache::CachedEntry {
-                                        body: resp_body,
+                                        body: responses_json.to_string(),
                                         status: upstream_status.as_u16(),
+                                        response_id,
                                     },
                                 );
                             }
@@ -555,4 +601,380 @@ pub(crate) async fn responses_handler(
         crate::protocol::responses::wrap_error_as_responses(502, "all providers failed")
             .to_string(),
     )
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_helpers::{test_app, test_app_with_cache};
+    use crate::test_util::EnvGuard;
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+    };
+    use httpmock::MockServer;
+    use serial_test::serial;
+    use tower::util::ServiceExt;
+
+    #[tokio::test]
+    #[serial]
+    async fn test_responses_handler_openai_non_streaming() {
+        let _guard = EnvGuard("TEST_PROXY");
+        let (app, server, _cache) = test_app_with_cache(60, 10);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":"chatcmpl-123","object":"chat.completion","created":1700000000,"model":"gpt-4o","choices":[{"message":{"content":"Hello world"}}]}"#);
+        });
+
+        let body = r#"{"model":"gpt-4o","input":"hello"}"#;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body readable");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        assert_eq!(json["object"], "response");
+        assert!(json["id"].as_str().unwrap().starts_with("resp_"));
+        let output_text = json["output"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert_eq!(output_text, "Hello world");
+
+        assert_eq!(mock.hits(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_responses_handler_openai_streaming() {
+        let _guard = EnvGuard("TEST_PROXY");
+        let (app, server, _cache) = test_app_with_cache(60, 10);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body("data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\ndata: [DONE]\n\n");
+        });
+
+        let body = r#"{"model":"gpt-4o","input":"hello","stream":true}"#;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body readable");
+        let sse = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert!(sse.contains("event: response.created"));
+        assert!(sse.contains("event: response.output_item.added"));
+        assert!(sse.contains("event: response.content_part.added"));
+        assert!(sse.contains("event: response.output_text.delta"));
+        assert!(sse.contains("event: response.completed"));
+        let delta_count = sse.matches("event: response.output_text.delta").count();
+        assert_eq!(delta_count, 2);
+        assert_eq!(mock.hits(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_responses_handler_anthropic_non_streaming() {
+        let _guard = EnvGuard("TEST_PROXY");
+        let (app, server, _cache) = test_app_with_cache(60, 10);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":"msg_123","type":"message","content":[{"type":"text","text":"Hello from Anthropic"}],"role":"assistant","model":"claude-3-5-sonnet","stop_reason":"end_turn"}"#);
+        });
+
+        let body = r#"{"model":"claude-3-5-sonnet","input":"hello"}"#;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body readable");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        assert_eq!(json["object"], "response");
+        let output_text = json["output"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert_eq!(output_text, "Hello from Anthropic");
+
+        assert_eq!(mock.hits(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_responses_handler_anthropic_streaming() {
+        let _guard = EnvGuard("TEST_PROXY");
+        let (app, server, _cache) = test_app_with_cache(60, 10);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(
+                    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"content\":[],\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet\",\"stop_reason\":null}}\n\n\
+                     event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking\",\"content\":\"Step1\"}}\n\n\
+                     event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text\",\"content\":\" world\"}}\n\n\
+                     event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n\
+                     event: message_stop\ndata: {}\n\n",
+                );
+        });
+
+        let body = r#"{"model":"claude-3-5-sonnet","input":"hello","stream":true}"#;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body readable");
+        let sse = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert!(sse.contains("event: response.reasoning_summary_text.delta"));
+        assert!(sse.contains("Step1"));
+        assert!(sse.contains("event: response.output_text.delta"));
+        assert!(sse.contains("world"));
+        assert!(sse.contains("event: response.completed"));
+
+        assert_eq!(mock.hits(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_responses_handler_passthrough() {
+        let _guard = EnvGuard("TEST_PROXY");
+        let (app, server, _cache) = test_app_with_cache(60, 10);
+
+        // R5 passthrough expected behavior: responses body forwarded unchanged to openai_responses provider.
+        // Currently this is not implemented; test will fail until R5 is built.
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/responses");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":"resp_123","object":"response","created":1700000000,"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"passthrough"}]}],"status":"completed"}"#);
+        });
+
+        let body = r#"{"model":"gpt-4o","input":"hello"}"#;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // Verify that the response body matches the upstream passthrough
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body readable");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        assert_eq!(json["object"], "response");
+        assert_eq!(json["output"][0]["content"][0]["text"].as_str().unwrap(), "passthrough");
+
+        assert_eq!(mock.hits(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_responses_handler_requires_auth() {
+        let _guard = EnvGuard("TEST_PROXY");
+        let (app, _server, _cache) = test_app_with_cache(60, 10);
+
+        let body = r#"{"model":"gpt-4o","input":"hello"}"#;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_responses_handler_upstream_error_forwards_body() {
+        let _guard = EnvGuard("TEST_PROXY");
+        let (app, server, _cache) = test_app_with_cache(60, 10);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(429)
+                .header("content-type", "application/json")
+                .body(r#"{"error":"rate limit exceeded"}"#);
+        });
+
+        let body = r#"{"model":"gpt-4o","input":"hello"}"#;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body readable");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        assert_eq!(json["error"]["code"], "rate_limit_exceeded");
+
+        assert_eq!(mock.hits(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_responses_cache_hit_returns_cached_response() {
+        let _guard = EnvGuard("TEST_PROXY");
+        let (app, server, cache) = test_app_with_cache(60, 10);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":"test","choices":[{"message":{"content":"hello"}}]}"#);
+        });
+
+        let body = r#"{"model":"gpt-4o","input":"hello"}"#;
+        let _resp1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(mock.hits(), 1);
+
+        let _resp2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(mock.hits(), 1);
+
+        let stats = cache.stats();
+        assert_eq!(stats.entry_count, 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_responses_handler_forwards_openai_headers() {
+        let _guard = EnvGuard("TEST_PROXY");
+        let (app, server, _cache) = test_app_with_cache(60, 10);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions")
+                .match_header("openai-beta", "test-beta");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":"test","choices":[{"message":{"content":"hello"}}]}"#);
+        });
+
+        let body = r#"{"model":"gpt-4o","input":"hello"}"#;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("openai-beta", "test-beta")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(mock.hits(), 1);
+    }
 }

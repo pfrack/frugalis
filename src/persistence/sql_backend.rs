@@ -34,6 +34,10 @@ enum Inferences {
     CacheCreationTokens,
     ClientSessionId,
     PreviousResponseId,
+    CodexInstallationId,
+    CodexTurnState,
+    CodexWindowId,
+    CodexTurnMetadata,
 }
 
 /// Database dialect selector.
@@ -206,7 +210,11 @@ impl SqlBackend {
               cache_read_tokens INTEGER, \
               cache_creation_tokens INTEGER, \
               client_session_id TEXT, \
-              previous_response_id TEXT)",
+              previous_response_id TEXT, \
+              codex_installation_id TEXT, \
+              codex_turn_state TEXT, \
+              codex_window_id TEXT, \
+              codex_turn_metadata TEXT)",
         )
         .execute(pool)
         .await
@@ -268,6 +276,11 @@ async fn insert_once_sql_backend(backend: &SqlBackend, record: &InferenceRecord)
                 Inferences::CacheReadTokens,
                 Inferences::CacheCreationTokens,
                 Inferences::ClientSessionId,
+                Inferences::PreviousResponseId,
+                Inferences::CodexInstallationId,
+                Inferences::CodexTurnState,
+                Inferences::CodexWindowId,
+                Inferences::CodexTurnMetadata,
                 Inferences::CreatedAt,
             ])
             .values_panic([
@@ -285,6 +298,11 @@ async fn insert_once_sql_backend(backend: &SqlBackend, record: &InferenceRecord)
                 record.cache_read_tokens.into(),
                 record.cache_creation_tokens.into(),
                 record.client_session_id.clone().into(),
+                record.previous_response_id.clone().into(),
+                record.codex_installation_id.clone().into(),
+                record.codex_turn_state.clone().into(),
+                record.codex_window_id.clone().into(),
+                record.codex_turn_metadata.clone().into(),
                 record.created_at.format("%Y-%m-%d %H:%M:%S").to_string().into(),
             ]);
         match backend.dialect {

@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct CachedEntry {
     pub body: String,
     pub status: u16,
+    /// For OpenAI Responses API cached responses, the stable response_id.
+    /// For Chat Completions cached entries, this is empty.
+    pub response_id: String,
 }
 
 /// Snapshot of cache statistics for the dashboard.
@@ -92,6 +95,7 @@ mod tests {
         let entry = CachedEntry {
             body: "test body".to_string(),
             status: 200,
+            response_id: String::new(),
         };
         cache.put("key1".to_string(), entry.clone());
         let retrieved = cache.get("key1");
@@ -107,6 +111,7 @@ mod tests {
         let entry = CachedEntry {
             body: "body".to_string(),
             status: 200,
+            response_id: String::new(),
         };
         cache.put("hit".to_string(), entry);
 
@@ -132,6 +137,7 @@ mod tests {
         let entry = CachedEntry {
             body: "b".to_string(),
             status: 200,
+            response_id: String::new(),
         };
         cache.put("a".to_string(), entry);
         let _ = cache.get("a");
@@ -160,6 +166,7 @@ mod tests {
                 CachedEntry {
                     body: format!("body{i}"),
                     status: 200,
+                    response_id: String::new(),
                 },
             );
         }
