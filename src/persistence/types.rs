@@ -49,6 +49,8 @@ pub struct InferenceLog {
     pub provider_attempts: Option<i16>,
     #[allow(dead_code)] // read by Askama template (inferences.html:75); rustc can't see template-generated reads
     pub final_provider: Option<String>,
+    #[allow(dead_code)] // read by Askama template
+    pub previous_response_id: Option<String>,
 }
 
 /// Per-category latency statistics produced by `fetch_latency_summary`.
@@ -131,6 +133,18 @@ pub struct InferenceRecord {
     /// Claude Code session id from `x-claude-code-session-id`, for per-session
     /// attribution. `None` when the header was absent.
     pub client_session_id: Option<String>,
+    /// Responses API `previous_response_id` for multi-turn attribution.
+    /// `None` when the request was not a Responses-API request or had no
+    /// previous response id.
+    pub previous_response_id: Option<String>,
+    /// Codex installation id from `x-codex-installation-id`.
+    pub codex_installation_id: Option<String>,
+    /// Codex turn state from `x-codex-turn-state`.
+    pub codex_turn_state: Option<String>,
+    /// Codex window id from `x-codex-window-id`.
+    pub codex_window_id: Option<String>,
+    /// Codex turn metadata from `x-codex-turn-metadata`.
+    pub codex_turn_metadata: Option<String>,
 }
 
 /// Extract the last user message from an OpenAI-compatible `{"messages":[...]}` body.

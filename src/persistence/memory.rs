@@ -90,6 +90,7 @@ impl PersistenceBackend for MemoryBackend {
                 duration_ms: r.duration_ms,
                 provider_attempts: Some(r.provider_attempts as i16),
                 final_provider: Some(r.final_provider.clone()),
+                previous_response_id: r.previous_response_id.clone(),
             })
             .collect();
 
@@ -288,6 +289,7 @@ mod tests {
             cache_read_tokens: Some(80),
             cache_creation_tokens: Some(5),
             client_session_id: Some("sess-mem".to_string()),
+            ..Default::default()
         };
         backend
             .insert_inference(&record)

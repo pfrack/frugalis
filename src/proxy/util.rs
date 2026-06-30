@@ -236,6 +236,7 @@ pub(crate) fn log_classification(
         final_provider,
         None,
         None,
+        None,
     );
 }
 
@@ -267,6 +268,35 @@ pub(crate) fn log_classification_with_usage(
         final_provider,
         usage,
         session_id,
+        None, // previous_response_id
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn log_classification_with_usage_and_prev(
+    state: &AppState,
+    classification: &crate::classification::types::ClassificationResult,
+    _body_str: &str,
+    prompt: &str,
+    start: std::time::Instant,
+    log_status: &str,
+    provider_attempts: u8,
+    final_provider: &str,
+    usage: Option<&UsageBreakdown>,
+    session_id: Option<&str>,
+    previous_response_id: Option<&str>,
+) {
+    enqueue_inference_record(
+        state,
+        classification,
+        prompt,
+        start,
+        log_status,
+        provider_attempts,
+        final_provider,
+        usage,
+        session_id,
+        previous_response_id,
     );
 }
 
@@ -284,6 +314,7 @@ pub(crate) fn enqueue_inference_record(
     final_provider: &str,
     usage: Option<&UsageBreakdown>,
     session_id: Option<&str>,
+    previous_response_id: Option<&str>,
 ) {
     if let Some(persistence) = &state.persistence {
         let duration_ms = start.elapsed().as_millis() as i32;
@@ -320,6 +351,11 @@ pub(crate) fn enqueue_inference_record(
             cache_read_tokens,
             cache_creation_tokens,
             client_session_id: session_id.map(|s| s.to_string()),
+            previous_response_id: previous_response_id.map(|s| s.to_string()),
+            codex_installation_id: None,
+            codex_turn_state: None,
+            codex_window_id: None,
+            codex_turn_metadata: None,
         };
         crate::persistence::log_inference(
             persistence.backend.clone(),
