@@ -366,11 +366,11 @@ pub(crate) async fn responses_handler(
                         );
                     }
 
-                    // ── Streaming path (Phase 2) ──
+                    // ── Streaming path ──
                     if stream {
                         let keepalive_interval_secs =
                             *state.keepalive_interval_secs.read().await;
-                        return crate::proxy::streaming::handle_streaming_response(
+                        return crate::proxy::responses_streaming::handle_responses_streaming_response(
                             state,
                             classification,
                             body_str,

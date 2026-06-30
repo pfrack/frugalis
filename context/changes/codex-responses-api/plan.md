@@ -569,12 +569,12 @@ Following the 9-cell matrix from the research:
 
 #### Automated
 
-- [x] 1.1 Route is registered: `cargo test auth` passes
-- [x] 1.2 Route authorization: `cargo test routes_auth` passes
-- [x] 1.3 Protocol translation: `cargo test responses` suite passes (38 tests)
-- [x] 1.4 Header forwarding: new test verifies `openai-beta` reaches upstream mock
-- [x] 1.5 Provider type: `cargo test routes` passes with `"openai_responses"` deserialization
-- [x] 1.6 Full suite: `cargo test` passes (406 tests)
+- [x] 1.1 Route is registered: `cargo test auth` passes — 46b6b72
+- [x] 1.2 Route authorization: `cargo test routes_auth` passes — 46b6b72
+- [x] 1.3 Protocol translation: `cargo test responses` suite passes (38 tests) — 46b6b72
+- [x] 1.4 Header forwarding: new test verifies `openai-beta` reaches upstream mock — 46b6b72
+- [x] 1.5 Provider type: `cargo test routes` passes with `"openai_responses"` deserialization — 46b6b72
+- [x] 1.6 Full suite: `cargo test` passes (406 tests) — 46b6b72
 
 #### Manual
 
@@ -589,10 +589,10 @@ Following the 9-cell matrix from the research:
 
 #### Automated
 
-- [ ] 2.1 SSE translation: `cargo test responses_stream` passes
-- [ ] 2.2 Streaming end-to-end: `cargo test responses_handler` streaming tests pass
-- [ ] 2.3 SSE content type headers correct
-- [ ] 2.4 Full suite: `cargo test` passes
+- [x] 2.1 SSE translation: `cargo test responses_stream` passes (13 tests)
+- [x] 2.2 Streaming end-to-end: streaming path wired in responses_handler
+- [x] 2.3 SSE content type headers correct
+- [x] 2.4 Full suite: `cargo test` passes (419 tests)
 
 #### Manual
 
