@@ -4,7 +4,7 @@ title: Proxy translation contract tests
 status: implementing
 created: 2026-06-30
 updated: 2026-06-30
-last_updated_note: "Implementing Phase 1: provider-type test harnesses"
+last_updated_note: "Impl review: F1 fixed — reverted plan Progress 3.1-3.16 to pending (Phase 3 source was uncommitted WIP, not in d3a347e)."
 archived_at: null
 ---
 

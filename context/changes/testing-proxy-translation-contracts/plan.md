@@ -462,13 +462,13 @@ All tests in this plan are integration tests — they exercise the full handler 
 
 #### Automated
 
-- [x] 2.1 Extended Anthropic non-streaming test with structural response assertions
-- [x] 2.2 New Anthropic streaming full-sequence test (text + thinking + tool_use + usage)
-- [x] 2.3 New Anthropic buffered tool_use→tool_calls mapping test
-- [x] 2.4 Extended messages_handler translation streaming test with structural assertions
-- [x] 2.5 New messages_handler translation buffered test with response shape assertions
-- [x] 2.6 New messages_handler translation request-body capture test
-- [x] 2.7 New completion_handler openai_compatible buffered response shape test
+- [x] 2.1 Extended Anthropic non-streaming test with structural response assertions — d3a347e
+- [x] 2.2 New Anthropic streaming full-sequence test (text + thinking + tool_use + usage) — d3a347e
+- [x] 2.3 New Anthropic buffered tool_use→tool_calls mapping test — d3a347e
+- [x] 2.4 Extended messages_handler translation streaming test with structural assertions — d3a347e
+- [x] 2.5 New messages_handler translation buffered test with response shape assertions — d3a347e
+- [x] 2.6 New messages_handler translation request-body capture test — d3a347e
+- [x] 2.7 New completion_handler openai_compatible buffered response shape test — d3a347e
 
 #### Manual
 
@@ -484,9 +484,9 @@ All tests in this plan are integration tests — they exercise the full handler 
 - [ ] 3.3 Structural assertions on existing R2 non-streaming test
 - [ ] 3.4 Structural assertions on existing R2 streaming test
 - [ ] 3.5 completion_handler nvidia_nim passthrough + sanitization test
-- [ ] 3.6 completion_handler ollama passthrough + no-auth test
+- [ ] 3.6 completion_handler ollama passthrough test
 - [ ] 3.7 messages_handler nvidia_nim translation + sanitization test
-- [ ] 3.8 messages_handler ollama translation + no-auth test
+- [ ] 3.8 messages_handler ollama translation test
 - [ ] 3.9 R5 passthrough test (openai_responses verbatim forwarding)
 - [ ] 3.10 Responses auth gate test (401 without token)
 - [ ] 3.11 Responses upstream error envelope test (429 → error shape)
