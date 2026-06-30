@@ -6,7 +6,7 @@ use axum::{
     response::Response,
     body::Bytes,
 };
-use tracing::{debug, warn};
+use tracing::warn;
 use crate::app::AppState;
 use crate::classification::chain::IntentClassify;
 

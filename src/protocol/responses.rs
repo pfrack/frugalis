@@ -612,7 +612,7 @@ pub(crate) fn response_from_chat(
         .unwrap_or(0);
     let completion_tokens = usage.and_then(|u| u.get("completion_tokens")).and_then(|v| v.as_i64()).unwrap_or(0);
 
-    let input_tokens = (prompt_tokens.saturating_sub(cached_tokens)).max(0) as i64;
+    let input_tokens = (prompt_tokens.saturating_sub(cached_tokens)).max(0);
     let total_tokens = input_tokens + completion_tokens;
 
     // ── Build response ──
