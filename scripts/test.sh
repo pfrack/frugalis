@@ -1380,6 +1380,66 @@ run_fewshot_interactive() {
 }
 
 # ============================================================================
+# Responses API (Codex CLI compat) test functions
+# ============================================================================
+
+test_responses_non_streaming() {
+    local _resp _code _text
+    _resp=$(curl -s -w "\n%{http_code}" "http://$HOST/v1/responses" \
+        -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+        -d '{"model":"gpt-4o","input":"hello"}')
+    _code=$(printf '%s' "$_resp" | tail -1)
+    _text=$(printf '%s' "$_resp" | sed '$d' | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('output',[{}])[0].get('content',[{}])[0].get('text',''))" 2>/dev/null || echo "")
+    if [ "$_code" = "200" ] && [ -n "$_text" ]; then
+        log_pass "responses: non-streaming returns output text"
+    else log_fail "responses: expected 200 with non-empty output, got code=$_code text=$_text"; fi
+}
+
+test_responses_streaming() {
+    local _resp _events
+    # Start streaming request, capture first 5 seconds of output, count event types
+    _resp=$(timeout 5 curl -sN "http://$HOST/v1/responses" \
+        -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+        -d '{"model":"gpt-4o","stream":true,"input":"hello"}' 2>/dev/null || true)
+    _events=$(printf '%s' "$_resp" | grep -c '^event: response\.' || true)
+    if [ "$_events" -ge 4 ]; then
+        log_pass "responses: streaming emits $_events SSE events (>=4 expected)"
+    else log_fail "responses: expected >=4 SSE events, got $_events"; fi
+}
+
+test_responses_auth_required() {
+    local _code
+    _code=$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST/v1/responses" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"gpt-4o","input":"hello"}' 2>/dev/null) || true
+    if [ "$_code" = "401" ]; then
+        log_pass "responses: auth required returns 401"
+    else log_fail "responses: expected 401 without token, got $_code"; fi
+}
+
+test_responses_unsupported_field() {
+    local _resp _code
+    _resp=$(curl -s -w "\n%{http_code}" "http://$HOST/v1/responses" \
+        -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+        -d '{"model":"gpt-4o","input":"hello","tools":[{"type":"web_search"}]}')
+    _code=$(printf '%s' "$_resp" | tail -1)
+    if [ "$_code" = "400" ]; then
+        log_pass "responses: unsupported field returns 400"
+    else log_fail "responses: expected 400 for unsupported field, got $_code"; fi
+}
+
+test_responses_function_call() {
+    local _resp _has_fc
+    _resp=$(timeout 5 curl -sN "http://$HOST/v1/responses" \
+        -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+        -d '{"model":"gpt-4o","stream":true,"input":"get weather in NYC","tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]}' 2>/dev/null || true)
+    _has_fc=$(printf '%s' "$_resp" | grep -c 'function_call_arguments' || true)
+    if [ "$_has_fc" -ge 1 ]; then
+        log_pass "responses: function call streaming emits function_call_arguments events"
+    else log_fail "responses: expected function_call_arguments in stream"; fi
+}
+
+# ============================================================================
 # FULL AUTOMATED SUITE (default)
 # ============================================================================
 
@@ -1437,6 +1497,13 @@ run_all_automated() {
 
     # ── Cache ──
     run_cache_tests
+
+    # ── Responses API (Codex CLI compat) ──
+    test_responses_auth_required
+    test_responses_unsupported_field
+    test_responses_non_streaming
+    test_responses_streaming
+    test_responses_function_call
 }
 
 # ============================================================================

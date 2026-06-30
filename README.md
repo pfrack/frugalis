@@ -208,9 +208,58 @@ When a request includes `"stream": true`, the gateway proxies the upstream respo
 - **Constant-time comparison** — all credential comparisons (bearer token, basic auth user/password) use HMAC-SHA256 via the `subtle` crate to prevent timing attacks
 - **Auth separation** — bearer token authentication for proxy routes (`/v1/*`), HTTP basic authentication for dashboard routes (`/dashboard/*`), each with its own middleware layer
 
+## OpenAI Responses API Shim
+
+Frugalis provides a `POST /v1/responses` endpoint that translates the OpenAI Responses API protocol into Chat Completions. This enables **Codex CLI** (which only speaks `/v1/responses`) to use Frugalis as a drop-in gateway.
+
+### Usage
+
+Configure Codex CLI with a `provider_type: "openai_compatible"` pointing at Frugalis:
+
+```bash
+codex provider add frugalis http://localhost:10000/v1 --api-key $PROXY_API_BEARER_TOKEN
+```
+
+### Supported Features
+
+- **Text generation** — non-streaming and streaming (`stream: true`)
+- **Tool/function calls** — `type: "function"` tools only
+- **Streaming SSE events** — 15+ Responses event types (created, output_item.added, output_text.delta, completed, etc.)
+- **Multi-turn** — via `previous_response_id` (re-send full transcript; transcript store is best-effort in Phase 4)
+- **Reasoning** — best-effort via `reasoning_content` (DeepSeek) and Anthropic `thinking` → `reasoning_content` chain
+- **Reasoning effort** — `reasoning.effort` is accepted, logged with a fidelity warning, and dropped from the Chat body
+
+### Caveats
+
+- **No built-in tools** — `web_search`, `code_interpreter`, `file_search`, `computer_use`, `image_generation`, `shell`, `apply_patch`, and MCP tools are rejected with 400
+- **No `store: true`** — the gateway does not persist transcripts; a warning is logged
+- **No `conversation` API** — use `previous_response_id` with full transcript instead
+- **No `background: true`** — rejected with 400
+- **No `prompt` field** — use `instructions` instead
+- **No `text.format: grammar`** — rejected with 400
+- **Reasoning fidelity is best-effort** — Chat Completions has no first-class reasoning wire field; `reasoning_content` chunks are accumulated into a single `reasoning_summary_text.delta` burst
+
+### Example
+
+```bash
+# Non-streaming
+curl -sS POST http://localhost:10000/v1/responses \
+  -H "Authorization: Bearer $PROXY_API_BEARER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","input":"hello"}' | jq .output[0].content[0].text
+
+# Streaming
+curl -N POST http://localhost:10000/v1/responses \
+  -H "Authorization: Bearer $PROXY_API_BEARER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","stream":true,"input":"hello"}'
+```
+
+See `openapi/responses-shim.yaml` for the full schema.
+
 ## API Reference
 
-Frugalis exposes an OpenAI-compatible API surface for chat completions, plus dedicated classify and feedback endpoints. All proxy routes are mounted under `/v1/` and require the bearer token set via `PROXY_API_BEARER_TOKEN`. The dashboard routes are mounted under `/dashboard/` with basic authentication.
+Frugalis exposes an OpenAI-compatible API surface for chat completions, plus dedicated classify and feedback endpoints. A `POST /v1/responses` endpoint is also available (see [OpenAI Responses API Shim](#openai-responses-api-shim)). All proxy routes are mounted under `/v1/` and require the bearer token set via `PROXY_API_BEARER_TOKEN`. The dashboard routes are mounted under `/dashboard/` with basic authentication.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
@@ -219,13 +268,14 @@ Frugalis exposes an OpenAI-compatible API surface for chat completions, plus ded
 | POST | `/v1/messages` | Bearer | Anthropic Messages API pass-through. Same classification + routing, Anthropic-format body |
 | POST | `/v1/classify` | Bearer | Classify-only endpoint; returns the category, model, and tier without proxying |
 | POST | `/v1/feedback` | Bearer | Submit classification feedback for few-shot retraining |
+| POST | `/v1/responses` | Bearer | OpenAI Responses API shim for Codex CLI compatibility. Translates to Chat Completions under the hood |
 | GET | `/dashboard/` | Basic auth | Dashboard overview — status, quick stats, recent inferences |
 | GET | `/dashboard/inferences` | Basic auth | Paginated, filterable inference log |
 | GET | `/dashboard/latency` | Basic auth | Per-category average and p99 latency over a time window |
 | GET | `/dashboard/savings` | Basic auth | Estimated cost savings vs. baseline model |
 | GET | `/dashboard/static/*` | Basic auth | Static assets (dashboard CSS) |
 
-See `openapi/completions.yaml` for full request/response schemas.
+See `openapi/completions.yaml` for the Chat Completions schema and `openapi/responses-shim.yaml` for the Responses API schema.
 
 ## Dashboard
 

@@ -1,0 +1,310 @@
+openapi: "3.1.0"
+info:
+  title: Frugalis Responses API Shim
+  description: >-
+    OpenAI Responses API shim for Codex CLI compatibility. Translates
+    POST /v1/responses into Chat Completions, reusing the existing
+    classification, cascade, cache, and streaming infrastructure.
+  version: "0.1.0"
+servers:
+  - url: http://localhost:10000/v1
+    description: Local development
+paths:
+  /responses:
+    post:
+      summary: Create a response (OpenAI Responses API shim)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, input]
+              properties:
+                model:
+                  type: string
+                  description: Model identifier (passed through to Chat Completions)
+                  example: gpt-4o
+                input:
+                  oneOf:
+                    - type: string
+                      description: Simple text input; wrapped as user message
+                    - type: array
+                      description: Array of input items (messages, function calls, etc.)
+                      items:
+                        type: object
+                        properties:
+                          type:
+                            type: string
+                            description: Item type discriminator
+                            enum:
+                              - message
+                              - function_call
+                              - function_call_output
+                              - item_reference
+                              - reasoning
+                              - agent_message
+                              - compaction_summary
+                              - custom_tool_call
+                              - custom_tool_call_output
+                          role:
+                            type: string
+                            description: Message role (for type: message, or bare Chat-style items)
+                          content:
+                            description: Message content (string or array of blocks)
+                instructions:
+                  oneOf:
+                    - type: string
+                    - type: array
+                  description: >-
+                    System instructions. Mapped to messages[{role:system}].
+                    Array form concatenates text parts.
+                stream:
+                  type: boolean
+                  default: false
+                  description: Enable SSE streaming
+                max_output_tokens:
+                  type: integer
+                  minimum: 1
+                  description: Maximum output tokens (renamed to max_tokens for upstream)
+                temperature:
+                  type: number
+                  description: Sampling temperature
+                top_p:
+                  type: number
+                  description: Nucleus sampling parameter
+                tools:
+                  type: array
+                  description: >-
+                    Only type:"function" tools are supported. Built-in tools
+                    (web_search, code_interpreter, computer_use, etc.) are
+                    rejected with 400.
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum: [function]
+                      function:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          description:
+                            type: string
+                          parameters:
+                            type: object
+                        required: [name, parameters]
+                tool_choice:
+                  oneOf:
+                    - type: string
+                      enum: [auto, none, required]
+                    - type: object
+                      properties:
+                        type:
+                          type: string
+                          enum: [function]
+                        function:
+                          type: object
+                          properties:
+                            name:
+                              type: string
+                          required: [name]
+                      required: [type, function]
+                  description: >-
+                    Supports Chat Completions 4 shapes. allowed type and
+                    parallel tool_choice types are rejected with 400.
+                reasoning:
+                  type: object
+                  description: >-
+                    Best-effort. reasoning.effort is logged as a warning and
+                    dropped from the Chat body. reasoning.summary is extracted
+                    into extras for response echo.
+                  properties:
+                    effort:
+                      type: string
+                      enum: [none, minimal, low, medium, high, xhigh, max]
+                    summary:
+                      type: string
+                      enum: [auto, concise, detailed]
+                store:
+                  type: boolean
+                  description: >-
+                    NOT honored. A warning is logged and the field is dropped.
+                    Transcripts are not persisted by this gateway.
+                previous_response_id:
+                  type: string
+                  description: >-
+                    Supported via re-send-full-transcript. If the input[] is
+                    partial, resolve against the TranscriptStore (Phase 4).
+                parallel_tool_calls:
+                  type: boolean
+                  default: true
+                truncation:
+                  type: string
+                  default: disabled
+                metadata:
+                  type: object
+                  description: Echoed back in response (max 4 keys for Anthropic upstreams)
+                prompt_cache_key:
+                  type: string
+                  description: Remapped to Chat user field for cache-bucketing
+                service_tier:
+                  type: string
+                safety_identifier:
+                  type: string
+              # Unsupported fields (rejected with 400):
+              # - background: true
+              # - conversation: {...}
+              # - prompt: string
+              # - text.format: {type: grammar}
+              # - tools: [{type: "web_search"|"code_interpreter"|"file_search"|...}]
+      responses:
+        "200":
+          description: Successful non-streaming response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    pattern: ^resp_
+                  object:
+                    type: string
+                    enum: [response]
+                  status:
+                    type: string
+                    enum: [completed, incomplete, failed]
+                  created_at:
+                    type: integer
+                  completed_at:
+                    type: integer
+                    nullable: true
+                  output:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                          enum: [message, reasoning, function_call]
+                        id:
+                          type: string
+                        role:
+                          type: string
+                          enum: [assistant]
+                        status:
+                          type: string
+                          enum: [completed, in_progress]
+                        content:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              type:
+                                type: string
+                                enum: [output_text, refusal]
+                              text:
+                                type: string
+                              annotations:
+                                type: array
+                        call_id:
+                          type: string
+                        name:
+                          type: string
+                        arguments:
+                          type: string
+                  output_text:
+                    type: string
+                  model:
+                    type: string
+                  usage:
+                    type: object
+                    properties:
+                      input_tokens:
+                        type: integer
+                      input_tokens_details:
+                        type: object
+                        properties:
+                          cached_tokens:
+                            type: integer
+                      output_tokens:
+                        type: integer
+                      output_tokens_details:
+                        type: object
+                        properties:
+                          reasoning_tokens:
+                            type: integer
+                      total_tokens:
+                        type: integer
+                  incomplete_details:
+                    type: object
+                    nullable: true
+                    properties:
+                      reason:
+                        type: string
+                        enum: [max_output_tokens, content_filter]
+                  error:
+                    type: object
+                    nullable: true
+                    properties:
+                      code:
+                        type: string
+                      message:
+                        type: string
+                      param:
+                        type: string
+                        nullable: true
+        "400":
+          description: Bad request (unsupported field, invalid body)
+        "401":
+          description: Missing or invalid bearer token
+        "415":
+          description: Content-Type must be application/json
+        "502":
+          description: Upstream provider error
+      x-streaming-events:
+        description: >-
+          When stream: true, the response is a SSE stream with the following
+          event types:
+        events:
+          - event: response.created
+            data: status: in_progress
+          - event: response.output_item.added
+            data: output_index, item
+          - event: response.content_part.added
+            data: item_id, output_index, content_index, part
+          - event: response.output_text.delta
+            data: item_id, output_index, content_index, delta
+          - event: response.output_text.done
+            data: item_id, output_index, content_index
+          - event: response.content_part.done
+            data: item_id, output_index, content_index, part
+          - event: response.output_item.done
+            data: output_index, item
+          - event: response.reasoning_summary_part.added
+            data: item_id, output_index, summary_index, part
+          - event: response.reasoning_summary_text.delta
+            data: item_id, output_index, summary_index, delta
+          - event: response.reasoning_summary_text.done
+            data: item_id, output_index, summary_index, text
+          - event: response.function_call_arguments.delta
+            data: item_id, output_index, delta
+          - event: response.function_call_arguments.done
+            data: item_id, output_index, name, arguments
+          - event: response.refusal.delta
+            data: item_id, output_index, content_index, delta
+          - event: response.refusal.done
+            data: item_id, output_index, content_index
+          - event: response.completed
+            data: full response payload with usage
+          - event: error
+            data: error message (upstream error path)
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
