@@ -3555,8 +3555,7 @@ mod tests {
         assert_eq!(no_thinking.hits(), 0, "translated body should not contain Anthropic-specific fields");
         assert_eq!(positive.hits(), 1);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let json = parse_json_body(response).await;
         assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("message"));
         assert_eq!(json.get("role").and_then(|v| v.as_str()), Some("assistant"));
         let content = json.get("content").and_then(|v| v.as_array()).expect("content array");
@@ -3594,8 +3593,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(positive.hits(), 1);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let json = parse_json_body(response).await;
         assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("message"));
         assert_eq!(json.get("role").and_then(|v| v.as_str()), Some("assistant"));
         let content = json.get("content").and_then(|v| v.as_array()).expect("content array");
