@@ -4,12 +4,13 @@
 - **Plan**: `context/changes/testing-proxy-translation-contracts/plan.md`
 - **Scope**: Phase 1 + Phase 2 of 3 (commit d3a347e)
 - **Date**: 2026-06-30
-- **Verdict**: NEEDS ATTENTION (after triage: APPROVED — all findings fixed)
+- **Verdict**: APPROVED (all findings resolved)
 - **Findings**: 0 critical  2 warnings  5 observations
 - **Final commits**:
   - `894681a` — Revert plan Progress 3.1–3.16 to pending (F1)
   - `24b6f43` — Add proper SHAs to Phase 1 + reverted Phase 3 items (F1 follow-up)
   - `7c0b362` — Rename test to match plan 2.5 contract (F2)
+  - `ac865f6` — Refactor harnesses + env-var isolation + body helper (F3, F4, F5)
 
 ## Verdicts
 
@@ -54,35 +55,44 @@
 - **Severity**: OBSERVATION
 - **Impact**: 🏃 LOW — out of scope
 - **Detail**: `test_app_with_nim_http_client` and `test_app_with_ollama_http_client` are ~99% identical, differing only in the `provider_type` string. Matches the established duplication pattern across all existing harnesses; refactor would touch every existing harness.
-- **Decision**: ACCEPTED — pattern is consistent with the existing inventory; future refactor out of scope for this change.
+- **Decision**: FIXED via `ac865f6`
+  - Introduced `test_app_with_provider(env_var_name, max_upstream_body_bytes, endpoint_path, provider_type)` helper in `src/app/test_helpers.rs`.
+  - Reduced the 5 plain harnesses (http_client, anthropic, nim, ollama, openai_responses) to one-line wrappers around the helper.
+  - `test_app_with_cache` left alone (different return shape + response_cache).
+  - Eliminated ~280 lines of near-identical boilerplate while preserving all public signatures.
 
 ### F4 — Inconsistent env-var isolation on no-set tests (Observation)
 
 - **Severity**: OBSERVATION
 - **Impact**: 🏃 LOW — provably safe
 - **Detail**: `test_classify_no_enriched_fields` and `test_completion_no_enriched_fields_with_missing_env` reference `TEST_API_KEY` / `MISSING_KEY_XYZ` but lack `#[serial]`/`EnvGuard`. Risk is moot because both go through `test_app_with_enriched_classifier` with `http_client: None` and return before reaching the env-var branch.
-- **Decision**: ACCEPTED — asymmetry would matter only if either test gains an HTTP client. Non-blocking.
+- **Decision**: FIXED via `ac865f6`
+  - `test_classify_no_enriched_fields`: added `#[serial]` + `EnvGuard("TEST_API_KEY")` + `set_var("TEST_API_KEY", "sk-test-value-123")` (mirrors sibling `test_completion_does_not_include_enriched_fields`).
+  - `test_completion_no_enriched_fields_with_missing_env`: added `#[serial]` + `EnvGuard("MISSING_KEY_XYZ")` + `remove_var("MISSING_KEY_XYZ")` (guarantees absence for the duration of the test).
 
 ### F5 — Inline `to_bytes(...).unwrap()` in SSE tests (Observation)
 
 - **Severity**: OBSERVATION
 - **Impact**: 🏃 LOW — established pattern
 - **Detail**: New SSE tests use `to_bytes(...).unwrap()` directly instead of `parse_json_body`. Justified: SSE bodies are not JSON; `parse_json_body` would panic on `serde_json::from_slice`. Matches existing SSE tests in the file.
-- **Decision**: ACCEPTED — pattern is consistent. Optional follow-up: add `body_to_string` helper analogous to `parse_json_body`.
+- **Decision**: FIXED via `ac865f6`
+  - Added `body_to_string(response) -> String` helper in `src/app/test_helpers.rs` next to `parse_json_body` for SSE / text / non-JSON bodies.
+  - Migrated the 2 inline `to_bytes + serde_json::from_slice` call sites in new Phase 2 tests to use the existing `parse_json_body` helper (those tests assert on JSON shape).
+  - The new `body_to_string` helper is available for future SSE test sites that pre-date this commit.
 
 ### F6 — Phase 1 harnesses mirror `test_app_with_anthropic_http_client` exactly (Observation, positive)
 
 - **Severity**: OBSERVATION
 - **Impact**: n/a
 - **Detail**: New harnesses (`test_app_with_nim_http_client`, `test_app_with_ollama_http_client`) follow `test_app_with_anthropic_http_client` exactly in AppState construction, auth config, httpmock setup, and routing entry shape. Provider type strings correct.
-- **Decision**: ACCEPTED — compliance verification.
+- **Decision**: SUPERSEDED by F3 — the 5 plain harnesses (including these) were collapsed into one-line wrappers around `test_app_with_provider`, which guarantees the same body across providers by construction. The positive finding holds structurally.
 
 ### F7 — Phase 2 tests use `parse_json_body` consistently (Observation, positive)
 
 - **Severity**: OBSERVATION
 - **Impact**: n/a
 - **Detail**: All new JSON-shape assertions use `parse_json_body`. Field-leak guards present in both translation directions (no Anthropic-only fields in O→A output; no OpenAI-only fields in A→O output).
-- **Decision**: ACCEPTED — compliance verification.
+- **Decision**: ACCEPTED — compliance verification (positive). Strengthened by F5 migration which reduced 2 inline call sites to use `parse_json_body` as well.
 
 ## Verification Evidence
 
@@ -93,8 +103,9 @@
 
 ## Triage Outcome
 
-- **Fixed**: F1 (commits `894681a` + `24b6f43`), F2 (commit `7c0b362`)
-- **Accepted**: F3, F4, F5, F6, F7 (all OBSERVATION, no action required)
+- **Fixed**: F1 (commits `894681a` + `24b6f43`), F2 (commit `7c0b362`), F3 (commit `ac865f6`), F4 (commit `ac865f6`), F5 (commit `ac865f6`)
+- **Accepted**: F7 (positive compliance verification)
+- **Superseded**: F6 (structural guarantee now comes from F3's helper)
 - **Skipped**: none
 - **Dismissed**: none
 
