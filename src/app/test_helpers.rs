@@ -257,6 +257,152 @@ pub fn test_app_with_anthropic_http_client(
     (app, server)
 }
 
+pub fn test_app_with_nim_http_client(
+    env_var_name: &str,
+    max_upstream_body_bytes: usize,
+) -> (Router, httpmock::MockServer) {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    use std::collections::HashMap;
+    let cats = test_categories();
+    let server = httpmock::MockServer::start();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("test reqwest client should build");
+    let auth_config = Arc::new(routing::AuthConfig::from_values(
+        "proxy-token",
+        "user",
+        "password",
+    ));
+    let endpoint = server.url("/v1/chat/completions");
+    let mut routing = HashMap::new();
+    routing.insert(
+        cats[1].name.clone(),
+        routing::RouteEntry {
+            providers: vec![routing::ProviderEntry {
+                model: "sf-model".to_string(),
+                endpoint: endpoint.clone(),
+                provider_type: "nvidia_nim".to_string(),
+                api_key_env: Some(env_var_name.to_string()),
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        },
+    );
+    routing.insert(
+        cats[3].name.clone(),
+        routing::RouteEntry {
+            providers: vec![routing::ProviderEntry {
+                model: "ca-model".to_string(),
+                endpoint,
+                provider_type: "nvidia_nim".to_string(),
+                api_key_env: Some(env_var_name.to_string()),
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        },
+    );
+    let fallback = routing::RouteEntry {
+        providers: vec![routing::ProviderEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            provider_type: String::new(),
+            api_key_env: None,
+            timeout_ms: None,
+        }],
+        cost_per_1m_input_tokens: None,
+    };
+    let regex_classifier = classification::regex::RegexClassifier::from_values(
+        routing,
+        fallback,
+        30,
+        cats,
+        &test_negative_patterns(),
+    );
+    let app_state = make_test_app_state(
+        regex_classifier,
+        Some(client),
+        routing::ModelCosts::empty(),
+        String::new(),
+        max_upstream_body_bytes,
+    );
+    let app = build_app(auth_config, app_state);
+    (app, server)
+}
+
+pub fn test_app_with_ollama_http_client(
+    env_var_name: &str,
+    max_upstream_body_bytes: usize,
+) -> (Router, httpmock::MockServer) {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    use std::collections::HashMap;
+    let cats = test_categories();
+    let server = httpmock::MockServer::start();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("test reqwest client should build");
+    let auth_config = Arc::new(routing::AuthConfig::from_values(
+        "proxy-token",
+        "user",
+        "password",
+    ));
+    let endpoint = server.url("/v1/chat/completions");
+    let mut routing = HashMap::new();
+    routing.insert(
+        cats[1].name.clone(),
+        routing::RouteEntry {
+            providers: vec![routing::ProviderEntry {
+                model: "sf-model".to_string(),
+                endpoint: endpoint.clone(),
+                provider_type: "ollama".to_string(),
+                api_key_env: Some(env_var_name.to_string()),
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        },
+    );
+    routing.insert(
+        cats[3].name.clone(),
+        routing::RouteEntry {
+            providers: vec![routing::ProviderEntry {
+                model: "ca-model".to_string(),
+                endpoint,
+                provider_type: "ollama".to_string(),
+                api_key_env: Some(env_var_name.to_string()),
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        },
+    );
+    let fallback = routing::RouteEntry {
+        providers: vec![routing::ProviderEntry {
+            model: "fallback-model".to_string(),
+            endpoint: String::new(),
+            provider_type: String::new(),
+            api_key_env: None,
+            timeout_ms: None,
+        }],
+        cost_per_1m_input_tokens: None,
+    };
+    let regex_classifier = classification::regex::RegexClassifier::from_values(
+        routing,
+        fallback,
+        30,
+        cats,
+        &test_negative_patterns(),
+    );
+    let app_state = make_test_app_state(
+        regex_classifier,
+        Some(client),
+        routing::ModelCosts::empty(),
+        String::new(),
+        max_upstream_body_bytes,
+    );
+    let app = build_app(auth_config, app_state);
+    (app, server)
+}
+
 pub fn test_app() -> Router {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let auth_config = Arc::new(routing::AuthConfig::from_values(

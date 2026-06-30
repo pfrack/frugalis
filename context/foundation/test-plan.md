@@ -6,7 +6,7 @@
 >
 > Refresh: re-run `/10x-test-plan --refresh` when stale (see §8).
 >
-> Last updated: 2026-06-14 (Phase 1 → implementation complete)
+> Last updated: 2026-06-30
 
 ## 1. Strategy
 
@@ -37,40 +37,39 @@ terms, not test names. The Source column cites the *evidence that surfaced
 this risk* — never a specific file as "where the failure lives" (that is
 research's job, see §1 principle #3).
 
-| # | Risk (failure scenario)                                                                                                                                              | Impact | Likelihood | Source (evidence — not anchor)                                                                                                  |
-|---|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------|------------|--------------------------------------------------------------------------------------------------------------------------------|
-| 1 | Classifier chain (regex→fewshot→LLM) mis-hands-off: ambiguous prompt stays on regex tier, low confidence gets routed to a weak model, user gets garbage output       | High   | High       | Interview Q1, Q3, Q4; PRD FR-002; hot-spot dir `src/intent_classifier.rs` (12 commits/30d) + new `src/fewshot_classifier.rs`    |
-| 2 | `completion_handler` regression loses review fixes F1–F4 (snippet extraction, SSE error path, keepalive, JSON contract) when a follow-up change rewrites the handler | High   | High       | Interview Q2; `lessons.md:12-17` (F1–F4 lost across dashboard rewrite + SSE proxy commits); hot-spot dir `src/main.rs` (47/30d)   |
-| 3 | `log_inference` failure (DB down / schema drift / pool exhausted) blinds operator silently: proxy keeps responding, dashboard shows empty data, nobody notices           | High   | Medium     | Interview Q4; PRD NFR ("failures in async logging … do not block primary response delivery"); hot-spot `src/persistence.rs` (21/30d) |
-| 4 | Dashboard rendering breaks silently: 4 routes + `dashboard_page!` macro have 0 tests; a template rename or nav change breaks the operator UI                         | Medium | High       | Interview Q4; PRD FR-006; hot-spot dir `src/dashboard.rs` (8 commits/30d, 0 tests)                                              |
-| 5 | Persistence cross-backend drift: `memory` vs `sqlite` vs `postgres` produce different `InferenceRecord` rows or different snippet extraction on edge cases           | High   | Medium     | Interview Q4; PRD FR-005, NFR (testing); roadmap S-12 (in-memory DB fallback, proposed); dev-deps `testcontainers = 0.27`        |
-| 6 | Prompt body leaks to DB / error logs: snippet extraction regresses, full prompt body (PII: email, name, SSN) lands in `inferences` table or `tracing` span          | High   | Low–Medium | PRD NFR ("excludes full prompt bodies by default"); PRD Guardrail; hot-spot `src/persistence.rs`; abuse lens: PII leakage        |
-| 7 | Auth boundary regression: proxy bearer-token or dashboard basic-auth drops constant-time compare, goes back to `==`; or a new endpoint forgets to gate              | High   | Low        | PRD FR-001; `AGENTS.md` mandates `constant_time_eq_str`; lessons.md S-10 phase 7; hot-spot `src/auth.rs` (6/30d); abuse lens    |
+| # | Risk (failure scenario) | Impact | Likelihood | Source (evidence — not anchor) |
+|---|---|---|---|---|
+| 1 | Protocol translation corrupts message bodies across OpenAI/Anthropic/Codex boundaries — proxy returns 200 with valid-looking but wrong content, broken headers, or dropped cache_control | High | High | Interview Q1, Q3; hot-spot `src/proxy/` (7 file-touches/30d); roadmap S-15, S-16, S-18, S-21 |
+| 2 | Classifier chain (regex→fewshot→LLM) silently degrades — threshold/config change routes all prompts to wrong tier, output quality craters, no alarm fires | High | Medium-High | Interview Q1; PRD FR-002; config.toml `classifiers.order`; hot-spot `src/classification/` |
+| 3 | Chain-to-translation interaction gap — classifier picks a `RouteEntry` whose provider type has an untested or broken translation path; output silently garbage | High | Medium-High | Interview Q4; config.toml: 5 provider types across routing entries; hot-spot `src/proxy/handlers.rs` |
+| 4 | Streaming emitter state-machine edge cases — malformed upstream SSE, mid-stream errors, empty deltas, broken tool_use JSON produce garbled output or hung connections | High | Medium | Interview Q1, Q3; roadmap S-16 risk note ("medium-high"); hot-spot `src/proxy/streaming.rs`, `src/proxy/responses_streaming.rs` |
+| 5 | `log_inference` fails silently (DB unreachable / schema drift / pool exhausted) — proxy stays up, dashboard shows empty data, operator never knows | High | Medium | PRD NFR ("failures in async logging … do not block primary response delivery"); config.toml `persistence.backend = "memory"`; hot-spot `src/persistence/` (8 touches/30d) |
+| 6 | Snippet extraction regresses — full prompt bodies containing PII (email, name, SSN, phone) leak into persisted records or tracing spans | High | Low–Medium | PRD NFR ("excludes full prompt bodies by default"); abuse lens: PII leakage; hot-spot `src/persistence/` |
+| 7 | Auth constant-time compare regresses — cleanup change reverts `constant_time_eq_str` to `==` on any auth path (proxy bearer, dashboard basic, new endpoint) | High | Low | AGENTS.md mandate; `lessons.md` S-10 phase 7; abuse lens: timing side-channel |
 
 ### Risk Response Guidance
 
 | Risk | What would prove protection | Must challenge | Context `/10x-research` must ground | Likely cheapest layer | Anti-pattern to avoid |
-|------|-----------------------------|----------------|--------------------------------------|-----------------------|-----------------------|
-| #1   | Given an ambiguous prompt, the chain escalates regex→fewshot→LLM and the final category drives routing to the right model | "Each backend works" ≠ "chain hands off" — the 28 regex unit tests don't prove escalation | Where the chain is constructed; the confidence threshold that triggers handoff; whether `fallback()` invokes the next backend or short-circuits | Integration test with three mock backends returning known confidence scores; assert routing decision matches | Testing each backend in isolation only; asserting "some category came back" without checking which tier fired |
-| #2   | Given a future change rewrites `completion_handler`, the F1–F4 invariants persist (snippet extraction, streaming error path, keepalive, JSON contract) | 46 tests on `main.rs` may not all anchor F1–F4 — a passing test suite can still lose a guard | Which tests actually exercise `completion_handler`; which asserts correspond to F1–F4; whether keepalive uses real delays or fast mocks | Invariant assertions on log output (snippet does not contain full prompt), response body shape, SSE chunk shape; slow_tests for keepalive timing | Snapshotting `main.rs` at review time as "ongoing protection"; asserting "test passed once" |
-| #3   | When `log_inference` fails (DB unreachable, schema drift, pool exhausted), the proxy response still completes; the failure is logged at warn level; the bounded semaphore doesn't deadlock | "Non-blocking" can mean "non-blocking + silent" — silent failure is worse than blocking loud failure | Where `log_inference` is spawned; whether spawn failures are observed; pool exhaustion behavior; the persistence semaphore on saturation | Integration test that points `log_inference` at an unreachable backend and asserts (a) response completes, (b) warn log emitted, (c) semaphore releases | Asserting only that the call returns `Ok`; treating "non-blocking" as "no error path needed" |
-| #4   | Given a dashboard page route with valid basic auth, it returns 200 with the expected template fragments (page title, nav context, data fields); given unauthenticated, it returns 401 | 0 tests today means any macro change, template rename, or nav change can break rendering silently | The 4 route handlers' actual response shapes; the `dashboard_page!` macro's emitted struct; `nav_for("name")` behavior on unknown page | HTTP-level integration via `test_app()` harness; assert status, content-type, presence of key template fragments | Snapshotting HTML (brittle on CSS — explicitly Q5 out of scope); asserting only on template path string |
-| #5   | When `log_inference` is called with the same input on `memory` / `sqlite` / `postgres`, the persisted `InferenceRecord` is identical; snippet extraction is the same | `memory` is the default backend and what most tests use — `sqlite` / `postgres` can drift invisibly until prod | The 3-tier backend config wiring; which tests actually exercise all three; how `testcontainers` is invoked; snippet extraction edge cases | `testcontainers`-backed integration for `postgres` + `sqlite`; unit tests on `memory` + snippet extraction | Asserting "log_inference works" once on `memory`; letting the other two drift silently |
-| #6   | When `log_inference` is called with a prompt containing adversarial PII (email, name, SSN, phone), the persisted snippet contains none of the PII; error / log variants do not contain the full prompt | "snippet length < full prompt length" is satisfied by truncation alone — doesn't prove PII is actually redacted | The snippet extraction function's exact rules; where error messages are formatted; whether `tracing` spans include the full prompt body | Property tests on snippet extraction with a corpus of PII inputs; assert no PII in output and no full prompt in error/log variants | Asserting only on length; checking only one PII pattern; tautological oracle (assertion lifted from implementation) |
-| #7   | Given a proxy request without the bearer token → 401; with wrong token → 401 (constant-time); with right token → passes; dashboard basic-auth behaves the same; **all** auth comparisons use `constant_time_eq_str` | The constant-time compare lesson was added by hand — a future "convenience" revert to `==` is the realistic regression | All call sites of `constant_time_eq_str`; whether the dashboard basic-auth path uses it; whether any new endpoint added since F-01 uses it | Direct unit test importing the function and asserting behavior on equal/unequal/prefix/different-length strings; grep-based check that no auth path uses `==` on secret strings | Single token in test (proves one comparison, not all); testing only the happy path |
+|---|---|---|---|---|---|
+| #1 | Given a real-looking chat/messages/responses request routed through the proxy with a specific provider type, the translated body, headers, and SSE events match a known-good reference output | "Returns 200" ≠ "translation correct" — body can be intact while header passthrough is broken and cache_control is silently dropped | Each translation direction (OpenAI→Anthropic, Anthropic→OpenAI, Responses→Chat); which headers must pass through per direction; the reference output shape per provider type; where `httpmock` fixtures simulate upstream behavior | Integration/contract test with known input→output pairs via `test_app()` + `httpmock` | Asserting only HTTP status; testing only one translation direction; hardcoding expected output from the implementation |
+| #2 | Given a prompt corpus with known expected routing categories, the full chain (regex→fewshot→LLM) routes each prompt to the correct model tier; changing chain order or threshold produces a detectable difference in routing decisions | "Category X returned" ≠ "routed to the correct model" — must assert on the final routing decision, not just the category label | Where chain construction happens; confidence thresholds per tier; how routing table maps categories to models; what `CountingClassifier` reveals about which tier fired | Integration test with mock backends (CountingClassifier pattern) + known-category prompts; assert routing decision + tier that fired | Testing each classifier in isolation; asserting "some category" without validating routing |
+| #3 | Given the chain picks a routing decision for each of the 5 provider types (nvidia_nim, openai_compatible, anthropic, ollama, local), the full proxy handler translates and forwards correctly for all 5 | "One provider works" ≠ "all providers work" — translation paths differ per `provider_type`; auth header injection varies | Which provider types have distinct translation code paths; whether ollama/local bypass translation; auth header injection per provider type per `config.toml [[auth_provider]]` rules | Integration test exercising all 5 provider types through `test_app()` + `httpmock`; assert on translated body + header shape per type | Testing only the most common provider; hardcoding auth expectations |
+| #4 | Given malformed upstream SSE (empty delta, broken JSON tool_use, mid-stream HTTP error), the streaming emitter produces clean error termination — not garbled output, not a hung connection, not an unterminated SSE stream | "Stream completes" ≠ "stream was correct" — must assert on SSE event sequence and error handling, not just TCP close | Each streaming emitter's state machine (anthropic→openai, openai→anthropic, responses→chat); the error-injection surface via `httpmock`; keepalive interval behavior | Streaming integration test feeding crafted malformed SSE chunks via `httpmock`; assert error handling + event sequence | Only happy-path streaming; asserting "stream ended" without checking event sequence correctness |
+| #5 | When `log_inference` fails (unreachable backend, schema drift, pool exhausted), proxy response still completes, warn-level log is emitted, bounded semaphore releases; cross-backend: same input → identical record on memory/sqlite/postgres | "Non-blocking" can mean "non-blocking + silent" — silent failure is strictly worse than blocking loud failure | Where `log_inference` is spawned; whether spawn failures are observed; pool/semaphore saturation behavior; `testcontainers` wiring for postgres; snippet extraction exact rules | Integration + testcontainers: unreachable-backend test + cross-backend identity test | Asserting only "call returns Ok"; testing only the memory backend; treating "non-blocking" as "no error path needed" |
+| #6 | When snippet extraction processes prompts containing adversarial PII (email, name, SSN, phone), output contains zero PII patterns; error/log/tracing variants never include the full prompt body | "snippet length < full prompt length" is satisfied by truncation alone — doesn't prove PII is actually redacted | The snippet extraction function's exact rules; where error messages format; whether tracing spans include the full prompt body; the existing snippet-path test locations | Property tests with PII corpus; assert zero PII in output; assert no full prompt in error/log | Asserting only on length; checking only one PII pattern; tautological oracle (assertion lifted from implementation) |
+| #7 | All auth comparisons (proxy bearer token, dashboard basic auth, any new endpoint) use `constant_time_eq_str`; no auth path uses `==` on secret-derived strings | The constant-time rule was added by hand after a review — a future "convenience" revert to `==` is the realistic regression, not a new attack | All call sites of `constant_time_eq_str`; whether dashboard basic-auth uses it; whether any endpoint added since the last audit is gated | Unit test importing the function directly + grep-based CI guard that forbids `==` in auth comparison context | Testing only one token path (proves one comparison, not all); testing only the happy path |
 
 ## 3. Phased Rollout
 
 Each row is a discrete rollout phase that will open its own change folder
-via `/10x-new`. Status moves left-to-right through the values below; the
-orchestrator updates Status as artifacts appear on disk.
+via `/10x-new`. Status vocabulary (parser literals): `not started` → `change opened` → `researched` → `planned` → `implementing` → `complete`.
 
 | # | Phase name | Goal (one line) | Risks covered | Test types | Status | Change folder |
-|---|------------|------------------|----------------|------------|--------|----------------|
-| 1 | Critical-path regression guards | Defend Risk #1 + #2 at the cheapest layer; lock the chain-handoff contract and the F1–F4 invariants | #1, #2 | integration (chain escalation with mock backends), regression (invariant assertions on `completion_handler`) | complete | `testing-critical-path-regression-guards` |
-| 2 | Persistence + snippet guardrails | Make the NFR ("async logging failure does not block response") observable, and prove snippet extraction holds across all three backends + adversarial PII inputs | #3, #5, #6 | integration (`log_inference` against unreachable backend), testcontainers cross-backend, property tests on snippet extraction | not started | — |
-| 3 | Dashboard + auth coverage | Close the 0-test gap on `src/dashboard.rs` (4 routes + macro) and prove the constant-time compare invariant holds at every call site | #4, #7 | HTTP integration (dashboard routes via `test_app()`), unit (constant-time compare), grep-based guard | not started | — |
-| 4 | CI floor + cookbook | Wire `slow_tests` into a scheduled CI job, add a coverage-fail threshold, and update §6 cookbook with the patterns the rollout just shipped. Wire `just ci` and `just gates` into a new PR CI workflow; wire `just test-persistence-integration` into a workflow that provisions postgres via compose. | cross-cutting | gates + cookbook (no new test code) | not started | `cicd-dev-tooling` |
+|---|---|---|---|---|---|---|
+| 1 | Proxy translation contract tests | Lock translation correctness for all 3 protocol crossings (OpenAI↔Anthropic bidirectional + Responses→Chat) with known-good reference outputs + streaming edge-case resilience | #1, #4 | integration (translation contract), streaming edge-case | planned | `testing-proxy-translation-contracts` |
+| 2 | Classifier chain routing integrity | Prove the full chain→routing→translation path works across all 5 provider types; chain degradation is detectable without inspecting production traffic | #2, #3 | integration (chain-to-translation e2e with CountingClassifier + httpmock across provider types) | not started | — |
+| 3 | Persistence + snippet guardrails | Make async logging failure observable (not silent) + prove snippet extraction holds across all 3 backends and against adversarial PII inputs | #5, #6 | integration (unreachable backend), testcontainers cross-backend, property tests | not started | — |
+| 4 | Auth + CI floor + cookbook | Lock constant-time compare invariant at every call site + wire CI gates + update §6 cookbook with patterns shipped in Phases 1–3 | #7 | unit (constant-time compare), grep-based CI guard, CI workflow wiring | not started | — |
 
 ## 4. Stack
 
@@ -81,25 +80,23 @@ plus the MCP/tools actually exposed in the current session. If a useful docs
 or search MCP such as Context7 or Exa.ai is not available, say that instead
 of assuming access.
 
-| Layer                | Tool                | Version | Notes                                                                                            |
-|----------------------|---------------------|---------|--------------------------------------------------------------------------------------------------|
-| unit + integration   | built-in `#[test]` / `#[tokio::test]` | n/a     | Standard Rust test harness. Tests organized in `mod tests` and `mod slow_tests` per `AGENTS.md`. |
-| HTTP mocking         | `httpmock`          | 0.7     | For mocking upstream LLM endpoints. Listed under `[dev-dependencies]`.                            |
-| serial env tests     | `serial_test`       | 3       | For tests that touch process-wide env vars (e.g. `PROXY_API_BEARER_TOKEN`).                       |
-| integration containers | `testcontainers` | 0.27    | For spinning up real `postgres` / `sqlite` backends in cross-backend tests (Phase 2).            |
-| e2e                  | none yet            | n/a     | No e2e layer wired; integration via `test_app()` + axum `Request` covers proxy hot path. Compose + justfile gives a local e2e analog; CI e2e is out of scope. |
-| Local dev / OTel verification | Docker Compose v2 | 2.20+ | `docker-compose.yml` with postgres + OTel collector profiles |
-| accessibility        | not applicable      | n/a     | Operator-only dashboard; no end-user UI surface.                                                |
-| (optional) AI-native | not applicable      | n/a     | Deterministic gateway; no place for vision models. Cost × signal fails for an AI-native layer.   |
+| Layer | Tool | Version | Notes |
+|---|---|---|---|
+| unit + integration | built-in `#[test]` / `#[tokio::test]` | n/a | Standard Rust test harness. Tests organized inline in `mod tests` and `mod slow_tests` per `AGENTS.md`. |
+| HTTP mocking | `httpmock` | 0.7 | For mocking upstream LLM/provider endpoints. Listed under `[dev-dependencies]`. |
+| serial env tests | `serial_test` | 3 | For tests that touch process-wide env vars (e.g. `PROXY_API_BEARER_TOKEN`). |
+| integration containers | `testcontainers` | 0.27 | For spinning up real postgres backends in cross-backend tests (Phase 3). |
+| e2e | none yet | n/a | No e2e layer wired. Integration via `test_app()` + axum `Request::oneshot` covers the proxy hot path. |
+| Local dev / OTel | Docker Compose v2 | 2.20+ | `docker-compose.yml` with postgres + OTel collector profiles. |
 
 **Stack grounding tools (current session):**
-- Docs: **Context7 MCP exposed** (resolve-library-id + query-docs) — available for stack-sensitive test setup verification; checked: 2026-06-13
+- Docs: Context7 MCP exposed (resolve-library-id + query-docs) — available for stack-sensitive test setup; checked: 2026-06-30
 - Search: not available in current session
 - Runtime/browser: not available in current session
 - Provider/platform: not available in current session
 
 Use docs MCPs for current framework/library APIs and setup details. Use
-search MCPs to discovery or current status only, then prefer official docs
+search MCPs to discover current status only, then prefer official docs
 as the evidence. Do not use MCP docs/search to infer code failure anchors;
 those belong in per-phase `/10x-research`.
 
@@ -109,19 +106,22 @@ The full set of gates that must pass before a change reaches production.
 "Required for §3 Phase <N>" means the gate is enforced once that rollout
 phase lands; before that, the gate is `planned`.
 
-| Gate                          | Where             | Required?                       | Catches                                       |
-|-------------------------------|-------------------|----------------------------------|-----------------------------------------------|
-| lint + typecheck              | local + CI        | required; wired via `just lint-strict` and `just fmt-check` | syntactic / type drift                        |
-| unit + integration            | local + CI        | required (existing)              | logic regressions                             |
-| `slow_tests` group            | local only        | required after §3 Phase 4        | keepalive timing, real-delay behaviors        |
-| coverage threshold            | CI on PR          | required after §3 Phase 4        | silent loss of test coverage on critical paths |
-| dashboard route integration   | local + CI        | required after §3 Phase 3        | silent dashboard rendering breakage           |
-| constant-time compare guard   | local + CI (grep) | required after §3 Phase 3        | reversion of `constant_time_eq_str` to `==`   |
-| post-edit hook                | not applicable    | n/a                              | n/a — deterministic gateway                   |
-| visual diff (deterministic)   | not applicable    | n/a                              | n/a — explicitly out of scope (§7)            |
-| multimodal visual review      | not applicable    | n/a                              | n/a — no end-user visual surface              |
-| pre-prod smoke                | between merge + prod | required (existing)           | environment-specific failures                 |
-| PR CI workflow                | CI on PR          | required; catches lint+typecheck+test+slow+build+compose-services-up | gate regression before merge |
+| Gate | Where | Required? | Catches |
+|---|---|---|---|
+| lint + typecheck | local + CI | required (existing) | syntactic / type drift |
+| unit + integration | local + CI | required (existing) | logic regressions |
+| translation contract | local + CI | required after §3 Phase 1 | silent protocol translation corruption |
+| chain-to-translation integrity | local + CI | required after §3 Phase 2 | chain degradation + provider-type routing gaps |
+| `slow_tests` group | local only | required after §3 Phase 4 | keepalive timing, real-delay behaviors |
+| persistence integration (`testcontainers`) | CI (compose-backed) | required after §3 Phase 3 | cross-backend drift, silent logging failure |
+| snippet PII property tests | local + CI | required after §3 Phase 3 | PII leakage into persisted records |
+| constant-time compare guard | local + CI (grep) | required after §3 Phase 4 | reversion of `constant_time_eq_str` to `==` |
+| coverage threshold | CI on PR | required after §3 Phase 4 | silent loss of test coverage on critical paths |
+| post-edit hook | not applicable | n/a | n/a — deterministic gateway |
+| visual diff (deterministic) | not applicable | n/a | n/a — explicitly out of scope (§7) |
+| multimodal visual review | not applicable | n/a | n/a — no end-user visual surface |
+| pre-prod smoke | between merge + prod | required (existing) | environment-specific failures |
+| PR CI workflow | CI on PR | required | catches lint+typecheck+test+slow+build+compose-services-up |
 
 ## 6. Cookbook Patterns
 
@@ -131,41 +131,23 @@ the relevant rollout phase ships; before that, the sub-section reads
 
 ### 6.1 Adding a unit test
 
-- **Location**: same file as the unit under test, inside a `#[cfg(test)] mod tests` block (per `AGENTS.md` rule). Test-only backends shared across `mod tests` blocks (e.g. across files) live in a `pub(crate) mod test_util` sibling block, not duplicated.
-- **Naming**: `test_<unit>_<case>`.
-- **Side-effect observation**: when the unit under test is a `ClassifierChain`-style orchestrator that returns a `ClassificationResult` whose `tier` field cannot distinguish backends (e.g. `LLMClassifier` returns `tier: Regex` on success and `ClassificationTier` has only `Regex | FewShot | Fallback`), use a test-only `CountingClassifier` impl that holds `Arc<AtomicUsize>` + a configurable `ClassificationResult` and increments the counter on each `classify()` call. Assert on the counter — never on `tier` inspection.
- - **Reference test**: `CountingClassifier` in `src/intent_classifier.rs:739-770` (`pub(crate) mod test_util`) and the 3 stub-based 3-backend chain tests in `src/intent_classifier.rs:1103`, `:1152`, `:1206` (3-backend short-circuits-when-first-matches, short-circuits-when-middle-matches, returns-last-on-all-fallback).
-- **Run locally**: `just test TEST=<name>` for fast tests, `just test-slow` for slow tests (with `--test-threads=1`).
+TBD — existing pattern (inline `mod tests`, `test_<unit>_<case>`) documented in AGENTS.md. This section will be updated with any new patterns shipped in Phases 1–4.
 
 ### 6.2 Adding an integration test
 
-- **Location**: same file as the unit under test, inside `#[cfg(test)] mod tests`; use the shared `test_app()` / `test_app_with_classifier()` / `build_app_with_persistence_backend()` harness family (per `AGENTS.md`).
-- **Mocking policy**: mock only at the HTTP edge via `httpmock`. Never mock internal modules. For cross-backend DB work, use `testcontainers` (Phase 2). For in-memory persistence, use the refactored `build_app_with_persistence_backend(Arc<DbBackend>, ...)` — pass `DbBackend::Memory(MemoryBackend::new())` directly (no `DATABASE_URL` required, runs in default CI).
-- **Side-effect observation** (for orchestrator tests): use `CountingClassifier` from `intent_classifier::test_util` to assert on backend call counts after sending a real HTTP request.
- - **Reference test**: `test_chain_3_backend_escalates_to_llm` in `src/main.rs:3921` (wires a real `[RegexClassifier, CountingClassifier, LLMClassifier]` chain via `httpmock`, asserts the LLM is called exactly once and `CountingClassifier` counter is 1); and `test_snippet_path_truncates_to_200_chars` / `test_snippet_path_does_not_contain_full_prompt` / `test_log_classification_failure_does_not_block_response` in `src/main.rs:5010`, `:5067`, `:5150` (snippet-path F1 invariants via real axum stack + in-memory backend).
-- **Run locally**: `just test TEST=<name>`.
+TBD — see §3 Phase 1 for translation contract test patterns; Phase 2 for chain-to-translation patterns; Phase 3 for persistence patterns.
 
-### 6.3 Adding an e2e test
+### 6.3 Adding a streaming / SSE test
 
- - **No e2e layer is wired in this project today** (and none is on the roadmap — see §3 Phase 4). The de facto e2e analog is the `test_app()` / `test_app_with_classifier()` / `build_app_with_persistence_backend()` harness family in `src/main.rs:3684`, `:3716`, `:5898`, which spins up the full axum stack (router, middleware, `AppState`, classifier chain, persistence backend) in-process and exercises it via `tower::ServiceExt::oneshot` requests.
-- **When to add a new harness variant** vs. reuse `test_app()`: add a new variant when you need (a) a non-default `AppState` field (e.g. a real `FewShotClassifier` or non-empty `routing` map), or (b) a real `DbBackend` for snippet-path tests. The naming convention is `test_app_with_<discriminator>` (e.g. `test_app_with_classifier`, `build_app_with_persistence_backend`).
- - **Reference test**: `test_chain_3_backend_escalates_to_llm` in `src/main.rs:3921` (uses `test_app_with_classifier()` at `:3716`); `test_snippet_path_truncates_to_200_chars` in `src/main.rs:5010` (uses `build_app_with_persistence_backend()` at `:5898` with `DbBackend::Memory`).
-- **Run locally**: `just test TEST=<name>`.
+TBD — see §3 Phase 1 for malformed-SSE edge-case patterns.
 
-### 6.4 Adding a test for a new API endpoint
+### 6.4 Adding a property test
 
-- **Pattern**: build a test app via `test_app_with_classifier()` (or a harness variant from §6.3); build a `tower::ServiceExt::oneshot` request to the new endpoint's path; assert on response status, response body (parse as JSON via `serde_json::from_str` rather than substring-match — see the `parse_json_body` helper in `src/main.rs` mod tests), and on any side-effect-relevant state (backend call counts, persisted records, emitted log events).
-- **Authentication**: every endpoint test must include a `Bearer <token>` header (or basic-auth header for dashboard routes) and at least one negative test that omits the header and asserts 401. Reuse `AuthConfig::from_values("proxy-token", "user", "password")` from `src/auth.rs` for the harness; do not reimplement the auth check in the test.
- - **Reference test**: `test_chain_3_backend_escalates_to_llm` in `src/main.rs:3921` (exercises `/v1/chat/completions` and the chain's escalation logic); `test_snippet_path_truncates_to_200_chars` in `src/main.rs:5010` (exercises the snippet path through `log_classification` → `log_inference` → `MemoryBackend::insert_inference`).
-- **Run locally**: `just test TEST=<name>`.
+TBD — see §3 Phase 3 for PII-snippet extraction property-test patterns.
 
-### 6.5 Adding a test for a new classifier backend
+### 6.5 Adding a grep-based CI guard
 
-- **Pattern**: define a test-only `IntentClassify` impl in a `pub(crate) mod test_util` block (sibling to `mod tests`) in the same file as the production classifier subsystem (`src/intent_classifier.rs`). Hold an `Arc<AtomicUsize>` counter and a configurable `ClassificationResult`; impl `IntentClassify::classify()` to increment the counter and return the configured result. The struct must be `Send + Sync + 'static` to fit in `ClassifierChain::new(backends: Vec<Arc<dyn IntentClassify + Send + Sync>>)`.
-- **Wiring**: pass `Arc::new(<YourBackend> { ... })` into `ClassifierChain::new(vec![arc1, arc2, arc3])` (see `src/intent_classifier.rs:147`); assert on `backend.counter.load(Ordering::SeqCst)` after `chain.classify(&prompt).await`.
-- **Why side-effect observation, not tier inspection**: `LLMClassifier` returns `tier: ClassificationTier::Regex` on success and the `ClassificationTier` enum has only `Regex | FewShot | Fallback` (no `Llm` variant). Tier inspection cannot distinguish "regex matched" from "LLM matched" — the counter is the only honest signal.
- - **Reference test**: `CountingClassifier` in `src/intent_classifier.rs:739-770` (`pub(crate) mod test_util`); chain-wired examples in `src/intent_classifier.rs:1103`, `:1152`, `:1206` (3-backend stub scenarios) and `src/main.rs:3921` (real-axum-stack chain integration test).
-- **Run locally**: `just test TEST=<name>`.
+TBD — see §3 Phase 4 for constant-time-compare guard pattern.
 
 ### 6.6 Per-rollout-phase notes
 
@@ -176,13 +158,13 @@ the relevant rollout phase ships; before that, the sub-section reads
 Exclusions agreed during the rollout (Phase 2 interview, Q5). Future
 contributors should respect these unless the underlying assumption changes.
 
-- **Visual diff / snapshot on dashboard CSS** (572 lines, Q5) — CSS class names change frequently and snapshots would fail for cosmetic reasons. Use HTTP integration that asserts on response status, content-type, and presence of key template fragments, not on rendered pixels or full HTML strings. Re-evaluate if the dashboard gains a real end-user surface or a visual-regression budget is explicitly approved. (Source: Phase 2 interview Q5.)
+- **Visual diff / snapshot on dashboard CSS and UI** — CSS and template structure change frequently; visual snapshots would break for cosmetic reasons. Use HTTP integration that asserts on response status, content-type, and presence of key template fragments, not on rendered pixels or full HTML strings. Re-evaluate if the dashboard gains a real end-user surface. (Source: Phase 2 interview Q5.)
 
 ## 8. Freshness Ledger
 
-- Strategy (§1–§5) last reviewed: 2026-06-24
-- Stack versions last verified: 2026-06-24
-- AI-native tool references last verified: 2026-06-13 (none — see §4)
+- Strategy (§1–§5) last reviewed: 2026-06-30
+- Stack versions last verified: 2026-06-30
+- AI-native tool references last verified: 2026-06-30 (none — see §4)
 
 Refresh (`/10x-test-plan --refresh`) when:
 

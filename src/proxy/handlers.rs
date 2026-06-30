@@ -2874,6 +2874,24 @@ mod tests {
             Some(5)
         );
         assert_eq!(usage.get("total_tokens").and_then(|v| v.as_u64()), Some(15));
+        assert_eq!(
+            choices[0]
+                .get("message")
+                .and_then(|m| m.get("role"))
+                .and_then(|v| v.as_str()),
+            Some("assistant")
+        );
+        assert!(json.get("model").and_then(|v| v.as_str()).is_some());
+        let id = json.get("id").and_then(|v| v.as_str()).expect("id field");
+        assert!(!id.is_empty());
+        assert!(
+            json.get("type").is_none(),
+            "Anthropic 'type' field should not leak into OpenAI Chat response"
+        );
+        assert!(
+            json.get("stop_reason").is_none(),
+            "Anthropic 'stop_reason' field should not leak into OpenAI Chat response"
+        );
     }
 
     #[tokio::test]
@@ -2972,6 +2990,79 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn test_completion_handler_anthropic_streaming_full_sequence() {
+        let env = "TEST_O2A_FULL_STREAM";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"sf-model\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello \"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"world\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me think step by step\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"get_weather\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"London\\\"}\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":2}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":25}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"stream":true}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some("text/event-stream")
+        );
+        mock.assert();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let body_str = std::str::from_utf8(&body_bytes).expect("body should be UTF-8");
+        assert!(body_str.contains("\"role\":\"assistant\""));
+        assert!(body_str.contains("\"content\":\"Hello \""));
+        assert!(body_str.contains("\"content\":\"world\""), "Hello world text split across SSE events");
+        assert!(body_str.contains("\"reasoning_content\":\"Let me think step by step\""));
+        assert!(body_str.contains("\"tool_calls\""));
+        assert!(body_str.contains("\"id\":\"toolu_1\""));
+        assert!(body_str.contains("\"name\":\"get_weather\""));
+        assert!(body_str.contains("\"arguments\":\"{\\\"city\\\":\\\"London\\\"}\""));
+        assert!(body_str.contains("\"finish_reason\":\"stop\""));
+        assert!(body_str.contains(r#""prompt_tokens":10"#));
+        assert!(body_str.contains(r#""completion_tokens":25"#));
+        assert!(body_str.contains(r#""total_tokens":35"#));
+        assert!(body_str.contains("[DONE]"));
+        assert!(!body_str.contains("event: message_start"), "Anthropic event type should not leak");
+        assert!(!body_str.contains("event: content_block"), "Anthropic event type should not leak");
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn test_completion_handler_anthropic_error() {
         let env = "TEST_TRANSLATE_O2A_ERR";
         let _guard = EnvGuard(env);
@@ -2999,6 +3090,86 @@ mod tests {
             error.get("message").and_then(|v| v.as_str()),
             Some("Too many requests")
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_anthropic_tool_use_translation() {
+        let env = "TEST_O2A_TOOL_USE";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-ant-test");
+        let (app, server) = test_app_with_anthropic_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/messages").header("x-api-key", "sk-ant-test");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"msg_t1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_abc","name":"get_weather","input":{"city":"London"}}],"stop_reason":"tool_use","usage":{"input_tokens":15,"output_tokens":10}}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"max_tokens":100}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        let json = parse_json_body(response).await;
+        let choices = json.get("choices").and_then(|v| v.as_array()).expect("choices array");
+        let message = choices[0].get("message").expect("message field");
+        let tool_calls = message.get("tool_calls").and_then(|v| v.as_array()).expect("tool_calls array");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].get("id").and_then(|v| v.as_str()),
+            Some("toolu_abc")
+        );
+        let func = tool_calls[0].get("function").expect("function field");
+        assert_eq!(
+            func.get("name").and_then(|v| v.as_str()),
+            Some("get_weather")
+        );
+        assert_eq!(
+            func.get("arguments").and_then(|v| v.as_str()),
+            Some(r#"{"city":"London"}"#)
+        );
+        assert_eq!(
+            choices[0].get("finish_reason").and_then(|v| v.as_str()),
+            Some("tool_calls")
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_openai_buffered_response_shape() {
+        let env = "TEST_OPENAI_BUF";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-openai-test");
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions").header("Authorization", "Bearer sk-openai-test");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"chatcmpl-abc","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"Hello world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#);
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug"}],"max_tokens":100}"#)).expect("request should be valid"),
+        ).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("object").and_then(|v| v.as_str()),
+            Some("chat.completion")
+        );
+        let choices = json.get("choices").and_then(|v| v.as_array()).expect("choices array");
+        assert!(!choices.is_empty());
+        assert_eq!(
+            choices[0].get("message").and_then(|m| m.get("role")).and_then(|v| v.as_str()),
+            Some("assistant")
+        );
+        let usage = json.get("usage").expect("usage field");
+        assert!(usage.get("prompt_tokens").and_then(|v| v.as_u64()).is_some());
+        assert!(usage.get("completion_tokens").and_then(|v| v.as_u64()).is_some());
+        assert!(usage.get("total_tokens").and_then(|v| v.as_u64()).is_some());
+        assert!(json.get("model").and_then(|v| v.as_str()).is_some());
     }
 
     fn test_app_with_openai_translation(env_var_name: &str) -> (Router, httpmock::MockServer) {
@@ -3139,6 +3310,11 @@ mod tests {
             "end_turn"
         );
         let content = body.get("content").unwrap().as_array().unwrap();
+        assert!(!content.is_empty());
+        assert_eq!(
+            content[0].get("type").and_then(|v| v.as_str()),
+            Some("text")
+        );
         assert_eq!(
             content[0].get("text").unwrap().as_str().unwrap(),
             "Hello from OpenAI"
@@ -3146,6 +3322,46 @@ mod tests {
         let usage = body.get("usage").unwrap();
         assert_eq!(usage.get("input_tokens").unwrap().as_u64().unwrap(), 10);
         assert_eq!(usage.get("output_tokens").unwrap().as_u64().unwrap(), 5);
+        assert!(
+            body.get("object").is_none(),
+            "OpenAI 'object' field should not leak into Anthropic response"
+        );
+        assert!(
+            body.get("choices").is_none(),
+            "OpenAI 'choices' field should not leak into Anthropic response"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_openai_translation_request_body() {
+        let env = "TEST_A2O_REQ_BODY";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-openai-test");
+        let (app, server) = test_app_with_openai_translation(env);
+        let positive = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions")
+                .header("Authorization", "Bearer sk-openai-test")
+                .body_contains(r#""messages""#)
+                .body_contains(r#""system""#)
+                .body_contains(r#""max_tokens""#);
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"chatcmpl-xyz","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#);
+        });
+        let no_cache = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions")
+                .body_contains(r#"cache_control"#);
+            then.status(200).body("cache_control should have been stripped");
+        });
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .header("x-frugalis-category", "SYNTAX_FIX").header("x-frugalis-model", "gpt-4o")
+                .body(Body::from(r#"{"model":"claude-3.5","max_tokens":1024,"messages":[{"role":"user","content":"fix this bug"}],"system":[{"type":"text","text":"You are helpful."}]}"#)).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(positive.hits(), 1, "positive mock should have matched the translated request");
+        assert_eq!(no_cache.hits(), 0, "cache_control should have been stripped from the translated body");
     }
 
     #[tokio::test]
@@ -3174,13 +3390,19 @@ mod tests {
             .await
             .unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
-        assert!(body_str.contains("event: message_start"));
+        assert!(body_str.contains("event: message_start"), "output should start with message_start");
+        assert!(body_str.contains(r#""type":"message_start""#));
+        assert!(body_str.contains(r#""message":{"#));
         assert!(body_str.contains("event: content_block_start"));
-        assert!(body_str.contains("text_delta"));
-        assert!(body_str.contains("Hi"));
+        assert!(body_str.contains(r#"content_block"#));
+        assert!(body_str.contains(r#""type":"text""#));
+        assert!(body_str.contains(r#""text":"Hi""#));
+        assert!(body_str.contains(r#""type":"text_delta""#));
         assert!(body_str.contains("event: message_delta"));
-        assert!(body_str.contains("end_turn"));
+        assert!(body_str.contains(r#""stop_reason":"end_turn""#));
         assert!(body_str.contains("event: message_stop"));
+        assert!(!body_str.contains("choices"), "OpenAI Chat fields should not leak into Anthropic output");
+        assert!(!body_str.contains("finish_reason"), "OpenAI Chat fields should not leak into Anthropic output");
     }
 
     #[tokio::test]
