@@ -404,7 +404,7 @@ pub(crate) async fn responses_handler(
                     } else {
                         None
                     };
-                    crate::proxy::util::log_classification_with_usage(
+                    crate::proxy::util::log_classification_with_usage_and_prev(
                         &state,
                         &classification,
                         &body_str,
@@ -415,6 +415,7 @@ pub(crate) async fn responses_handler(
                         &provider.model,
                         usage.as_ref(),
                         session_id,
+                        extras.previous_response_id.as_deref(),
                     );
 
                     if !upstream_status.is_success() {

@@ -33,6 +33,7 @@ enum Inferences {
     CacheReadTokens,
     CacheCreationTokens,
     ClientSessionId,
+    PreviousResponseId,
 }
 
 /// Database dialect selector.
@@ -204,7 +205,8 @@ impl SqlBackend {
               output_tokens INTEGER, \
               cache_read_tokens INTEGER, \
               cache_creation_tokens INTEGER, \
-              client_session_id TEXT)",
+              client_session_id TEXT, \
+              previous_response_id TEXT)",
         )
         .execute(pool)
         .await
@@ -335,6 +337,7 @@ impl PersistenceBackend for SqlBackend {
                 Inferences::DurationMs,
                 Inferences::ProviderAttempts,
                 Inferences::FinalProvider,
+                Inferences::PreviousResponseId,
             ])
             .from(Inferences::Table)
             .order_by(Inferences::CreatedAt, sea_query::Order::Desc)
@@ -369,7 +372,8 @@ impl PersistenceBackend for SqlBackend {
                     let duration_ms: Option<i32> = row.try_get("duration_ms")?;
                     let provider_attempts: Option<i16> = row.try_get("provider_attempts")?;
                     let final_provider: Option<String> = row.try_get("final_provider")?;
-                    Ok(InferenceLog { timestamp, prompt_snippet, category, upstream_model, duration_ms, provider_attempts, final_provider })
+                    let previous_response_id: Option<String> = row.try_get("previous_response_id")?;
+                    Ok(InferenceLog { timestamp, prompt_snippet, category, upstream_model, duration_ms, provider_attempts, final_provider, previous_response_id })
                 }).collect::<Result<Vec<_>, sqlx::Error>>().map_err(|e| QueryError(e.to_string()))?;
 
                 Ok((records, total_count))
@@ -391,7 +395,8 @@ impl PersistenceBackend for SqlBackend {
                     let duration_ms: Option<i32> = row.try_get("duration_ms")?;
                     let provider_attempts: Option<i16> = row.try_get("provider_attempts")?;
                     let final_provider: Option<String> = row.try_get("final_provider")?;
-                    Ok(InferenceLog { timestamp, prompt_snippet, category, upstream_model, duration_ms, provider_attempts, final_provider })
+                    let previous_response_id: Option<String> = row.try_get("previous_response_id")?;
+                    Ok(InferenceLog { timestamp, prompt_snippet, category, upstream_model, duration_ms, provider_attempts, final_provider, previous_response_id })
                 }).collect::<Result<Vec<_>, sqlx::Error>>().map_err(|e| QueryError(e.to_string()))?;
 
                 Ok((records, total_count))

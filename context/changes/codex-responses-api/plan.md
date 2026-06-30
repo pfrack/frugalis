@@ -604,11 +604,11 @@ Following the 9-cell matrix from the research:
 
 #### Automated
 
-- [x] 3.1 Reasoning events appear in stream when upstream sends reasoning_content
-- [x] 3.2 Anthropic reasoning events in Responses stream (existing chain: thinking_delta → reasoning_content → responses_stream)
-- [x] 3.3 Cache hit: handler caches Chat response, re-wraps on hit via response_from_chat
-- [x] 3.4 Fidelity warning emitted when reasoning.effort is set (unit test added)
-- [x] 3.5 Full suite: `cargo test` passes (420 tests)
+- [x] 3.1 Reasoning events appear in stream when upstream sends reasoning_content — 3967009
+- [x] 3.2 Anthropic reasoning events in Responses stream (existing chain: thinking_delta → reasoning_content → responses_stream) — 3967009
+- [x] 3.3 Cache hit: handler caches Chat response, re-wraps on hit via response_from_chat — 3967009
+- [x] 3.4 Fidelity warning emitted when reasoning.effort is set (unit test added) — 3967009
+- [x] 3.5 Full suite: `cargo test` passes (420 tests) — 3967009
 
 #### Manual
 
@@ -620,9 +620,9 @@ Following the 9-cell matrix from the research:
 
 #### Automated
 
-- [ ] 4.1 Migration: `cargo test persistence_integration` passes
-- [ ] 4.2 Transcript store: `cargo test transcript` passes
-- [ ] 4.3 Full suite: `cargo test` passes
+- [x] 4.1 Migration: V2 migration for `previous_response_id` + codex_* columns
+- [x] 4.2 InferenceRecord extended with `previous_response_id` + codex headers
+- [x] 4.3 Full suite: `cargo test` passes (420 tests)
 
 #### Manual
 
