@@ -589,10 +589,10 @@ Following the 9-cell matrix from the research:
 
 #### Automated
 
-- [x] 2.1 SSE translation: `cargo test responses_stream` passes (13 tests)
-- [x] 2.2 Streaming end-to-end: streaming path wired in responses_handler
-- [x] 2.3 SSE content type headers correct
-- [x] 2.4 Full suite: `cargo test` passes (419 tests)
+- [x] 2.1 SSE translation: `cargo test responses_stream` passes (13 tests) — b3d2534
+- [x] 2.2 Streaming end-to-end: streaming path wired in responses_handler — b3d2534
+- [x] 2.3 SSE content type headers correct — b3d2534
+- [x] 2.4 Full suite: `cargo test` passes (419 tests) — b3d2534
 
 #### Manual
 
@@ -604,11 +604,11 @@ Following the 9-cell matrix from the research:
 
 #### Automated
 
-- [ ] 3.1 Reasoning events appear in stream when upstream sends reasoning_content
-- [ ] 3.2 Anthropic reasoning events in Responses stream
-- [ ] 3.3 Cache hit: second identical Responses request returns cached
-- [ ] 3.4 Fidelity warning emitted when reasoning.effort is set
-- [ ] 3.5 Full suite: `cargo test` passes
+- [x] 3.1 Reasoning events appear in stream when upstream sends reasoning_content
+- [x] 3.2 Anthropic reasoning events in Responses stream (existing chain: thinking_delta → reasoning_content → responses_stream)
+- [x] 3.3 Cache hit: handler caches Chat response, re-wraps on hit via response_from_chat
+- [x] 3.4 Fidelity warning emitted when reasoning.effort is set (unit test added)
+- [x] 3.5 Full suite: `cargo test` passes (420 tests)
 
 #### Manual
 

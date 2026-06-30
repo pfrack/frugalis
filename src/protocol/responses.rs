@@ -885,6 +885,17 @@ mod tests {
     }
 
     #[test]
+    fn test_request_to_chat_reasoning_effort_fidelity_warning() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let body = parse_json(
+            r#"{"model":"gpt-4o","input":"hello","reasoning":{"effort":"medium"}}"#,
+        );
+        let (chat, extras) = request_to_chat(&body).unwrap();
+        assert_eq!(extras.reasoning_effort, Some("medium".to_string()));
+        assert!(chat.get("reasoning").is_none());
+    }
+
+    #[test]
     fn test_request_to_chat_store_true_warns() {
         let body = parse_json(
             r#"{"model":"gpt-4o","input":"hello","store":true}"#,
