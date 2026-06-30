@@ -11,6 +11,7 @@ Single-file integration test suite for Frugalis. Tests the running server from t
 ./scripts/test.sh --interactive # manual testing (server must be running)
 ./scripts/test.sh --anthropic  # anthropic pass-through interactive
 ./scripts/test.sh --fewshot    # few-shot classifier interactive
+./scripts/test.sh --codex      # codex CLI E2E (server + codex CLI must be running)
 ```
 
 ## Prerequisites

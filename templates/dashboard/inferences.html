@@ -51,6 +51,7 @@
       <th>Category</th>
       <th>Model</th>
       <th>Provider</th>
+      <th>Prev Resp</th>
       <th style="text-align:right;">Attempts</th>
       <th style="text-align:right;">Duration</th>
     </tr>
@@ -73,6 +74,9 @@
       </td>
       <td>
         {% if let Some(provider) = record.final_provider %}<span class="muted" style="font-size:12px;">{{ provider|e }}</span>{% else %}<span class="muted">&mdash;</span>{% endif %}
+      </td>
+      <td>
+        {% if let Some(prev) = record.previous_response_id %}<span class="muted" style="font-size:11px;">{{ prev|e }}</span>{% else %}<span class="muted">&mdash;</span>{% endif %}
       </td>
       <td style="text-align:right;white-space:nowrap;">
         {% if let Some(attempts) = record.provider_attempts %}{% if *attempts > 1 %}<span class="badge" style="background:rgba(255,149,0,0.15);color:#ff9500;">{{ attempts }}</span>{% else %}<span class="muted" style="font-size:12px;">{{ attempts }}</span>{% endif %}{% else %}<span class="muted">&mdash;</span>{% endif %}

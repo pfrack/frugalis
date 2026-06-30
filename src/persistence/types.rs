@@ -49,6 +49,8 @@ pub struct InferenceLog {
     pub provider_attempts: Option<i16>,
     #[allow(dead_code)] // read by Askama template (inferences.html:75); rustc can't see template-generated reads
     pub final_provider: Option<String>,
+    #[allow(dead_code)] // read by Askama template
+    pub previous_response_id: Option<String>,
 }
 
 /// Per-category latency statistics produced by `fetch_latency_summary`.
@@ -131,6 +133,18 @@ pub struct InferenceRecord {
     /// Claude Code session id from `x-claude-code-session-id`, for per-session
     /// attribution. `None` when the header was absent.
     pub client_session_id: Option<String>,
+    /// Responses API `previous_response_id` for multi-turn attribution.
+    /// `None` when the request was not a Responses-API request or had no
+    /// previous response id.
+    pub previous_response_id: Option<String>,
+    /// Codex installation id from `x-codex-installation-id`.
+    pub codex_installation_id: Option<String>,
+    /// Codex turn state from `x-codex-turn-state`.
+    pub codex_turn_state: Option<String>,
+    /// Codex window id from `x-codex-window-id`.
+    pub codex_window_id: Option<String>,
+    /// Codex turn metadata from `x-codex-turn-metadata`.
+    pub codex_turn_metadata: Option<String>,
 }
 
 /// Extract the last user message from an OpenAI-compatible `{"messages":[...]}` body.
@@ -232,6 +246,55 @@ pub fn extract_last_user_message_anthropic(body: &str) -> String {
                 "could not extract user message from Anthropic request body; storing empty prompt"
             );
             String::new()
+        }
+    }
+}
+
+/// Extract the last user message from an OpenAI Responses API request body.
+///
+/// Responses API bodies have `input` (string or array of items) instead of
+/// `messages`. For string input, returns the string itself. For array input,
+/// finds the last `message` item with `role: "user"`. Returns `""` on failure.
+/// Caps at 10,000 characters. Never panics.
+pub fn extract_last_user_message_responses(body: &str, parsed: &serde_json::Value) -> String {
+    let result: Option<String> = (|| {
+        let input = parsed.get("input")?;
+        match input {
+            serde_json::Value::String(s) => Some(s.chars().take(10_000).collect()),
+            serde_json::Value::Array(items) => {
+                let last_user = items.iter().rev().find(|item| {
+                    item.get("type").and_then(|t| t.as_str()) == Some("message")
+                        && item.get("role").and_then(|r| r.as_str()) == Some("user")
+                })?;
+                let content = last_user.get("content")?;
+                match content {
+                    serde_json::Value::String(s) => Some(s.chars().take(10_000).collect()),
+                    serde_json::Value::Array(blocks) => {
+                        let mut parts = Vec::new();
+                        for block in blocks {
+                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                parts.push(text);
+                            }
+                        }
+                        Some(parts.join(" ").chars().take(10_000).collect())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    })();
+
+    match result {
+        Some(s) => s,
+        None => {
+            // Fall back to legacy extractor for Chat-shaped responses bodies
+            // that were forwarded from the cache.
+            let fallback = extract_last_user_message(body);
+            if fallback.is_empty() {
+                tracing::warn!("could not extract user message from Responses request body; storing empty prompt");
+            }
+            fallback
         }
     }
 }

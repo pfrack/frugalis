@@ -609,6 +609,7 @@ pub(crate) async fn completion_handler(
                                         crate::cache::CachedEntry {
                                             body: response_body.clone(),
                                             status: status.as_u16(),
+                                            response_id: String::new(),
                                         },
                                     );
                                 }
@@ -852,6 +853,7 @@ pub(crate) async fn completion_handler(
                                         crate::cache::CachedEntry {
                                             body: resp_body.clone(),
                                             status: status.as_u16(),
+                                            response_id: String::new(),
                                         },
                                 );
                             }
@@ -1515,6 +1517,7 @@ pub(crate) async fn messages_handler(
                                         crate::cache::CachedEntry {
                                             body: resp_body.clone(),
                                             status: status.as_u16(),
+                                            response_id: String::new(),
                                         },
                                 );
                             }
