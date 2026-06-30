@@ -1704,8 +1704,8 @@ mod tests {
     use crate::app::build_app;
     use crate::app::test_helpers::{
         make_test_app_state, parse_json_body, test_app, test_app_with_anthropic_http_client,
-        test_app_with_classifier, test_app_with_http_client, test_categories,
-        test_negative_patterns,
+        test_app_with_classifier, test_app_with_http_client, test_app_with_nim_http_client,
+        test_app_with_ollama_http_client, test_categories, test_negative_patterns,
     };
     use crate::test_util::EnvGuard;
     use crate::{classification, routing};
@@ -3281,7 +3281,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn test_messages_handler_openai_translation_non_streaming() {
+    async fn test_messages_handler_openai_translation_buffered() {
         let env = "TEST_A2O_NS";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-openai-test");
@@ -3439,5 +3439,168 @@ mod tests {
             error.get("message").unwrap().as_str().unwrap(),
             "Rate limit exceeded"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_nvidia_nim_passthrough() {
+        let env = "TEST_NIM_PASS";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_nim_http_client(env, 10_485_760);
+
+        let no_top_k = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions").body_contains("\"top_k\"");
+            then.status(200).body("canary");
+        });
+        let no_metadata = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions").body_contains("\"metadata\"");
+            then.status(200).body("canary");
+        });
+        let no_thinking = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions").body_contains("\"thinking\"");
+            then.status(200).body("canary");
+        });
+        let positive = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"chatcmpl-nim","object":"chat.completion","model":"sf-model","choices":[{"index":0,"message":{"role":"assistant","content":"NIM response"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#);
+        });
+
+        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug with NIM"}],"top_k":50,"metadata":{"foo":"bar"},"thinking":{"type":"enabled","budget_tokens":1000}}"#;
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body)).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(no_top_k.hits(), 0, "top_k should be stripped by sanitize_for_nim");
+        assert_eq!(no_metadata.hits(), 0, "metadata should be stripped by sanitize_for_nim");
+        assert_eq!(no_thinking.hits(), 0, "thinking should be stripped by sanitize_for_nim");
+        assert_eq!(positive.hits(), 1, "request should reach mock server");
+
+        let json = parse_json_body(response).await;
+        assert_eq!(json.get("object").and_then(|v| v.as_str()), Some("chat.completion"));
+        let choices = json.get("choices").and_then(|v| v.as_array()).expect("choices array");
+        assert!(!choices.is_empty());
+        assert_eq!(choices[0].get("message").and_then(|m| m.get("content")).and_then(|v| v.as_str()), Some("NIM response"));
+        let usage = json.get("usage").expect("usage field");
+        assert!(usage.get("prompt_tokens").and_then(|v| v.as_u64()).is_some());
+        assert!(usage.get("completion_tokens").and_then(|v| v.as_u64()).is_some());
+        assert!(usage.get("total_tokens").and_then(|v| v.as_u64()).is_some());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_completion_handler_ollama_passthrough() {
+        let env = "TEST_OLLAMA_PASS";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_ollama_http_client(env, 10_485_760);
+
+        let positive = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"chatcmpl-ol","object":"chat.completion","model":"sf-model","choices":[{"index":0,"message":{"role":"assistant","content":"Ollama response"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}"#);
+        });
+
+        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"fix this bug with ollama"}],"max_tokens":50}"#;
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body)).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(positive.hits(), 1);
+
+        let json = parse_json_body(response).await;
+        assert_eq!(json.get("object").and_then(|v| v.as_str()), Some("chat.completion"));
+        let choices = json.get("choices").and_then(|v| v.as_array()).expect("choices array");
+        assert!(!choices.is_empty());
+        assert_eq!(choices[0].get("message").and_then(|m| m.get("content")).and_then(|v| v.as_str()), Some("Ollama response"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_nvidia_nim_translation() {
+        let env = "TEST_NIM_MSG";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_nim_http_client(env, 10_485_760);
+
+        let no_thinking = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions").body_contains("\"thinking\"");
+            then.status(200).body("canary");
+        });
+        let positive = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"chatcmpl-nim","object":"chat.completion","model":"sf-model","choices":[{"index":0,"message":{"role":"assistant","content":"NIM translated"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}"#);
+        });
+
+        let body = r#"{"model":"claude-3.5","max_tokens":1024,"messages":[{"role":"user","content":"fix this bug with nim"}]}"#;
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .header("x-frugalis-category", "SYNTAX_FIX").header("x-frugalis-model", "sf-model")
+                .body(Body::from(body)).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(no_thinking.hits(), 0, "translated body should not contain Anthropic-specific fields");
+        assert_eq!(positive.hits(), 1);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("message"));
+        assert_eq!(json.get("role").and_then(|v| v.as_str()), Some("assistant"));
+        let content = json.get("content").and_then(|v| v.as_array()).expect("content array");
+        assert!(!content.is_empty());
+        assert_eq!(content[0].get("type").and_then(|v| v.as_str()), Some("text"));
+        let usage = json.get("usage").expect("usage field");
+        assert!(usage.get("input_tokens").and_then(|v| v.as_u64()).is_some());
+        assert!(usage.get("output_tokens").and_then(|v| v.as_u64()).is_some());
+        assert!(json.get("stop_reason").and_then(|v| v.as_str()).is_some());
+        assert!(json.get("object").is_none(), "OpenAI object field should not leak");
+        assert!(json.get("choices").is_none(), "OpenAI choices field should not leak");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_messages_handler_ollama_translation() {
+        let env = "TEST_OLLAMA_MSG";
+        let _guard = EnvGuard(env);
+        std::env::set_var(env, "sk-test");
+        let (app, server) = test_app_with_ollama_http_client(env, 10_485_760);
+
+        let positive = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200).header("content-type", "application/json")
+                .body(r#"{"id":"chatcmpl-ol","object":"chat.completion","model":"sf-model","choices":[{"index":0,"message":{"role":"assistant","content":"Ollama translated"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":3,"total_tokens":9}}"#);
+        });
+
+        let body = r#"{"model":"claude-3.5","max_tokens":1024,"messages":[{"role":"user","content":"fix this bug with ollama"}]}"#;
+        let response = app.oneshot(
+            Request::builder().method("POST").uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer proxy-token").header(header::CONTENT_TYPE, "application/json")
+                .header("x-frugalis-category", "SYNTAX_FIX").header("x-frugalis-model", "sf-model")
+                .body(Body::from(body)).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(positive.hits(), 1);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("message"));
+        assert_eq!(json.get("role").and_then(|v| v.as_str()), Some("assistant"));
+        let content = json.get("content").and_then(|v| v.as_array()).expect("content array");
+        assert!(!content.is_empty());
+        assert_eq!(content[0].get("type").and_then(|v| v.as_str()), Some("text"));
+        assert_eq!(content[0].get("text").and_then(|v| v.as_str()), Some("Ollama translated"));
+        let usage = json.get("usage").expect("usage field");
+        assert!(usage.get("input_tokens").and_then(|v| v.as_u64()).is_some());
+        assert!(usage.get("output_tokens").and_then(|v| v.as_u64()).is_some());
+        assert!(json.get("stop_reason").and_then(|v| v.as_str()).is_some());
+        assert!(json.get("object").is_none(), "OpenAI object field should not leak");
+        assert!(json.get("choices").is_none(), "OpenAI choices field should not leak");
     }
 }
