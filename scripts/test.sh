@@ -11,6 +11,7 @@ set -euo pipefail
 #   ./scripts/test.sh --interactive # Interactive manual testing (server running)
 #   ./scripts/test.sh --anthropic  # Anthropic pass-through interactive
 #   ./scripts/test.sh --fewshot    # Few-shot classifier interactive
+#   ./scripts/test.sh --codex      # Codex CLI E2E (server + codex CLI must be running)
 #   ./scripts/test.sh --help       # Show this help
 # ============================================================================
 
@@ -33,6 +34,7 @@ HEALTH_URL="http://$HOST/health"
 CLASSIFY_URL="http://$HOST/v1/classify"
 COMPLETION_URL="http://$HOST/v1/chat/completions"
 MESSAGES_URL="http://$HOST/v1/messages"
+RESPONSES_URL="http://$HOST/v1/responses"
 TOKEN="${PROXY_API_BEARER_TOKEN:-test-token-123}"
 
 PASS=0
@@ -157,14 +159,16 @@ if [ $# -gt 0 ]; then
         --interactive|-i) MODE="interactive" ;;
         --anthropic)      MODE="anthropic" ;;
         --fewshot|-f)     MODE="fewshot" ;;
+        --codex)          MODE="codex" ;;
         --help|-h)
-            echo "Usage: $0 [--basic|--cache|--interactive|--anthropic|--fewshot]"
+            echo "Usage: $0 [--basic|--cache|--interactive|--anthropic|--fewshot|--codex]"
             echo "  (default)      full automated suite"
             echo "  --basic        quick smoke: health, auth, classify, shutdown"
             echo "  --cache        cache tests: TTL, bypass, streaming, dashboard"
             echo "  --interactive  manual testing (server must be running)"
             echo "  --anthropic    anthropic pass-through interactive"
             echo "  --fewshot      few-shot classifier interactive"
+            echo "  --codex        codex CLI E2E (server + codex CLI must be running)"
             exit 0
             ;;
         *) echo "Unknown flag: $1. Use --help."; exit 2 ;;
@@ -1264,7 +1268,7 @@ run_interactive() {
     echo " Frugalis Interactive Manual Tests"
     echo " Target: $COMPLETION_URL"
     echo " Server must be running: RUST_LOG=info cargo run"
-    echo ""
+    section "Prompt classification"
     local prompts=("COMPLEX_REASONING:architect rate limiter" "FILE_READING:read the content of file main.rs" "SYNTAX_FIX:fix this bug" "CASUAL:hello")
     for test in "${prompts[@]}"; do
         IFS=':' read -r expected prompt <<< "$test"
@@ -1277,14 +1281,14 @@ run_interactive() {
         if [ "$_code" = "200" ]; then printf "${GREEN}PASS${NC} (HTTP %s)\n" "$_code"; PASS=$((PASS+1))
         else printf "${RED}FAIL${NC} (HTTP %s)\n" "$_code"; FAIL=$((FAIL+1)); fi
     done
-    # Auth
+    section "Auth gate"
     printf "[TEST] missing token ... "
     local _code
     _code=$(curl -s -o /dev/null -w "%{http_code}" "$COMPLETION_URL" \
         -H "Content-Type: application/json" -d '{"messages":[{"role":"user","content":"hello"}]}' 2>/dev/null) || true
     if [ "$_code" = "401" ]; then printf "${GREEN}PASS${NC}\n"; PASS=$((PASS+1))
     else printf "${RED}FAIL${NC} (got %s)\n" "$_code"; FAIL=$((FAIL+1)); fi
-    # Streaming
+    section "Streaming"
     printf "[TEST] streaming ... "
     _resp=$(curl -s -w "\n%{http_code}" "$COMPLETION_URL" \
         -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -1299,7 +1303,7 @@ run_anthropic_interactive() {
     echo " Anthropic Pass-Through Interactive Tests"
     echo " Target: $MESSAGES_URL"
     echo " Server must be running."
-    echo ""
+    section "Prompt pass-through"
     local prompts=("fix this bug please" "please read the file src/main.rs" "hello")
     for prompt in "${prompts[@]}"; do
         printf "[TEST] \"%s\" ... " "$prompt"
@@ -1308,15 +1312,16 @@ run_anthropic_interactive() {
             -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
             -d "{\"model\":\"claude-3.5\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}]}" 2>/dev/null) || _resp="ERROR"
         _code=$(printf '%s' "$_resp" | tail -1)
-        if [ "$_code" = "200" ]; then printf "${GREEN}PASS${NC}\n"; PASS=$((PASS+1))
-        else printf "${RED}FAIL${NC} (got %s)\n" "$_code"; FAIL=$((FAIL+1)); fi
+        if [ "$_code" = "200" ]; then printf "${GREEN}PASS${NC} (HTTP %s)\n" "$_code"; PASS=$((PASS+1))
+        else printf "${RED}FAIL${NC} (HTTP %s)\n" "$_code"; FAIL=$((FAIL+1)); fi
     done
-    # Auth + content-type
+    section "Auth gate"
     printf "[TEST] missing token → 401 ... "
     _code=$(curl -s -o /dev/null -w "%{http_code}" "$MESSAGES_URL" -H "Content-Type: application/json" \
         -d '{"model":"claude-3.5","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}' 2>/dev/null) || true
     if [ "$_code" = "401" ]; then printf "${GREEN}PASS${NC}\n"; PASS=$((PASS+1))
     else printf "${RED}FAIL${NC}\n"; FAIL=$((FAIL+1)); fi
+    section "Content-type gate"
     printf "[TEST] non-JSON → 415 ... "
     _code=$(curl -s -o /dev/null -w "%{http_code}" "$MESSAGES_URL" \
         -H "Authorization: Bearer $TOKEN" -H "Content-Type: text/plain" -d 'hello' 2>/dev/null) || true
@@ -1331,9 +1336,9 @@ run_fewshot_interactive() {
     echo ""
     if ! curl -s "http://$HOST/health" > /dev/null 2>&1; then
         echo "Server not running. Start with: RUST_LOG=info cargo run"
-        exit 1
+        return 1
     fi
-    # CASUAL bootstrap
+    section "CASUAL bootstrap"
     local _resp _code _tier _cat
     _resp=$(curl -s -w "\n%{http_code}" "$COMPLETION_URL" \
         -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -1344,7 +1349,7 @@ run_fewshot_interactive() {
     if [ "$_code" = "200" ] && [ "$_tier" = "FewShot" ] && [ "$_cat" = "CASUAL" ]; then
         log_pass "fewshot: bootstrap CASUAL (tier=FewShot)"
     else log_fail "fewshot: expected FewShot/CASUAL, got tier=$_tier cat=$_cat"; fi
-    # Gibberish → Fallback
+    section "Gibberish → Fallback"
     _resp=$(curl -s -w "\n%{http_code}" "$COMPLETION_URL" \
         -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
         -d '{"messages":[{"role":"user","content":"zxcvbnm qwertyuiop asdfghjkl"}]}')
@@ -1352,7 +1357,7 @@ run_fewshot_interactive() {
     _tier=$(printf '%s' "$_resp" | sed '$d' | python3 -c "import sys,json; print(json.load(sys.stdin).get('tier',''))" 2>/dev/null || echo "")
     if [ "$_code" = "200" ] && [ "$_tier" = "Fallback" ]; then log_pass "fewshot: gibberish → Fallback"
     else log_fail "fewshot: expected Fallback, got tier=$_tier"; fi
-    # Regex catches first
+    section "Regex catches first"
     _resp=$(curl -s -w "\n%{http_code}" "$COMPLETION_URL" \
         -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
         -d '{"messages":[{"role":"user","content":"fix this bug"}]}')
@@ -1362,7 +1367,7 @@ run_fewshot_interactive() {
     if [ "$_code" = "200" ] && [ "$_tier" = "Regex" ] && [ "$_cat" = "SYNTAX_FIX" ]; then
         log_pass "fewshot: regex catches SYNTAX_FIX before fewshot"
     else log_fail "fewshot: expected Regex/SYNTAX_FIX, got tier=$_tier cat=$_cat"; fi
-    # Feedback endpoint
+    section "Feedback endpoint"
     _resp=$(curl -s -w "\n%{http_code}" "http://$HOST/v1/feedback" \
         -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
         -d '{"text":"can you explain what a hash map is","actual_category":"CASUAL"}')
@@ -1372,11 +1377,83 @@ run_fewshot_interactive() {
     if [ "$_code" = "200" ] && [ "$_status" = "accepted" ]; then
         log_pass "fewshot: feedback endpoint returns accepted"
     else log_fail "fewshot: feedback expected accepted, got code=$_code status=$_status"; fi
-    # Feedback auth
+    section "Feedback auth"
     _code=$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST/v1/feedback" \
         -H "Content-Type: application/json" -d '{"text":"test","actual_category":"CASUAL"}' 2>/dev/null) || true
     if [ "$_code" = "401" ]; then log_pass "fewshot: feedback requires auth"
     else log_fail "fewshot: feedback expected 401, got $_code"; fi
+}
+
+run_codex_interactive() {
+    echo ""
+    echo " Codex CLI E2E Tests"
+    echo " Server must be running on $HOST with PROXY_API_BEARER_TOKEN set"
+    echo ""
+
+    section "Verify Frugalis health"
+    local _code
+    _code=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" 2>/dev/null || echo "000")
+    if [ "$_code" = "200" ]; then
+        log_pass "Frugalis is running on $HOST"
+    else
+        log_fail "Frugalis not reachable on $HOST (got HTTP $_code)"
+        echo "  Start Frugalis: RUST_LOG=info cargo run"
+        echo "  Then re-run: $0 --codex"
+        return 1
+    fi
+
+    section "Verify /v1/responses endpoint"
+    local _resp _obj
+    _resp=$(curl -sS -w "\n%{http_code}" "$RESPONSES_URL" \
+        -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+        -d '{"model":"gpt-4o","input":"hello"}')
+    _code=$(printf '%s' "$_resp" | tail -1)
+    _obj=$(printf '%s' "$_resp" | sed '$d' | python3 -c "import sys,json; print(json.load(sys.stdin).get('object',''))" 2>/dev/null || echo "")
+    if [ "$_code" = "200" ] && [ "$_obj" = "response" ]; then
+        log_pass "/v1/responses returns valid Response object"
+    else
+        log_fail "/v1/responses expected 200/response, got code=$_code object=$_obj"
+    fi
+
+    _code=$(curl -s -o /dev/null -w "%{http_code}" "$RESPONSES_URL" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"gpt-4o","input":"hello"}' 2>/dev/null) || true
+    if [ "$_code" = "401" ]; then
+        log_pass "/v1/responses requires auth (401 without token)"
+    else
+        log_fail "/v1/responses expected 401, got $_code"
+    fi
+
+    section "Verify Codex CLI"
+    if command -v codex &> /dev/null; then
+        local _ver
+        _ver=$(codex --version 2>/dev/null || echo "unknown")
+        log_pass "Codex CLI found: $_ver"
+
+        echo ""
+        section "Run Codex CLI query through Frugalis"
+        echo "  Provider URL: http://$HOST/v1"
+        if [ "${TOKEN:-}" = "test-token-123" ] || [ -z "${PROXY_API_BEARER_TOKEN:-}" ]; then
+            echo "  Token: $TOKEN (default — set PROXY_API_BEARER_TOKEN for real auth)"
+        else
+            echo "  Token: ${TOKEN:0:4}…(redacted; see \$PROXY_API_BEARER_TOKEN)"
+        fi
+        echo ""
+
+        local _out _exit
+        _out=$(codex "what is 2+2?" 2>&1) || _out=""
+        _exit=$?
+        if [ "$_exit" = "0" ] && echo "$_out" | grep -qi "4"; then
+            log_pass "Codex CLI query succeeded through Frugalis"
+        else
+            log_fail "Codex CLI query failed (exit=$_exit); output: ${_out:0:200}"
+        fi
+    else
+        printf "  ${YELLOW}⚠${NC} Codex CLI not found; skipping end-to-end query\n"
+        echo "  Install: https://github.com/openai/codex"
+        echo "  Then run: codex provider add frugalis http://$HOST/v1 --api-key $TOKEN"
+        echo "  Then: codex 'what is 2+2?'"
+    fi
 }
 
 # ============================================================================
@@ -1518,6 +1595,7 @@ case "$MODE" in
     interactive) run_interactive ;;
     anthropic)   run_anthropic_interactive ;;
     fewshot)     run_fewshot_interactive ;;
+    codex)       run_codex_interactive ;;
     auto)        run_all_automated ;;
 esac
 

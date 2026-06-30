@@ -752,14 +752,12 @@ pub(crate) async fn responses_handler(
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::app::test_helpers::{test_app, test_app_with_anthropic_http_client, test_app_with_cache, test_app_with_openai_responses_http_client};
+    use crate::app::test_helpers::{test_app_with_anthropic_http_client, test_app_with_cache, test_app_with_openai_responses_http_client};
     use crate::test_util::EnvGuard;
     use axum::{
         body::Body,
         http::{header, Request, StatusCode},
     };
-    use httpmock::MockServer;
     use serial_test::serial;
     use tower::util::ServiceExt;
 
