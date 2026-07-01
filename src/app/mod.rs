@@ -136,7 +136,7 @@ pub(crate) fn build_classifiers(
         info!("All classifiers disabled via config");
         return ClassifierBuildResult {
             classifier: None,
-            routing: HashMap::new(),
+            routing: routing_map,
             model_costs,
             baseline_model,
             fewshot_classifier: None,
