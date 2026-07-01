@@ -2,7 +2,8 @@
 
 - **created**: 2026-07-01
 - **updated**: 2026-07-01
-- **status**: impl_reviewed
+- **status**: archived
+- **archived_at**: 2026-07-01T12:00:00Z
 
 ## Summary
 
