@@ -15,6 +15,7 @@ pub struct ClassificationResult {
 pub enum ClassificationTier {
     Regex,
     FewShot,
+    Llm,
     Fallback,
 }
 

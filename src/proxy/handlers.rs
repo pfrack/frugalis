@@ -290,6 +290,24 @@ pub(crate) async fn completion_handler(
         );
     }
 
+    // Defensive guard: classification produced no providers — return intent
+    // info so the client can retry with an explicit routing header instead
+    // of receiving a misleading 502 "all providers failed".
+    if classification.providers.is_empty() {
+        let response_body = crate::proxy::util::classification_only_json(&classification);
+        crate::proxy::util::log_classification(
+            &state,
+            &classification,
+            &body_str,
+            &prompt,
+            start,
+            "ok",
+            1,
+            "",
+        );
+        return crate::proxy::util::json_response(StatusCode::OK, response_body);
+    }
+
     let client = match &state.http_client {
         Some(c) => c,
         None => {
@@ -1101,6 +1119,24 @@ pub(crate) async fn messages_handler(
                 KeyValue::new("tier", format!("{:?}", classification.tier)),
             ],
         );
+    }
+
+    // Defensive guard: classification produced no providers — return intent
+    // info so the client can retry with an explicit routing header instead
+    // of receiving a misleading 502 "all providers failed".
+    if classification.providers.is_empty() {
+        let response_body = crate::proxy::util::classification_only_json(&classification);
+        crate::proxy::util::log_classification(
+            &state,
+            &classification,
+            &body_str,
+            &prompt,
+            start,
+            "ok",
+            1,
+            "",
+        );
+        return crate::proxy::util::json_response(StatusCode::OK, response_body);
     }
 
     let client = match &state.http_client {
@@ -3550,5 +3586,193 @@ mod tests {
         assert!(json.get("stop_reason").and_then(|v| v.as_str()).is_some());
         assert!(json.get("object").is_none(), "OpenAI object field should not leak");
         assert!(json.get("choices").is_none(), "OpenAI choices field should not leak");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_llm_escalation_produces_classification_json() {
+        use crate::classification::chain::test_util::CountingClassifier;
+        use crate::classification::llm::LLMClassifier;
+        use crate::classification::regex::RegexClassifier;
+        use crate::config::types::LlmClassifierConfig;
+        use crate::test_util::EnvGuard;
+        use httpmock::prelude::*;
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicUsize;
+
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let _guard = EnvGuard("OPENAI_API_KEY_ESCALATION");
+        std::env::set_var("OPENAI_API_KEY_ESCALATION", "sk-test");
+
+        // Mock server: LLM classifier endpoint returns SYNTAX_FIX
+        let server = MockServer::start();
+        let llm_mock = server.mock(|when, then| {
+            when.method(POST).path("/v1/chat/completions");
+            then.status(200).json_body(
+                serde_json::json!({"choices": [{"message": {"content": "SYNTAX_FIX"}}]}),
+            );
+        });
+
+        let cats = test_categories();
+        let cats_for_llm = cats.clone();
+
+        // Routing for RegexClassifier (populated, with endpoints pointing at mock)
+        let mut routing = HashMap::new();
+        routing.insert(
+            cats[1].name.clone(),
+            routing::RouteEntry {
+                providers: vec![routing::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: server.url("/v1/chat/completions"),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some("OPENAI_API_KEY_ESCALATION".to_string()),
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        routing.insert(
+            cats[3].name.clone(),
+            routing::RouteEntry {
+                providers: vec![routing::ProviderEntry {
+                    model: "ca-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        let fallback = routing::RouteEntry {
+            providers: vec![routing::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        };
+
+        // Regex classifier — prompt won't match any pattern
+        let regex_classifier = RegexClassifier::from_values(
+            routing,
+            fallback.clone(),
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
+
+        // FewShot stub — always returns Fallback
+        let fewshot_stub = CountingClassifier {
+            counter: Arc::new(AtomicUsize::new(0)),
+            result: crate::classification::types::ClassificationResult::fallback(),
+        };
+
+        // LLM classifier with full routing (post-Phase-1: LLM resolves providers)
+        let mut llm_routing = HashMap::new();
+        llm_routing.insert(
+            "SYNTAX_FIX".to_string(),
+            routing::RouteEntry {
+                providers: vec![routing::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: server.url("/v1/chat/completions"),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some("OPENAI_API_KEY_ESCALATION".to_string()),
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        let llm_config = LlmClassifierConfig {
+            enabled: true,
+            model: "gpt-4o-mini".to_string(),
+            endpoint: server.url("/v1/chat/completions"),
+            api_key_env: "OPENAI_API_KEY_ESCALATION".to_string(),
+            provider_type: "openai_compatible".to_string(),
+            prompt_template_path: None,
+            timeout_secs: 3,
+        };
+        let llm = LLMClassifier::new(
+            llm_config,
+            reqwest::Client::new(),
+            cats_for_llm,
+            Arc::new(vec![]),
+            llm_routing,
+            fallback.clone(),
+        );
+
+        // Build chain: regex → fewshot stub → llm
+        let chain = classification::chain::ClassifierChain::new(vec![
+            Arc::new(regex_classifier),
+            Arc::new(fewshot_stub),
+            Arc::new(llm),
+        ]);
+
+        // Build merged routing from chain backends
+        let mut merged_routing = HashMap::new();
+        for backend in chain.backends().iter() {
+            if let Some(r) = backend.get_routing() {
+                merged_routing.extend(r.clone());
+            }
+        }
+
+        let auth_config = Arc::new(routing::AuthConfig::from_values(
+            "proxy-token",
+            "user",
+            "password",
+        ));
+
+        let app_state = Arc::new(AppState {
+            persistence: None,
+            classifier: Some(Arc::new(chain)),
+            fewshot_classifier: None,
+            routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
+            model_costs: Arc::new(tokio::sync::RwLock::new(
+                routing::ModelCosts::empty(),
+            )),
+            baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
+            classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            http_client: None,
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(10_485_760)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
+            request_body_limit_bytes: 10_485_760,
+            streaming_channel_capacity: 32,
+            dashboard_config: crate::config::types::DashboardConfig::default(),
+            auth_providers: Arc::new(vec![]),
+            allowed_origins: Arc::new(tokio::sync::RwLock::new(vec![])),
+            response_cache: None,
+            #[cfg(feature = "otel")]
+            metrics: None,
+        });
+
+        let app = build_app(auth_config, app_state);
+
+        // Send a prompt that regex won't match — chain escalates to LLM
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"how does the stock market work"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = parse_json_body(response).await;
+        assert_eq!(
+            json.get("category").and_then(|v| v.as_str()),
+            Some("SYNTAX_FIX")
+        );
+        assert_eq!(json.get("tier").and_then(|v| v.as_str()), Some("Llm"));
+        llm_mock.assert_hits(1);
     }
 }
