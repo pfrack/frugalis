@@ -3,8 +3,8 @@ change_id: testing-proxy-translation-contracts
 title: Proxy translation contract tests
 status: impl_reviewed
 created: 2026-06-30
-updated: 2026-06-30
-last_updated_note: "Impl review complete (APPROVED after triage): F1+F2 fixed (894681a, 24b6f43, 7c0b362); report at reviews/impl-review.md; Phase 3 deferred — see follow-ups/review-fixes.md."
+updated: 2026-07-01
+last_updated_note: "Re-review complete (APPROVED after triage): F1+F2+F3 fixed (test rename, .unwrap() cleanup, inline builder consolidation); 439 tests pass; Phase 3 deferred."
 archived_at: null
 ---
 
