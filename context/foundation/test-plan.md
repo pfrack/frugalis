@@ -67,7 +67,7 @@ via `/10x-new`. Status vocabulary (parser literals): `not started` → `change o
 | # | Phase name | Goal (one line) | Risks covered | Test types | Status | Change folder |
 |---|---|---|---|---|---|---|
 | 1 | Proxy translation contract tests | Lock translation correctness for all 3 protocol crossings (OpenAI↔Anthropic bidirectional + Responses→Chat) with known-good reference outputs + streaming edge-case resilience | #1, #4 | integration (translation contract), streaming edge-case | planned | `testing-proxy-translation-contracts` |
-| 2 | Classifier chain routing integrity | Prove the full chain→routing→translation path works across all 5 provider types; chain degradation is detectable without inspecting production traffic | #2, #3 | integration (chain-to-translation e2e with CountingClassifier + httpmock across provider types) | not started | — |
+| 2 | Classifier chain routing integrity | Prove the full chain→routing→translation path works across all 5 provider types; chain degradation is detectable without inspecting production traffic | #2, #3 | integration (chain-to-translation e2e with CountingClassifier + httpmock across provider types) | implementing | `classifier-chain-routing-integrity` |
 | 3 | Persistence + snippet guardrails | Make async logging failure observable (not silent) + prove snippet extraction holds across all 3 backends and against adversarial PII inputs | #5, #6 | integration (unreachable backend), testcontainers cross-backend, property tests | not started | — |
 | 4 | Auth + CI floor + cookbook | Lock constant-time compare invariant at every call site + wire CI gates + update §6 cookbook with patterns shipped in Phases 1–3 | #7 | unit (constant-time compare), grep-based CI guard, CI workflow wiring | not started | — |
 
