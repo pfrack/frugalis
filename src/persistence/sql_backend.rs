@@ -14,6 +14,37 @@ mod embedded {
     embed_migrations!("./migrations");
 }
 
+/// Canonical inferences table DDL — single source of truth.
+///
+/// Used by `init_sqlite_schema()` for in-memory databases and verified
+/// against migration files in tests to catch schema drift.
+const INFERENCES_TABLE_DDL: &str = "\
+    CREATE TABLE IF NOT EXISTS inferences (\
+        request_id TEXT PRIMARY KEY, \
+        status TEXT NOT NULL, \
+        category TEXT, \
+        upstream_model TEXT, \
+        duration_ms INTEGER, \
+        created_at TEXT NOT NULL, \
+        prompt_snippet TEXT, \
+        prompt_char_count INTEGER, \
+        provider_attempts SMALLINT DEFAULT 1, \
+        final_provider TEXT, \
+        input_tokens INTEGER, \
+        output_tokens INTEGER, \
+        cache_read_tokens INTEGER, \
+        cache_creation_tokens INTEGER, \
+        client_session_id TEXT, \
+        previous_response_id TEXT, \
+        codex_installation_id TEXT, \
+        codex_turn_state TEXT, \
+        codex_window_id TEXT, \
+        codex_turn_metadata TEXT)";
+
+const INFERENCES_INDEX_DDL: &str = "\
+    CREATE INDEX IF NOT EXISTS inferences_created_at_idx \
+    ON inferences (created_at DESC)";
+
 /// Column identifiers for the `inferences` table.
 #[derive(Iden)]
 enum Inferences {
@@ -193,40 +224,15 @@ impl SqlBackend {
             _ => return Err("init_sqlite_schema called on non-SQLite backend".to_string()),
         };
 
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS inferences (\
-              request_id TEXT PRIMARY KEY, \
-              status TEXT NOT NULL, \
-              category TEXT, \
-              upstream_model TEXT, \
-              duration_ms INTEGER, \
-              created_at TEXT NOT NULL, \
-              prompt_snippet TEXT, \
-              prompt_char_count INTEGER, \
-              provider_attempts SMALLINT DEFAULT 1, \
-              final_provider TEXT, \
-              input_tokens INTEGER, \
-              output_tokens INTEGER, \
-              cache_read_tokens INTEGER, \
-              cache_creation_tokens INTEGER, \
-              client_session_id TEXT, \
-              previous_response_id TEXT, \
-              codex_installation_id TEXT, \
-              codex_turn_state TEXT, \
-              codex_window_id TEXT, \
-              codex_turn_metadata TEXT)",
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| format!("failed to initialize SQLite schema: {e}"))?;
+        sqlx::query(INFERENCES_TABLE_DDL)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("failed to initialize SQLite schema: {e}"))?;
 
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS inferences_created_at_idx \
-             ON inferences(created_at DESC)",
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| format!("failed to create SQLite index: {e}"))?;
+        sqlx::query(INFERENCES_INDEX_DDL)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("failed to create SQLite index: {e}"))?;
 
         Ok(())
     }
@@ -1142,6 +1148,116 @@ mod tests {
                 pg_log.timestamp.starts_with("1970-01-01 00:00:00"),
                 "timestamp should be epoch: got {}",
                 pg_log.timestamp
+            );
+        }
+    }
+
+    #[test]
+    fn test_schema_constant_matches_migrations() {
+        // Run migrations on an in-memory database via rusqlite (same path as file-based SQLite)
+        let mut migrations_conn = rusqlite::Connection::open_in_memory()
+            .expect("open migrations db");
+        embedded::migrations::runner()
+            .run(&mut migrations_conn)
+            .expect("run migrations");
+
+        // Run init_sqlite_schema() DDL on another in-memory database via sqlx
+        let rt = tokio::runtime::Runtime::new().expect("create runtime");
+        let constant_db = rt.block_on(async {
+            let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+                .await
+                .expect("connect constant db");
+            sqlx::query(INFERENCES_TABLE_DDL)
+                .execute(&pool)
+                .await
+                .expect("execute constant DDL");
+            sqlx::query(INFERENCES_INDEX_DDL)
+                .execute(&pool)
+                .await
+                .expect("execute constant index DDL");
+            pool
+        });
+
+        // Compare column names and types using PRAGMA table_info
+        #[derive(Debug, PartialEq)]
+        struct ColInfo {
+            name: String,
+            col_type: String,
+        }
+
+        let migrations_cols: Vec<ColInfo> = {
+            let mut stmt = migrations_conn
+                .prepare("PRAGMA table_info(inferences)")
+                .expect("prepare migrations pragma");
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(ColInfo {
+                        name: row.get(1)?,
+                        col_type: row.get(2)?,
+                    })
+                })
+                .expect("query migrations pragma");
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        let constant_cols: Vec<ColInfo> = rt.block_on(async {
+            let rows: Vec<(i32, String, String, i32, Option<String>, i32)> =
+                sqlx::query_as("PRAGMA table_info(inferences)")
+                    .fetch_all(&constant_db)
+                    .await
+                    .expect("fetch constant schema");
+            rows.into_iter()
+                .map(|r| ColInfo {
+                    name: r.1.clone(),
+                    col_type: r.2.clone(),
+                })
+                .collect()
+        });
+
+        assert_eq!(
+            migrations_cols.len(),
+            constant_cols.len(),
+            "column count mismatch: migrations={}, constant={}",
+            migrations_cols.len(),
+            constant_cols.len()
+        );
+
+        for (m, c) in migrations_cols.iter().zip(constant_cols.iter()) {
+            assert_eq!(
+                m.name, c.name,
+                "column name mismatch: migrations='{}', constant='{}'",
+                m.name, c.name
+            );
+            assert_eq!(
+                m.col_type, c.col_type,
+                "column type mismatch for '{}': migrations='{}', constant='{}'",
+                m.name, m.col_type, c.col_type
+            );
+        }
+
+        // Compare index definitions
+        let migrations_idx: Vec<(String, String)> = {
+            let mut stmt = migrations_conn
+                .prepare("SELECT name, sql FROM sqlite_master WHERE type='index' AND name='inferences_created_at_idx'")
+                .expect("prepare migrations index query");
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("query migrations index");
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        let constant_idx: Vec<(String, String)> = rt.block_on(async {
+            sqlx::query_as("SELECT name, sql FROM sqlite_master WHERE type='index' AND name='inferences_created_at_idx'")
+                .fetch_all(&constant_db)
+                .await
+                .expect("fetch constant index")
+        });
+
+        assert_eq!(migrations_idx.len(), constant_idx.len(), "index count mismatch");
+        if !migrations_idx.is_empty() {
+            assert_eq!(
+                migrations_idx[0].1, constant_idx[0].1,
+                "index DDL mismatch"
             );
         }
     }

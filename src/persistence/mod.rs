@@ -110,6 +110,22 @@ mod tests {
         semaphore: Arc<tokio::sync::Semaphore>,
         http_client: Option<reqwest::Client>,
     ) -> (Router, httpmock::MockServer) {
+        build_app_with_persistence_backend_custom(
+            backend,
+            semaphore,
+            http_client,
+            "proxy-token",
+            "MOCK_API_KEY",
+        )
+    }
+
+    pub(crate) fn build_app_with_persistence_backend_custom(
+        backend: Arc<DbBackend>,
+        semaphore: Arc<tokio::sync::Semaphore>,
+        http_client: Option<reqwest::Client>,
+        auth_token: &str,
+        api_key_env: &str,
+    ) -> (Router, httpmock::MockServer) {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         use std::collections::HashMap;
         let cats = test_categories();
@@ -121,7 +137,7 @@ mod tests {
                 .expect("test reqwest client should build")
         });
         let auth_config = Arc::new(routing::AuthConfig::from_values(
-            "proxy-token",
+            auth_token,
             "user",
             "password",
         ));
@@ -134,7 +150,7 @@ mod tests {
                     model: "sf-model".to_string(),
                     endpoint: endpoint.clone(),
                     provider_type: "openai_compatible".to_string(),
-                    api_key_env: Some("MOCK_API_KEY".to_string()),
+                    api_key_env: Some(api_key_env.to_string()),
                     timeout_ms: None,
                 }],
                 cost_per_1m_input_tokens: None,
@@ -147,7 +163,7 @@ mod tests {
                     model: "ca-model".to_string(),
                     endpoint,
                     provider_type: "openai_compatible".to_string(),
-                    api_key_env: Some("MOCK_API_KEY".to_string()),
+                    api_key_env: Some(api_key_env.to_string()),
                     timeout_ms: None,
                 }],
                 cost_per_1m_input_tokens: None,
@@ -384,36 +400,20 @@ mod tests {
     }
 
     mod proptest_snippet {
-        use crate::proxy::util::redact_pii;
+        use crate::proxy::util::{redact_pii, PII_PATTERNS};
         use proptest::prelude::*;
 
         proptest! {
             #[test]
-            fn proptest_snippet_free_of_email(text in ".*") {
+            fn proptest_redacted_snippet_free_of_pii(text in ".*") {
                 let redacted = redact_pii(&text);
-                let re = regex::Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}").unwrap();
-                prop_assert!(!re.is_match(&redacted), "email pattern found in redacted output");
-            }
-
-            #[test]
-            fn proptest_snippet_free_of_ssn(text in ".*") {
-                let redacted = redact_pii(&text);
-                let re = regex::Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").unwrap();
-                prop_assert!(!re.is_match(&redacted), "SSN pattern found in redacted output");
-            }
-
-            #[test]
-            fn proptest_snippet_free_of_phone(text in ".*") {
-                let redacted = redact_pii(&text);
-                let re = regex::Regex::new(r"(?x)\b(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}\b").unwrap();
-                prop_assert!(!re.is_match(&redacted), "phone pattern found in redacted output");
-            }
-
-            #[test]
-            fn proptest_snippet_free_of_credit_card(text in ".*") {
-                let redacted = redact_pii(&text);
-                let re = regex::Regex::new(r"\b(?:\d[ -]*?){13,19}\b").unwrap();
-                prop_assert!(!re.is_match(&redacted), "credit card pattern found in redacted output");
+                for (pattern, _) in PII_PATTERNS.iter() {
+                    prop_assert!(
+                        !pattern.is_match(&redacted),
+                        "PII pattern matched in redacted output: {:?}",
+                        pattern.as_str()
+                    );
+                }
             }
 
             #[test]
@@ -426,10 +426,8 @@ mod tests {
             #[test]
             fn proptest_redaction_preserves_non_pii_text(text in "[a-zA-Z0-9 ,.!?;:'\"-]{0,500}") {
                 let redacted = redact_pii(&text);
-                let re = regex::Regex::new(
-                    r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|\b(?:\d[ -]*?){13,19}\b|\b\d{3}-\d{2}-\d{4}\b|(?x)\b(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}\b"
-                ).unwrap();
-                if !re.is_match(&text) {
+                let has_pii = PII_PATTERNS.iter().any(|(p, _)| p.is_match(&text));
+                if !has_pii {
                     prop_assert_eq!(&redacted, &text, "non-PII text was modified");
                 }
             }
@@ -683,6 +681,75 @@ mod tests {
         assert_eq!(mem_log.previous_response_id, sql_log.previous_response_id);
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn test_cross_backend_identity_with_pii_redaction() {
+        use crate::proxy::util::redact_pii;
+
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+
+        let mut record = reference_inference_record();
+        let pii_snippet = "fix this bug and contact me at user@example.com about order #123-45-6789";
+        record.prompt_snippet = redact_pii(pii_snippet);
+        record.prompt_char_count = Some(record.prompt_snippet.len() as i32);
+        let filter_category = record.category.as_deref();
+
+        let memory_backend = memory::MemoryBackend::new();
+        let mem_backend = Arc::new(DbBackend::Memory(memory_backend));
+        mem_backend
+            .insert_inference(&record)
+            .await
+            .expect("memory insert should succeed");
+
+        let sqlite_backend = sql_backend::SqlBackend::new_sqlite_in_memory()
+            .await
+            .expect("SQLite in-memory backend should be created");
+        let sql_backend = Arc::new(DbBackend::Sql(sqlite_backend));
+        sql_backend
+            .insert_inference(&record)
+            .await
+            .expect("SQLite insert should succeed");
+
+        let (mem_records, mem_count) = mem_backend
+            .fetch_inferences(0, 10, filter_category, None)
+            .await
+            .expect("memory fetch should succeed");
+        let (sql_records, sql_count) = sql_backend
+            .fetch_inferences(0, 10, filter_category, None)
+            .await
+            .expect("SQLite fetch should succeed");
+
+        assert_eq!(mem_count, sql_count, "record counts should match");
+        assert_eq!(mem_count, 1, "expected exactly 1 record");
+
+        let mem_log = &mem_records[0];
+        let sql_log = &sql_records[0];
+
+        // Verify PII was redacted (no email, no SSN)
+        assert!(
+            !mem_log.prompt_snippet.contains("user@example.com"),
+            "email should be redacted in memory backend"
+        );
+        assert!(
+            !sql_log.prompt_snippet.contains("user@example.com"),
+            "email should be redacted in SQLite backend"
+        );
+        assert!(
+            !mem_log.prompt_snippet.contains("123-45-6789"),
+            "SSN should be redacted in memory backend"
+        );
+        assert!(
+            !sql_log.prompt_snippet.contains("123-45-6789"),
+            "SSN should be redacted in SQLite backend"
+        );
+
+        // Verify redacted snippets match across backends
+        assert_eq!(
+            mem_log.prompt_snippet, sql_log.prompt_snippet,
+            "redacted snippets should be identical across backends"
+        );
+    }
+
     // ── Phase 1 continued: OTel guard test ──────────────────────────────
 
     #[cfg(feature = "otel")]
@@ -716,93 +783,21 @@ mod tests {
             .with(tracing_subscriber::fmt::layer().with_test_writer());
         let _guard2 = tracing::subscriber::set_default(subscriber);
 
-        let cats = test_categories();
-        let server = httpmock::MockServer::start();
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .expect("test reqwest client should build");
-        let auth_config = Arc::new(routing::AuthConfig::from_values(
-            "proxy-token-otel", "user", "password",
-        ));
-        let endpoint = server.url("/v1/chat/completions");
-        let mut routing_map = HashMap::new();
-        routing_map.insert(
-            cats[1].name.clone(),
-            routing::RouteEntry {
-                providers: vec![routing::ProviderEntry {
-                    model: "sf-model".to_string(),
-                    endpoint: endpoint.clone(),
-                    provider_type: "openai_compatible".to_string(),
-                    api_key_env: Some("MOCK_API_KEY_OTEL".to_string()),
-                    timeout_ms: None,
-                }],
-                cost_per_1m_input_tokens: None,
-            },
-        );
-        let fallback = routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
-                model: "fallback-model".to_string(),
-                endpoint: String::new(),
-                provider_type: String::new(),
-                api_key_env: None,
-                timeout_ms: None,
-            }],
-            cost_per_1m_input_tokens: None,
-        };
-        let regex_classifier = classification::regex::RegexClassifier::from_values(
-            routing_map.clone(),
-            fallback,
-            30,
-            cats,
-            &test_negative_patterns(),
-        );
-        let classifier_chain =
-            classification::chain::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
-        let classifier_arc = Some(Arc::new(classifier_chain));
-        let mut merged_routing = HashMap::new();
-        if let Some(cls) = classifier_arc.as_ref() {
-            for backend_ref in cls.backends().iter() {
-                if let Some(r) = backend_ref.get_routing() {
-                    merged_routing.extend(r.clone());
-                }
-            }
-        }
-
-        let marker = "UNIQUE_OTEL_MARKER_" + &uuid::Uuid::new_v4().to_string();
-        let prompt_body = format!("fix this bug and contact me at user@example.com about {}", marker);
-
         let memory_backend = crate::persistence::memory::MemoryBackend::new();
+        let records_handle = memory_backend.records.clone();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
         let backend = Arc::new(crate::persistence::DbBackend::Memory(memory_backend));
 
-        let app_state = Arc::new(app::AppState {
-            persistence: Some(crate::persistence::PersistenceConfig {
-                backend,
-                task_semaphore: semaphore,
-            }),
-            classifier: classifier_arc,
-            fewshot_classifier: None,
-            routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
-            model_costs: Arc::new(tokio::sync::RwLock::new(
-                routing::ModelCosts::empty(),
-            )),
-            baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
-            classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            http_client: Some(client),
-            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(10_485_760)),
-            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
-            request_body_limit_bytes: 10_485_760,
-            streaming_channel_capacity: 32,
-            dashboard_config: config::types::DashboardConfig::default(),
-            auth_providers: Arc::new(vec![]),
-            allowed_origins: Arc::new(tokio::sync::RwLock::new(vec![])),
-            response_cache: None,
-            #[cfg(feature = "otel")]
-            metrics: None,
-        });
+        let (app, server) = build_app_with_persistence_backend_custom(
+            backend,
+            semaphore,
+            None,
+            "proxy-token-otel",
+            "MOCK_API_KEY_OTEL",
+        );
 
-        let app = app::build_app(auth_config, app_state);
+        let marker = "UNIQUE_OTEL_MARKER_" + &uuid::Uuid::new_v4().to_string();
+        let prompt_body = format!("fix this bug and contact me at user@example.com about {}", marker);
 
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
