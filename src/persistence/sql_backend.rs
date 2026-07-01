@@ -1019,7 +1019,7 @@ mod tests {
 
     mod slow_tests {
         use super::*;
-        use crate::persistence::InferenceRecord;
+        use crate::persistence::{reference_inference_record, InferenceRecord};
 
         /// Start a fresh Postgres testcontainer and return its URL + container
         /// handle. The container stays alive while the caller holds the handle.
@@ -1091,6 +1091,58 @@ mod tests {
                 .expect("fetch should succeed");
             assert_eq!(count, 1, "expected 1 record after refinery insert");
             assert_eq!(records[0].prompt_snippet, "postgres refinery test");
+        }
+
+        /// Cross-backend identity test for Postgres: inserts the canonical
+        /// reference record and verifies that the fetched `InferenceLog` matches
+        /// the expected values from the memory/SQLite identity test.
+        ///
+        /// Uses the same `reference_inference_record()` that the memory/SQLite
+        /// test uses, ensuring all three backends test identical input.
+        ///
+        /// Skips gracefully when Docker is unavailable.
+        #[tokio::test]
+        async fn test_cross_backend_identity_postgres() {
+            let Some((url, _container)) = fresh_postgres().await else {
+                eprintln!("SKIP: Docker Postgres container unavailable");
+                return;
+            };
+
+            let backend = SqlBackend::connect(&url, &crate::config::types::DatabaseConfig::default())
+                .await
+                .expect("Postgres backend should connect");
+
+            let record = reference_inference_record();
+            let filter_category = record.category.as_deref();
+
+            backend
+                .insert_inference(&record)
+                .await
+                .expect("Postgres insert should succeed");
+
+            let (records, count) = backend
+                .fetch_inferences(0, 10, filter_category, None)
+                .await
+                .expect("Postgres fetch should succeed");
+
+            assert_eq!(count, 1, "expected exactly 1 record");
+            let pg_log = &records[0];
+
+            // Assert all fields match the expected values from reference_inference_record()
+            assert_eq!(pg_log.prompt_snippet, "reference record for cross-backend identity test");
+            assert_eq!(pg_log.category, Some("SYNTAX_FIX".to_string()));
+            assert_eq!(pg_log.upstream_model, Some("claude-sonnet-4".to_string()));
+            assert_eq!(pg_log.duration_ms, Some(1234));
+            assert_eq!(pg_log.provider_attempts, Some(2));
+            assert_eq!(pg_log.final_provider, Some("anthropic".to_string()));
+            assert_eq!(pg_log.previous_response_id, Some("prev-456".to_string()));
+
+            // Timestamp should be "1970-01-01 00:00:00" (epoch, no UTC suffix for Postgres)
+            assert!(
+                pg_log.timestamp.starts_with("1970-01-01 00:00:00"),
+                "timestamp should be epoch: got {}",
+                pg_log.timestamp
+            );
         }
     }
 }

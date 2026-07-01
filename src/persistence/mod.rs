@@ -58,6 +58,36 @@ pub fn log_inference(
     })
 }
 
+/// Canonical test record for cross-backend identity tests.
+/// All three backends (memory, SQLite, Postgres) insert this exact record
+/// and the tests assert identical `InferenceLog` fields on fetch.
+#[cfg(test)]
+pub(crate) fn reference_inference_record() -> InferenceRecord {
+    InferenceRecord {
+        request_id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
+            .expect("static UUID should parse"),
+        status: "ok".to_string(),
+        category: Some("SYNTAX_FIX".to_string()),
+        upstream_model: Some("claude-sonnet-4".to_string()),
+        duration_ms: Some(1234),
+        prompt_snippet: "reference record for cross-backend identity test".to_string(),
+        prompt_char_count: Some(57),
+        created_at: chrono::DateTime::from_timestamp(0, 0).expect("epoch should be valid"),
+        provider_attempts: 2,
+        final_provider: "anthropic".to_string(),
+        input_tokens: Some(150),
+        output_tokens: Some(200),
+        cache_read_tokens: Some(50),
+        cache_creation_tokens: Some(10),
+        client_session_id: Some("session-123".to_string()),
+        previous_response_id: Some("prev-456".to_string()),
+        codex_installation_id: Some("inst-789".to_string()),
+        codex_turn_state: Some("turn-active".to_string()),
+        codex_window_id: Some("win-012".to_string()),
+        codex_turn_metadata: Some(r#"{"key":"value"}"#.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,6 +622,65 @@ mod tests {
 
         let records = records_handle.read().await;
         assert_eq!(records.len(), 0);
+    }
+
+    // ── Phase 3: Cross-Backend Identity Tests ─────────────────────────
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cross_backend_identity_memory_sqlite() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+
+        let record = reference_inference_record();
+        let filter_category = record.category.as_deref();
+
+        let memory_backend = memory::MemoryBackend::new();
+        let mem_backend = Arc::new(DbBackend::Memory(memory_backend));
+        mem_backend
+            .insert_inference(&record)
+            .await
+            .expect("memory insert should succeed");
+
+        let sqlite_backend = sql_backend::SqlBackend::new_sqlite_in_memory()
+            .await
+            .expect("SQLite in-memory backend should be created");
+        let sql_backend = Arc::new(DbBackend::Sql(sqlite_backend));
+        sql_backend
+            .insert_inference(&record)
+            .await
+            .expect("SQLite insert should succeed");
+
+        let (mem_records, mem_count) = mem_backend
+            .fetch_inferences(0, 10, filter_category, None)
+            .await
+            .expect("memory fetch should succeed");
+        let (sql_records, sql_count) = sql_backend
+            .fetch_inferences(0, 10, filter_category, None)
+            .await
+            .expect("SQLite fetch should succeed");
+
+        assert_eq!(mem_count, sql_count, "record counts should match");
+        assert_eq!(mem_count, 1, "expected exactly 1 record");
+
+        let mem_log = &mem_records[0];
+        let sql_log = &sql_records[0];
+
+        // Timestamp format differs between backends (Memory: "1970-01-01 00:00:00 UTC",
+        // SQLite: "1970-01-01 00:00:00"), so compare the time portion separately.
+        assert!(
+            mem_log.timestamp.starts_with(&sql_log.timestamp),
+            "timestamps should match in date/time portion: mem={}, sql={}",
+            mem_log.timestamp,
+            sql_log.timestamp
+        );
+
+        assert_eq!(mem_log.prompt_snippet, sql_log.prompt_snippet);
+        assert_eq!(mem_log.category, sql_log.category);
+        assert_eq!(mem_log.upstream_model, sql_log.upstream_model);
+        assert_eq!(mem_log.duration_ms, sql_log.duration_ms);
+        assert_eq!(mem_log.provider_attempts, sql_log.provider_attempts);
+        assert_eq!(mem_log.final_provider, sql_log.final_provider);
+        assert_eq!(mem_log.previous_response_id, sql_log.previous_response_id);
     }
 
     // ── Phase 1 continued: OTel guard test ──────────────────────────────
