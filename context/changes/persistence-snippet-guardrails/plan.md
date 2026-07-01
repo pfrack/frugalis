@@ -444,9 +444,9 @@ task outside Phase 3.
 
 #### Automated
 
-- [x] 2.1 `cargo test test_log_inference_failure_unreachable_backend` — passes
-- [x] 2.2 `cargo test test_log_inference_failure_semaphore_exhausted` — passes
-- [x] 2.3 `cargo test test_log_classification_failure_does_not_block_response` — still passes
+- [x] 2.1 `cargo test test_log_inference_failure_unreachable_backend` — passes — 4abc7a8
+- [x] 2.2 `cargo test test_log_inference_failure_semaphore_exhausted` — passes — 4abc7a8
+- [x] 2.3 `cargo test test_log_classification_failure_does_not_block_response` — still passes — 4abc7a8
 
 #### Manual
 
@@ -457,8 +457,8 @@ task outside Phase 3.
 
 #### Automated
 
-- [ ] 3.1 `cargo test test_cross_backend_identity_memory_sqlite` — passes
-- [ ] 3.2 `cargo test slow_tests` — Postgres identity test passes (or skips gracefully)
+- [x] 3.1 `cargo test test_cross_backend_identity_memory_sqlite` — passes — 511be52
+- [x] 3.2 `cargo test slow_tests` — Postgres identity test passes (or skips gracefully) — 511be52
 
 #### Manual
 
