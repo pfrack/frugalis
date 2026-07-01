@@ -4,7 +4,7 @@ project: frugalis
 version: 1
 status: draft
 created: 2026-05-26
-updated: 2026-06-26
+updated: 2026-07-01
 prd_version: 1
 main_goal: speed
 top_blocker: time
@@ -61,7 +61,7 @@ Autonomous agents currently forward prompts to expensive models without intent-a
 | S-18 | claude-code-compat | forward anthropic-beta/anthropic-version/x-claude-code-* headers + translate cache_control prompt-caching across all protocol crossings + Anthropic /v1/models shape | S-01e, S-15 | FR-003 | done |
 | S-19 | add-response-cache | semantic + exact-match response caching to cut repeat-prompt cost | S-01e | FR-003, NFR (cost) | done |
 | S-20 | provider-retry-backoff | same-provider retries with exponential backoff + cooldowns on top of the S-17 cascade | S-17 | FR-003, NFR (resilience) | proposed |
-| S-21 | codex-responses-api | `/v1/responses` (OpenAI Responses API) shim so modern Codex CLI can use Frugalis | S-01e, S-15 | FR-003 | proposed |
+| S-21 | codex-responses-api | `/v1/responses` (OpenAI Responses API) shim so modern Codex CLI can use Frugalis | S-01e, S-15 | FR-003 | done |
 | S-22 | agent-trace-spans | OpenInference span semantics (tokens/cost/prompt I/O) so OTel export feeds Phoenix/Langfuse multi-step traces | S-11 | FR-005 | proposed |
 | S-23 | slice-cost-analytics | per-user/session/feature/model cost breakdowns replacing the single savings-vs-baseline number | S-18, S-02 | FR-007 | proposed |
 | S-24 | guardrails | PII redaction, prompt-injection detection, JSON-schema validation, deny semantics | S-01e | NFR (security) | proposed |
@@ -526,7 +526,7 @@ Foundations below assume these are present and do NOT re-scaffold them.
 - **Blockers:** —
 - **Unknowns:** Full Responses API fidelity vs a Chat-Completions-backed shim sufficient for Codex CLI's streaming/tool-call paths — owner: planning. Block: yes.
 - **Risk:** Medium-High — Responses API has its own event/streaming model and reasoning-item semantics; the stateful SSE emitter is the most complex piece (mirrors the S-16 risk profile).
-- **Status:** proposed
+- **Status:** done
 
 ### S-22: Agent trace spans — OpenInference semantics
 
@@ -739,6 +739,7 @@ All roadmap items are active or completed; no currently parked items.
 - **S-13: Move All Config to File** — Zero hardcoded configuration in Rust — everything lives in `config.toml`. Environment variables reduced to strictly secrets. — Archived 2026-06-11 → `context/archive/2026-06-10-move-all-config-to-file/`. Lesson: —.
 
 - **S-14: Config Format Upgrade — Multi-Format + External Patterns** — Upgrade Frugalis's configuration system to support both YAML and TOML formats (via serde derives) and externalize regex patterns into pattern files. Users can choose configuration format (YAML favored by DevOps, TOML for Rust-native). Regex patterns live in separate `*.patterns` files with `weight | regex` format, eliminating escaping issues. Fully backward compatible with existing `config.toml`. Adds CLI tools: `--validate` checks config and patterns; `--migrate-config` converts old configs to YAML + pattern files. — Archived 2026-06-13 → `context/archive/2026-06-11-config-format-upgrade/`. Lesson: —.
+- **S-21: A new `POST /v1/responses` endpoint implements the OpenAI Responses API so modern Codex CLI (which now speaks only `responses`, not Chat Completions) can use Frugalis. Implemented as a translation layer on top of the existing `/v1/chat/completions` core (reasoning items ↔ `reasoning_content`, tool-call items ↔ `tool_calls`, SSE event translation).** — Archived 2026-07-01 → `context/archive/2026-06-30-codex-responses-api/`. Lesson: —.
 
 ---
 
