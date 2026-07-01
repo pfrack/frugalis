@@ -443,11 +443,3 @@ pub async fn parse_json_body(response: axum::response::Response) -> serde_json::
         .unwrap_or_else(|e| panic!("response body should be JSON: {e}; body={:?}", body_bytes))
 }
 
-/// Read a response body as a UTF-8 string. Use for SSE / text / non-JSON bodies
-/// where `parse_json_body` would panic on `serde_json::from_slice`.
-pub async fn body_to_string(response: axum::response::Response) -> String {
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body should be readable");
-    String::from_utf8(body_bytes.to_vec()).expect("response body should be UTF-8")
-}
