@@ -1,11 +1,11 @@
 ---
 change_id: testing-proxy-translation-contracts
 title: Proxy translation contract tests
-status: archived
+status: impl_reviewed
 created: 2026-06-30
 updated: 2026-07-01
 last_updated_note: "Re-review complete (APPROVED after triage): F1+F2+F3 fixed (test rename, .unwrap() cleanup, inline builder consolidation); 439 tests pass; Phase 3 deferred."
-archived_at: 2026-07-01T06:50:29Z
+archived_at: null
 ---
 
 ## Notes
