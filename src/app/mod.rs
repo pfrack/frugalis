@@ -193,6 +193,8 @@ pub(crate) fn build_classifiers(
                                 http_client.clone(),
                                 categories.clone(),
                                 auth_providers.clone(),
+                                routing_map.clone(),
+                                fallback_entry.clone(),
                             );
                     info!(
                         "LLM classifier enabled: model={}, endpoint={}",

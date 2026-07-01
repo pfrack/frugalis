@@ -513,8 +513,8 @@ mod tests {
             cost_per_1m_input_tokens: None,
         };
         let regex_classifier = crate::classification::regex::RegexClassifier::from_values(
-            routing,
-            fallback,
+            routing.clone(),
+            fallback.clone(),
             30,
             cats,
             &test_negative_patterns(),
@@ -540,6 +540,8 @@ mod tests {
             reqwest::Client::new(),
             cats_for_llm,
             Arc::new(vec![]),
+            routing,
+            fallback,
         );
 
         let chain = ClassifierChain::new(vec![
@@ -550,7 +552,7 @@ mod tests {
         let result = chain.classify("this is a long prompt that exercises the chain's escalation path from regex through fewshot to the llm tier").await;
 
         assert_eq!(result.category, "SYNTAX_FIX");
-        assert_eq!(result.tier, ClassificationTier::Regex);
+        assert_eq!(result.tier, ClassificationTier::Llm);
         assert_eq!(fewshot_counter.load(Ordering::SeqCst), 1);
         llm_mock.assert_hits(1);
     }

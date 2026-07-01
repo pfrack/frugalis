@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -6,6 +7,7 @@ use crate::classification::chain::IntentClassify;
 use crate::classification::types::{ClassificationResult, ClassificationTier};
 use crate::config::types::CategoryConfig;
 use crate::config::types::{AuthProviderConfig, LlmClassifierConfig};
+use crate::routing::RouteEntry;
 
 /// LLM-based intent classifier that fires when RegexClassifier returns Fallback.
 pub struct LLMClassifier {
@@ -20,6 +22,8 @@ pub struct LLMClassifier {
     prompt_template: String,
     timeout: std::time::Duration,
     task_handle: tokio::task::AbortHandle,
+    routing: HashMap<String, RouteEntry>,
+    fallback_entry: RouteEntry,
 }
 
 impl Drop for LLMClassifier {
@@ -36,6 +40,8 @@ impl LLMClassifier {
         client: reqwest::Client,
         categories: Vec<CategoryConfig>,
         auth_providers: Arc<Vec<AuthProviderConfig>>,
+        routing: HashMap<String, RouteEntry>,
+        fallback_entry: RouteEntry,
     ) -> Self {
         let prompt_template = if let Some(ref path) = config.prompt_template_path {
             match std::fs::read_to_string(path) {
@@ -93,6 +99,8 @@ impl LLMClassifier {
             prompt_template,
             timeout: std::time::Duration::from_secs(config.timeout_secs),
             task_handle,
+            routing,
+            fallback_entry,
         }
     }
 
@@ -185,11 +193,12 @@ impl LLMClassifier {
                 let response_upper = response_text.to_uppercase();
                 for cat in &self.categories {
                     if response_upper.trim() == cat.name.to_uppercase() {
+                        let route = self.routing.get(&cat.name.to_uppercase()).unwrap_or(&self.fallback_entry);
                         return ClassificationResult {
                             category: cat.name.clone(),
-                            model: self.model.clone(),
-                            tier: ClassificationTier::Regex,
-                            providers: vec![],
+                            model: route.primary().model.clone(),
+                            tier: ClassificationTier::Llm,
+                            providers: route.providers.clone(),
                         };
                     }
                 }
@@ -217,7 +226,7 @@ impl IntentClassify for LLMClassifier {
     fn get_routing(
         &self,
     ) -> Option<&std::collections::HashMap<String, crate::routing::RouteEntry>> {
-        None
+        Some(&self.routing)
     }
 }
 
@@ -344,7 +353,21 @@ mod tests {
     use super::*;
     use crate::classification::types::ClassificationTier;
     use crate::config::types::AuthProviderConfig;
+    use crate::routing::ProviderEntry;
     use serial_test::serial;
+
+    fn fallback_entry() -> RouteEntry {
+        RouteEntry {
+            providers: vec![ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        }
+    }
 
     fn default_auth_providers() -> Vec<AuthProviderConfig> {
         vec![
@@ -614,11 +637,11 @@ mod tests {
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
 
-        let llm = LLMClassifier::new(config, client, cats, Arc::new(vec![]));
+        let llm = LLMClassifier::new(config, client, cats, Arc::new(vec![]), HashMap::new(), fallback_entry());
         let result = llm.classify("fix this bug").await;
 
         assert_eq!(result.category, "SYNTAX_FIX");
-        assert_eq!(result.tier, ClassificationTier::Regex);
+        assert_eq!(result.tier, ClassificationTier::Llm);
     }
 
     #[tokio::test]
@@ -648,7 +671,7 @@ mod tests {
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
 
-        let llm = LLMClassifier::new(config, client, cats, Arc::new(vec![]));
+        let llm = LLMClassifier::new(config, client, cats, Arc::new(vec![]), HashMap::new(), fallback_entry());
         let result = llm.classify("test").await;
 
         assert_eq!(result.tier, ClassificationTier::Fallback);
@@ -672,7 +695,7 @@ mod tests {
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
 
-        let llm = LLMClassifier::new(config, client, cats, Arc::new(vec![]));
+        let llm = LLMClassifier::new(config, client, cats, Arc::new(vec![]), HashMap::new(), fallback_entry());
         let result = llm.classify("test").await;
 
         assert_eq!(result.tier, ClassificationTier::Fallback);
@@ -712,7 +735,7 @@ mod tests {
         let client = reqwest::Client::new();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
 
-        let llm = LLMClassifier::new(config, client, cats, Arc::new(vec![]));
+        let llm = LLMClassifier::new(config, client, cats, Arc::new(vec![]), HashMap::new(), fallback_entry());
         let result = llm.classify("test").await;
 
         assert_eq!(result.tier, ClassificationTier::Fallback);
