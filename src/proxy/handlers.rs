@@ -1959,7 +1959,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_completion_no_enriched_fields_with_missing_env() {
+        let _guard = EnvGuard("MISSING_KEY_XYZ");
+        std::env::remove_var("MISSING_KEY_XYZ");
         let response = test_app_with_enriched_classifier("test_provider", Some("MISSING_KEY_XYZ"))
             .oneshot(
                 Request::builder()
@@ -1983,7 +1986,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_classify_no_enriched_fields() {
+        let _guard = EnvGuard("TEST_API_KEY");
+        std::env::set_var("TEST_API_KEY", "sk-test-value-123");
         let response = test_app_with_enriched_classifier("test_provider", Some("TEST_API_KEY"))
             .oneshot(
                 Request::builder()
@@ -3172,70 +3178,13 @@ mod tests {
         assert!(json.get("model").and_then(|v| v.as_str()).is_some());
     }
 
-    fn test_app_with_openai_translation(env_var_name: &str) -> (Router, httpmock::MockServer) {
-        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-        use std::collections::HashMap;
-        let cats = test_categories();
-        let server = httpmock::MockServer::start();
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .expect("test reqwest client should build");
-        let auth_config = Arc::new(routing::AuthConfig::from_values(
-            "proxy-token",
-            "user",
-            "password",
-        ));
-        let endpoint = server.url("/v1/chat/completions");
-        let mut routing = HashMap::new();
-        routing.insert(
-            cats[1].name.clone(),
-            routing::RouteEntry {
-                providers: vec![routing::ProviderEntry {
-                    model: "gpt-4o".to_string(),
-                    endpoint: endpoint.clone(),
-                    provider_type: "openai_compatible".to_string(),
-                    api_key_env: Some(env_var_name.to_string()),
-                    timeout_ms: None,
-                }],
-                cost_per_1m_input_tokens: None,
-            },
-        );
-        let fallback = routing::RouteEntry {
-            providers: vec![routing::ProviderEntry {
-                model: "fallback-model".to_string(),
-                endpoint: String::new(),
-                provider_type: String::new(),
-                api_key_env: None,
-                timeout_ms: None,
-            }],
-            cost_per_1m_input_tokens: None,
-        };
-        let regex_classifier = classification::regex::RegexClassifier::from_values(
-            routing,
-            fallback,
-            30,
-            cats,
-            &test_negative_patterns(),
-        );
-        let app_state = make_test_app_state(
-            regex_classifier,
-            Some(client),
-            routing::ModelCosts::empty(),
-            String::new(),
-            10_485_760,
-        );
-        let app = build_app(auth_config, app_state);
-        (app, server)
-    }
-
     #[tokio::test]
     #[serial]
     async fn test_messages_handler_openai_translation_strips_cache_control() {
         let env = "TEST_A2O_NO_CACHE";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-openai-test");
-        let (app, server) = test_app_with_openai_translation(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let canary = server.mock(|when, then| {
             when.method("POST")
                 .path("/v1/chat/completions")
@@ -3285,7 +3234,7 @@ mod tests {
         let env = "TEST_A2O_NS";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-openai-test");
-        let (app, server) = test_app_with_openai_translation(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions").header("authorization", "Bearer sk-openai-test");
             then.status(200).header("content-type", "application/json")
@@ -3302,26 +3251,27 @@ mod tests {
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(body.get("type").unwrap().as_str().unwrap(), "message");
-        assert_eq!(body.get("role").unwrap().as_str().unwrap(), "assistant");
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("response should be valid JSON");
+        assert_eq!(body.get("type").and_then(|v| v.as_str()), Some("message"), "response type should be 'message'");
+        assert_eq!(body.get("role").and_then(|v| v.as_str()), Some("assistant"), "response role should be 'assistant'");
         assert_eq!(
-            body.get("stop_reason").unwrap().as_str().unwrap(),
-            "end_turn"
+            body.get("stop_reason").and_then(|v| v.as_str()),
+            Some("end_turn"),
+            "stop_reason should be 'end_turn'"
         );
-        let content = body.get("content").unwrap().as_array().unwrap();
+        let content = body.get("content").and_then(|v| v.as_array()).expect("content should be an array");
         assert!(!content.is_empty());
         assert_eq!(
             content[0].get("type").and_then(|v| v.as_str()),
             Some("text")
         );
         assert_eq!(
-            content[0].get("text").unwrap().as_str().unwrap(),
+            content[0].get("text").and_then(|v| v.as_str()).expect("content[0].text should be a string"),
             "Hello from OpenAI"
         );
-        let usage = body.get("usage").unwrap();
-        assert_eq!(usage.get("input_tokens").unwrap().as_u64().unwrap(), 10);
-        assert_eq!(usage.get("output_tokens").unwrap().as_u64().unwrap(), 5);
+        let usage = body.get("usage").expect("usage should be present");
+        assert_eq!(usage.get("input_tokens").and_then(|v| v.as_u64()), Some(10));
+        assert_eq!(usage.get("output_tokens").and_then(|v| v.as_u64()), Some(5));
         assert!(
             body.get("object").is_none(),
             "OpenAI 'object' field should not leak into Anthropic response"
@@ -3334,11 +3284,11 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn test_messages_handler_openai_translation_request_body() {
+    async fn test_messages_handler_anthropic_request_translation_body_shape() {
         let env = "TEST_A2O_REQ_BODY";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-openai-test");
-        let (app, server) = test_app_with_openai_translation(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let positive = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions")
                 .header("Authorization", "Bearer sk-openai-test")
@@ -3370,7 +3320,7 @@ mod tests {
         let env = "TEST_A2O_STREAM";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-openai-test");
-        let (app, server) = test_app_with_openai_translation(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let sse_body = "data: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
@@ -3411,7 +3361,7 @@ mod tests {
         let env = "TEST_A2O_ERR";
         let _guard = EnvGuard(env);
         std::env::set_var(env, "sk-openai-test");
-        let (app, server) = test_app_with_openai_translation(env);
+        let (app, server) = test_app_with_http_client(env, 10_485_760);
         let mock = server.mock(|when, then| {
             when.method("POST").path("/v1/chat/completions");
             then.status(429).header("content-type", "application/json")
@@ -3549,8 +3499,7 @@ mod tests {
         assert_eq!(no_thinking.hits(), 0, "translated body should not contain Anthropic-specific fields");
         assert_eq!(positive.hits(), 1);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let json = parse_json_body(response).await;
         assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("message"));
         assert_eq!(json.get("role").and_then(|v| v.as_str()), Some("assistant"));
         let content = json.get("content").and_then(|v| v.as_array()).expect("content array");
@@ -3588,8 +3537,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(positive.hits(), 1);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let json = parse_json_body(response).await;
         assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("message"));
         assert_eq!(json.get("role").and_then(|v| v.as_str()), Some("assistant"));
         let content = json.get("content").and_then(|v| v.as_array()).expect("content array");

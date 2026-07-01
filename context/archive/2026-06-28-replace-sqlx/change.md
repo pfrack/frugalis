@@ -1,9 +1,10 @@
 ---
 id: replace-sqlx
 title: Replace sqlx with a better database library
-status: impl_reviewed
+status: archived
 created: 2026-06-28
-updated: 2026-06-29
+updated: 2026-07-01
+archived_at: 2026-07-01T11:20:20Z
 ---
 
 # Replace sqlx
