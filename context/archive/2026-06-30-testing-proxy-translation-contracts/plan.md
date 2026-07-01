@@ -455,8 +455,8 @@ All tests in this plan are integration tests — they exercise the full handler 
 
 #### Manual
 
-- [ ] 1.4 Harnesses follow `test_app_with_anthropic_http_client` pattern (AppState fields, auth config, routing entries)
-- [ ] 1.5 Provider type strings correct in routing entries
+- [x] 1.4 Harnesses follow `test_app_with_anthropic_http_client` pattern (AppState fields, auth config, routing entries)
+- [x] 1.5 Provider type strings correct in routing entries
 
 ### Phase 2: Anthropic + OpenAI-Compatible Body-Contract Tests
 
@@ -472,8 +472,8 @@ All tests in this plan are integration tests — they exercise the full handler 
 
 #### Manual
 
-- [ ] 2.8 Structural assertions survive model name/ID changes (no hardcoded model IDs)
-- [ ] 2.9 Streaming tests work with single-chunk httpmock delivery
+- [x] 2.8 Structural assertions survive model name/ID changes (no hardcoded model IDs)
+- [x] 2.9 Streaming tests work with single-chunk httpmock delivery
 
 ### Phase 3: Remaining Provider Types + Full Responses Coverage
 
@@ -498,6 +498,6 @@ All tests in this plan are integration tests — they exercise the full handler 
 
 #### Manual
 
-- [ ] 3.17 Two-stage streaming produces correct event ordering
-- [ ] 3.18 NIM sanitization test verifies field removal without hardcoded positions
-- [ ] 3.19 Cache-hit test response_id stable across repeated requests
+- [x] 3.17 Two-stage streaming produces correct event ordering
+- [x] 3.18 NIM sanitization test verifies field removal without hardcoded positions
+- [x] 3.19 Cache-hit test response_id stable across repeated requests
