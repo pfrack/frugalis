@@ -1,6 +1,8 @@
 use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
+use regex::Regex;
+use std::sync::LazyLock;
 use tracing::debug;
 
 use crate::app::AppState;
@@ -316,6 +318,23 @@ pub(crate) fn log_classification_with_usage_and_prev(
      );
 }
 
+static PII_PATTERNS: LazyLock<Vec<(Regex, &str)>> = LazyLock::new(|| {
+    vec![
+        (Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}").unwrap(), "[email redacted]"),
+        (Regex::new(r"\b(?:\d[ -]*?){13,19}\b").unwrap(), "[credit card redacted]"),
+        (Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").unwrap(), "[ssn redacted]"),
+        (Regex::new(r"(?x)\b(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}\b").unwrap(), "[phone redacted]"),
+    ]
+});
+
+pub(crate) fn redact_pii(s: &str) -> String {
+    let mut result = s.to_string();
+    for (pattern, replacement) in PII_PATTERNS.iter() {
+        result = pattern.replace_all(&result, *replacement).to_string();
+    }
+    result
+}
+
 /// Build the InferenceRecord (with optional token usage + session id) and
 /// enqueue the fire-and-forget DB write. Shared by `log_classification` and
 /// `log_classification_with_usage` so the two public entry points cannot drift.
@@ -340,7 +359,8 @@ pub(crate) fn enqueue_inference_record(
         let duration_ms = start.elapsed().as_millis() as i32;
         // Snippet is the 200-char privacy-safe truncation of the FULL prompt,
         // not the body — bodies may contain system prompts, tool calls, etc.
-        let snippet: String = prompt.chars().take(200).collect();
+        let redacted = redact_pii(prompt);
+        let snippet: String = redacted.chars().take(200).collect();
         let prompt_char_count = if prompt.is_empty() {
             None
         } else {

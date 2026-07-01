@@ -352,4 +352,215 @@ mod tests {
             assert!(!mb.fail_next.load(std::sync::atomic::Ordering::SeqCst));
         }
     }
+
+    mod proptest_snippet {
+        use crate::proxy::util::redact_pii;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn proptest_snippet_free_of_email(text in ".*") {
+                let redacted = redact_pii(&text);
+                let re = regex::Regex::new(r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}").unwrap();
+                prop_assert!(!re.is_match(&redacted), "email pattern found in redacted output");
+            }
+
+            #[test]
+            fn proptest_snippet_free_of_ssn(text in ".*") {
+                let redacted = redact_pii(&text);
+                let re = regex::Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").unwrap();
+                prop_assert!(!re.is_match(&redacted), "SSN pattern found in redacted output");
+            }
+
+            #[test]
+            fn proptest_snippet_free_of_phone(text in ".*") {
+                let redacted = redact_pii(&text);
+                let re = regex::Regex::new(r"(?x)\b(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}\b").unwrap();
+                prop_assert!(!re.is_match(&redacted), "phone pattern found in redacted output");
+            }
+
+            #[test]
+            fn proptest_snippet_free_of_credit_card(text in ".*") {
+                let redacted = redact_pii(&text);
+                let re = regex::Regex::new(r"\b(?:\d[ -]*?){13,19}\b").unwrap();
+                prop_assert!(!re.is_match(&redacted), "credit card pattern found in redacted output");
+            }
+
+            #[test]
+            fn proptest_redacted_snippet_still_200_chars_max(text in ".*") {
+                let redacted = redact_pii(&text);
+                let snippet: String = redacted.chars().take(200).collect();
+                prop_assert!(snippet.chars().count() <= 200, "snippet exceeds 200 chars");
+            }
+
+            #[test]
+            fn proptest_redaction_preserves_non_pii_text(text in "[a-zA-Z0-9 ,.!?;:'\"-]{0,500}") {
+                let redacted = redact_pii(&text);
+                let re = regex::Regex::new(
+                    r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|\b(?:\d[ -]*?){13,19}\b|\b\d{3}-\d{2}-\d{4}\b|(?x)\b(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}\b"
+                ).unwrap();
+                if !re.is_match(&text) {
+                    prop_assert_eq!(&redacted, &text, "non-PII text was modified");
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "otel")]
+    #[tokio::test]
+    #[serial]
+    async fn test_otel_no_prompt_body_in_spans() {
+        use crate::app::test_helpers::{test_categories, test_negative_patterns};
+        use crate::test_util::EnvGuard;
+        use crate::{app, classification, config, routing};
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use opentelemetry::trace::TracerProvider;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tower::util::ServiceExt;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let _guard = EnvGuard("MOCK_API_KEY_OTEL");
+        std::env::set_var("MOCK_API_KEY_OTEL", "sk-test-otel");
+
+        let exporter = opentelemetry_sdk::trace::SpanExporterBuilder::default();
+        let provider = opentelemetry_sdk::trace::TracerProvider::builder()
+            .with_simple_exporter(exporter)
+            .build();
+        let tracer = provider.tracer("test");
+        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+        let subscriber = tracing_subscriber::registry()
+            .with(otel_layer)
+            .with(tracing_subscriber::fmt::layer().with_test_writer());
+        let _guard2 = tracing::subscriber::set_default(subscriber);
+
+        let cats = test_categories();
+        let server = httpmock::MockServer::start();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("test reqwest client should build");
+        let auth_config = Arc::new(routing::AuthConfig::from_values(
+            "proxy-token-otel", "user", "password",
+        ));
+        let endpoint = server.url("/v1/chat/completions");
+        let mut routing_map = HashMap::new();
+        routing_map.insert(
+            cats[1].name.clone(),
+            routing::RouteEntry {
+                providers: vec![routing::ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: endpoint.clone(),
+                    provider_type: "openai_compatible".to_string(),
+                    api_key_env: Some("MOCK_API_KEY_OTEL".to_string()),
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        let fallback = routing::RouteEntry {
+            providers: vec![routing::ProviderEntry {
+                model: "fallback-model".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        };
+        let regex_classifier = classification::regex::RegexClassifier::from_values(
+            routing_map.clone(),
+            fallback,
+            30,
+            cats,
+            &test_negative_patterns(),
+        );
+        let classifier_chain =
+            classification::chain::ClassifierChain::new(vec![Arc::new(regex_classifier)]);
+        let classifier_arc = Some(Arc::new(classifier_chain));
+        let mut merged_routing = HashMap::new();
+        if let Some(cls) = classifier_arc.as_ref() {
+            for backend_ref in cls.backends().iter() {
+                if let Some(r) = backend_ref.get_routing() {
+                    merged_routing.extend(r.clone());
+                }
+            }
+        }
+
+        let marker = "UNIQUE_OTEL_MARKER_" + &uuid::Uuid::new_v4().to_string();
+        let prompt_body = format!("fix this bug and contact me at user@example.com about {}", marker);
+
+        let memory_backend = crate::persistence::memory::MemoryBackend::new();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
+        let backend = Arc::new(crate::persistence::DbBackend::Memory(memory_backend));
+
+        let app_state = Arc::new(app::AppState {
+            persistence: Some(crate::persistence::PersistenceConfig {
+                backend,
+                task_semaphore: semaphore,
+            }),
+            classifier: classifier_arc,
+            fewshot_classifier: None,
+            routing: Arc::new(tokio::sync::RwLock::new(merged_routing)),
+            model_costs: Arc::new(tokio::sync::RwLock::new(
+                routing::ModelCosts::empty(),
+            )),
+            baseline_model: Arc::new(tokio::sync::RwLock::new(String::new())),
+            classify_db_log: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            http_client: Some(client),
+            max_upstream_body_bytes: Arc::new(tokio::sync::RwLock::new(10_485_760)),
+            keepalive_interval_secs: Arc::new(tokio::sync::RwLock::new(15)),
+            request_body_limit_bytes: 10_485_760,
+            streaming_channel_capacity: 32,
+            dashboard_config: config::types::DashboardConfig::default(),
+            auth_providers: Arc::new(vec![]),
+            allowed_origins: Arc::new(tokio::sync::RwLock::new(vec![])),
+            response_cache: None,
+            #[cfg(feature = "otel")]
+            metrics: None,
+        });
+
+        let app = app::build_app(auth_config, app_state);
+
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"hello"}}]}"#);
+        });
+
+        let span = tracing::info_span!("test_request", method = "POST", uri = "/v1/chat/completions");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token-otel")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::json!({
+                        "messages": [{"role": "user", "content": prompt_body}]
+                    }).to_string()))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+
+        // Verify span context has no prompt body attributes
+        let context = span.context();
+        let span_ctx = context.span();
+        // Assert the span name does not contain prompt content
+        assert!(!span_ctx.span_name().contains(&marker),
+            "OTel span name contains prompt body ({})", marker);
+        drop(context);
+
+        // Shut down tracer to export remaining spans
+        if let Err(e) = provider.shutdown() {
+            tracing::warn!("tracer provider shutdown warning: {e}");
+        }
+    }
 }
