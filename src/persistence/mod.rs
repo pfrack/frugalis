@@ -406,6 +406,196 @@ mod tests {
         }
     }
 
+    // ── Phase 2: Persistence Failure Observability ─────────────────────
+
+    #[tokio::test]
+    #[serial]
+    async fn test_log_inference_failure_unreachable_backend() {
+        use std::io::Write;
+        use std::sync::Mutex;
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        use tracing_subscriber::EnvFilter;
+        use tracing_subscriber::Layer;
+
+        let buf: Arc<Mutex<Vec<u8>>> = Default::default();
+        let buf_cap = buf.clone();
+
+        let _guard_sub = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(move || {
+                        struct Cap(Arc<Mutex<Vec<u8>>>);
+                        impl Write for Cap {
+                            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                                self.0.lock().unwrap().extend_from_slice(b);
+                                Ok(b.len())
+                            }
+                            fn flush(&mut self) -> std::io::Result<()> {
+                                Ok(())
+                            }
+                        }
+                        Cap(buf_cap.clone())
+                    })
+                    .with_filter(EnvFilter::new("error")),
+            )
+            .with(tracing_subscriber::fmt::layer().with_test_writer())
+            .set_default();
+
+        let _guard = EnvGuard("MOCK_API_KEY");
+        std::env::set_var("MOCK_API_KEY", "sk-test");
+
+        let memory_backend = memory::MemoryBackend::new();
+        memory_backend
+            .fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
+        let backend = Arc::new(DbBackend::Memory(memory_backend));
+        let (app, server) = build_app_with_persistence_backend(backend.clone(), semaphore, None);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"hello"}}]}"#);
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion should succeed even when insert fails");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+
+        let poll_start = std::time::Instant::now();
+        let poll_timeout = std::time::Duration::from_secs(5);
+        loop {
+            match backend.as_ref() {
+                DbBackend::Memory(mb) => {
+                    if !mb.fail_next.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
+                }
+                _ => panic!("test fixture invariant: backend must be DbBackend::Memory"),
+            }
+            if poll_start.elapsed() >= poll_timeout {
+                panic!("log task did not consume fail_next within 5s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let locked = buf.lock().unwrap();
+        let output = String::from_utf8_lossy(&locked);
+        assert!(
+            output.contains("final insert failure"),
+            "Expected error log to contain 'final insert failure', got: {output}"
+        );
+        drop(locked);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_log_inference_failure_semaphore_exhausted() {
+        use std::io::Write;
+        use std::sync::Mutex;
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        use tracing_subscriber::EnvFilter;
+        use tracing_subscriber::Layer;
+
+        let buf: Arc<Mutex<Vec<u8>>> = Default::default();
+        let buf_cap = buf.clone();
+
+        let _guard_sub = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(move || {
+                        struct Cap(Arc<Mutex<Vec<u8>>>);
+                        impl Write for Cap {
+                            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                                self.0.lock().unwrap().extend_from_slice(b);
+                                Ok(b.len())
+                            }
+                            fn flush(&mut self) -> std::io::Result<()> {
+                                Ok(())
+                            }
+                        }
+                        Cap(buf_cap.clone())
+                    })
+                    .with_filter(EnvFilter::new("error")),
+            )
+            .with(tracing_subscriber::fmt::layer().with_test_writer())
+            .set_default();
+
+        let _guard = EnvGuard("MOCK_API_KEY");
+        std::env::set_var("MOCK_API_KEY", "sk-test");
+
+        let memory_backend = memory::MemoryBackend::new();
+        let records_handle = memory_backend.records.clone();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(0));
+        let test_sem = semaphore.clone();
+        let backend = Arc::new(DbBackend::Memory(memory_backend));
+        let (app, server) = build_app_with_persistence_backend(backend.clone(), semaphore, None);
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1/chat/completions");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":[{"message":{"content":"hello"}}]}"#);
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::AUTHORIZATION, "Bearer proxy-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"fix this bug"}]}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("completion should succeed even when semaphore is exhausted");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        mock.assert();
+        drop(response);
+
+        test_sem.close();
+
+        let poll_start = std::time::Instant::now();
+        let poll_timeout = std::time::Duration::from_secs(5);
+        loop {
+            {
+                let locked = buf.lock().unwrap();
+                let output = String::from_utf8_lossy(&locked);
+                if output.contains("semaphore closed") {
+                    break;
+                }
+            }
+            if poll_start.elapsed() >= poll_timeout {
+                panic!("Expected 'semaphore closed' error log within 5s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let records = records_handle.read().await;
+        assert_eq!(records.len(), 0);
+    }
+
+    // ── Phase 1 continued: OTel guard test ──────────────────────────────
+
     #[cfg(feature = "otel")]
     #[tokio::test]
     #[serial]

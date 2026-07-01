@@ -427,12 +427,12 @@ task outside Phase 3.
 
 #### Automated
 
-- [x] 1.1 `cargo test` — existing tests pass
-- [x] 1.2 `cargo test proptest` — property tests pass
-- [x] 1.3 `cargo test test_snippet_path_truncates_to_200_chars` — passes with redaction
-- [x] 1.4 `cargo test test_snippet_path_does_not_contain_full_prompt` — passes
-- [x] 1.5 `cargo test test_log_classification_failure_does_not_block_response` — passes
-- [x] 1.6 `cargo build --release` — compiles without warnings
+- [x] 1.1 `cargo test` — existing tests pass — 13974a5
+- [x] 1.2 `cargo test proptest` — property tests pass — 13974a5
+- [x] 1.3 `cargo test test_snippet_path_truncates_to_200_chars` — passes with redaction — 13974a5
+- [x] 1.4 `cargo test test_snippet_path_does_not_contain_full_prompt` — passes — 13974a5
+- [x] 1.5 `cargo test test_log_classification_failure_does_not_block_response` — passes — 13974a5
+- [x] 1.6 `cargo build --release` — compiles without warnings — 13974a5
 
 #### Manual
 
@@ -444,9 +444,9 @@ task outside Phase 3.
 
 #### Automated
 
-- [ ] 2.1 `cargo test test_log_inference_failure_unreachable_backend` — passes
-- [ ] 2.2 `cargo test test_log_inference_failure_semaphore_exhausted` — passes
-- [ ] 2.3 `cargo test test_log_classification_failure_does_not_block_response` — still passes
+- [x] 2.1 `cargo test test_log_inference_failure_unreachable_backend` — passes
+- [x] 2.2 `cargo test test_log_inference_failure_semaphore_exhausted` — passes
+- [x] 2.3 `cargo test test_log_classification_failure_does_not_block_response` — still passes
 
 #### Manual
 
