@@ -325,7 +325,7 @@ FewShotClassifier looks up categories in `self.routing` without normalizing case
 
 #### Automated
 
-- [x] 3.1 `cargo build` compiles
-- [x] 3.2 `cargo test fewshot` — existing + casing test pass
-- [x] 3.3 `cargo test` — full suite passes
-- [x] 3.4 `cargo clippy` — clean
+- [x] 3.1 `cargo build` compiles — 360598c
+- [x] 3.2 `cargo test fewshot` — existing + casing test pass — 360598c
+- [x] 3.3 `cargo test` — full suite passes — 360598c
+- [x] 3.4 `cargo clippy` — clean — 360598c
