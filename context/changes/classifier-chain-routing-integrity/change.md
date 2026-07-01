@@ -1,7 +1,7 @@
 ---
 change_id: classifier-chain-routing-integrity
 title: Classifier chain routing integrity
-status: implemented
+status: implementing
 created: 2026-07-01
 updated: 2026-07-01
 archived_at: null
