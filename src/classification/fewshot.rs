@@ -332,7 +332,7 @@ impl IntentClassify for FewShotClassifier {
         let td = self.training_data.read().await;
 
         if let Some((category, _confidence)) = self.exact_match_in(&preprocessed, &td) {
-            let route = self.routing.get(&category).unwrap_or(&self.fallback_entry);
+            let route = self.routing.get(&category.to_uppercase()).unwrap_or(&self.fallback_entry);
             return ClassificationResult {
                 category,
                 model: route.primary().model.clone(),
@@ -351,7 +351,7 @@ impl IntentClassify for FewShotClassifier {
 
         match best {
             Some((category, score)) if score >= threshold => {
-                let route = self.routing.get(&category).unwrap_or(&self.fallback_entry);
+                let route = self.routing.get(&category.to_uppercase()).unwrap_or(&self.fallback_entry);
                 ClassificationResult {
                     category,
                     model: route.primary().model.clone(),
@@ -552,5 +552,55 @@ mod tests {
                 .await;
         }
         assert!(!classifier.vocabulary.read().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fewshot_routing_uppercases_category_name() {
+        use crate::routing::ProviderEntry;
+
+        let config = make_config();
+        let mut routing = HashMap::new();
+        routing.insert(
+            "SYNTAX_FIX".to_string(),
+            RouteEntry {
+                providers: vec![ProviderEntry {
+                    model: "sf-model".to_string(),
+                    endpoint: String::new(),
+                    provider_type: String::new(),
+                    api_key_env: None,
+                    timeout_ms: None,
+                }],
+                cost_per_1m_input_tokens: None,
+            },
+        );
+        let fallback = RouteEntry {
+            providers: vec![ProviderEntry {
+                model: "fallback".to_string(),
+                endpoint: String::new(),
+                provider_type: String::new(),
+                api_key_env: None,
+                timeout_ms: None,
+            }],
+            cost_per_1m_input_tokens: None,
+        };
+        let classifier = FewShotClassifier::new(config, routing, fallback);
+
+        // Add feedback with lowercase category name to training data
+        classifier
+            .add_feedback(
+                "this code has a syntax bug".to_string(),
+                None,
+                "syntax_fix".to_string(),
+                0.8,
+            )
+            .await;
+
+        // Classify with the exact same prompt — exact match returns lowercase
+        // category "syntax_fix". Routing lookup must uppercase it to match the
+        // routing key "SYNTAX_FIX" and populate providers.
+        let result = classifier.classify("this code has a syntax bug").await;
+        assert_eq!(result.category, "syntax_fix");
+        assert_eq!(result.tier, ClassificationTier::FewShot);
+        assert!(!result.providers.is_empty(), "providers should be populated via uppercased routing lookup");
     }
 }
