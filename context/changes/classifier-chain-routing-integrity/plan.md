@@ -298,10 +298,10 @@ FewShotClassifier looks up categories in `self.routing` without normalizing case
 
 #### Automated
 
-- [x] 1.1 `cargo build` compiles with new enum variant and LLMClassifier signature
-- [x] 1.2 `cargo test classification` — all module tests pass
-- [x] 1.3 `cargo test` — full suite passes
-- [x] 1.4 `cargo clippy` — clean
+- [x] 1.1 `cargo build` compiles with new enum variant and LLMClassifier signature — f640993
+- [x] 1.2 `cargo test classification` — all module tests pass — f640993
+- [x] 1.3 `cargo test` — full suite passes — f640993
+- [x] 1.4 `cargo clippy` — clean — f640993
 
 #### Manual
 
@@ -311,10 +311,10 @@ FewShotClassifier looks up categories in `self.routing` without normalizing case
 
 #### Automated
 
-- [ ] 2.1 `cargo build` compiles
-- [ ] 2.2 `cargo test test_llm_escalation_produces_classification_json` — new integration test passes
-- [ ] 2.3 `cargo test` — full suite passes
-- [ ] 2.4 `cargo clippy` — clean
+- [x] 2.1 `cargo build` compiles
+- [x] 2.2 `cargo test test_llm_escalation_produces_classification_json` — new integration test passes
+- [x] 2.3 `cargo test` — full suite passes
+- [x] 2.4 `cargo clippy` — clean
 
 #### Manual
 
